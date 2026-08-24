@@ -7,7 +7,6 @@ import { ContentScreen } from '@/screens/ContentScreen';
 import { InboxScreen } from '@/screens/InboxScreen';
 import { MoreScreen } from '@/screens/MoreScreen';
 import { AnalyticsScreen } from '@/screens/AnalyticsScreen';
-import { LeadHunterErrorBoundary, LeadHunterScreen, LeadManagementScreen } from '@/modules/lead-hunter';
 
 type Tab = 'home' | 'create' | 'content' | 'analytics' | 'inbox' | 'more';
 
@@ -45,11 +44,9 @@ export type AppShellProps = {
 export function AppShell() {
   const { workspace } = useAuth();
   const [tab, setTab] = useState<Tab>(() => tabFromPath(window.location.pathname));
-  const [path, setPath] = useState(() => window.location.pathname);
 
   useEffect(() => {
     const handlePopState = () => {
-      setPath(window.location.pathname);
       setTab(tabFromPath(window.location.pathname));
     };
     window.addEventListener('popstate', handlePopState);
@@ -57,28 +54,11 @@ export function AppShell() {
   }, []);
 
   const openPath = (nextPath: string) => {
-    setPath(nextPath);
     setTab(tabFromPath(nextPath));
     if (window.location.pathname !== nextPath) window.history.pushState({}, '', nextPath);
   };
 
   const navigate = (nextTab: Tab) => openPath(TAB_PATHS[nextTab]);
-
-  if (path === '/app/leads') {
-    return (
-      <LeadHunterErrorBoundary>
-        <LeadHunterScreen onBack={() => openPath('/app/accounts')} onOpenManagement={() => openPath('/app/leads/manage')} />
-      </LeadHunterErrorBoundary>
-    );
-  }
-
-  if (path === '/app/leads/manage') {
-    return (
-      <LeadHunterErrorBoundary>
-        <LeadManagementScreen onBack={() => openPath('/app/leads')} />
-      </LeadHunterErrorBoundary>
-    );
-  }
 
   const screens: Record<Tab, ReactNode> = {
     home: <HomeScreen onNavigate={navigate} />,
@@ -86,7 +66,7 @@ export function AppShell() {
     content: <ContentScreen />,
     analytics: <AnalyticsScreen />,
     inbox: <InboxScreen />,
-    more: <MoreScreen onOpenLeadHunter={() => openPath('/app/leads')} />,
+    more: <MoreScreen />,
   };
 
   return (

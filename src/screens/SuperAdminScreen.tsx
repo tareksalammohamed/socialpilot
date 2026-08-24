@@ -6,7 +6,6 @@ import {
 import { Card, Button, Badge, Input, Select, ScreenLoader, ErrorBanner } from '@/components/ui';
 import { aiAdmin, socialAdmin } from '@/lib/superAdmin';
 import type { AiProvider, AiProviderKey, AiModel, AiRoutingPolicyValue, AiUsageSummary, SocialPlatformApp, SocialPlatformAppKey } from '@/lib/types';
-import { LeadHunterAdminPanel } from '@/modules/lead-hunter/components/LeadHunterAdminPanel';
 
 const PROVIDER_KEYS: AiProviderKey[] = [
   'openrouter', 'huggingface', 'groq', 'gemini', 'cerebras', 'deepseek',
@@ -45,7 +44,6 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
   const [socialEditingKey, setSocialEditingKey] = useState<SocialPlatformAppKey | null>(null);
   const [socialAppIdInput, setSocialAppIdInput] = useState('');
   const [socialAppSecretInput, setSocialAppSecretInput] = useState('');
-  const [showLeadHunter, setShowLeadHunter] = useState(false);
 
   async function loadAll() {
     setLoading(true);
@@ -212,8 +210,6 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     await aiAdmin.setRoutingPolicy(policy.policy, next);
   }
 
-  if (showLeadHunter) return <LeadHunterAdminPanel onBack={() => setShowLeadHunter(false)} />;
-
   if (loading) return <ScreenLoader fullScreen label="جارٍ تحميل AI Control Center..." />;
 
   return (
@@ -230,16 +226,6 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
           <ErrorBanner message={error} />
         </div>
       )}
-
-      <Card onClick={() => setShowLeadHunter(true)} className="mb-5 border-brand-500/25">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand-500/15 flex items-center justify-center"><span className="text-xl">🎯</span></div>
-            <div><p className="text-ink-100 text-sm font-semibold">Lead Hunter</p><p className="text-ink-500 text-xs mt-1">إدارة مصادر العملاء والـJobs والـAI والحدود والسجلات</p></div>
-          </div>
-          <ChevronRight size={18} className="text-ink-500" />
-        </div>
-      </Card>
 
       {/* Usage summary */}
       {usage && (

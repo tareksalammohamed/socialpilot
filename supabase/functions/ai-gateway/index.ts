@@ -18,8 +18,7 @@ type Intent =
   | 'analyze_performance'
   | 'suggest_ideas'
   | 'general_advice'
-  | 'understand_lead_query'
-  | 'research_agent_reasoning';
+;
 
 type RequestBody = {
   intent: Intent;
@@ -28,11 +27,6 @@ type RequestBody = {
   message: string;
   platforms?: string[];
   context?: Record<string, unknown>;
-  // Set only by trusted server-to-server callers authenticating with the
-  // service role key (see authorize() below) — e.g. the Lead Hunter
-  // research loop, which runs as a background job with no live user
-  // session of its own. Ignored/unused on normal user-token requests.
-  onBehalfOfUserId?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -57,37 +51,12 @@ function jsonError(status: number, error: string): Response {
   );
 }
 
-async function authorize(req: Request, workspaceId: string, onBehalfOfUserId?: string): Promise<{ ok: true; userId: string } | { ok: false; response: Response }> {
+async function authorize(req: Request, workspaceId: string): Promise<{ ok: true; userId: string } | { ok: false; response: Response }> {
   const authHeader = req.headers.get('Authorization') ?? '';
   const token = authHeader.replace(/^Bearer\s+/i, '');
 
   if (!token) {
     return { ok: false, response: jsonError(401, 'Missing authentication token') };
-  }
-
-  // Trusted internal server-to-server calls (currently only the Lead
-  // Hunter research loop background job — see lead-hunter/index.ts
-  // buildAiCaller) authenticate with the service role key instead of a
-  // user JWT, because a queued job has no live user session to read a
-  // token from. This key never reaches a browser — only edge functions
-  // hold it — so this is additive, not a weaker path for real users.
-  // The caller must still name a real, workspace-member user so ai_runs
-  // attribution and workspace scoping stay accurate.
-  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-  if (serviceRoleKey && token === serviceRoleKey) {
-    if (!onBehalfOfUserId) {
-      return { ok: false, response: jsonError(400, 'onBehalfOfUserId is required for service-role calls') };
-    }
-    const { data: membership } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', workspaceId)
-      .eq('user_id', onBehalfOfUserId)
-      .maybeSingle();
-    if (!membership) {
-      return { ok: false, response: jsonError(403, 'onBehalfOfUserId is not a member of this workspace') };
-    }
-    return { ok: true, userId: onBehalfOfUserId };
   }
 
   const { data: userData, error: userError } = await supabase.auth.getUser(token);
@@ -123,8 +92,6 @@ const TASK_CAPABILITIES: Record<Intent, CapabilityRequest['requiredCapabilities'
   analyze_performance: ['structured_output'],
   suggest_ideas: ['text_generation', 'structured_output'],
   general_advice: ['text_generation', 'structured_output'],
-  understand_lead_query: ['structured_output'],
-  research_agent_reasoning: ['text_generation'],
 };
 
 const TASK_PREFERRED_CAPABILITIES: Record<Intent, CapabilityRequest['preferredCapabilities']> = {
@@ -134,8 +101,6 @@ const TASK_PREFERRED_CAPABILITIES: Record<Intent, CapabilityRequest['preferredCa
   analyze_performance: ['reasoning'],
   suggest_ideas: [],
   general_advice: [],
-  understand_lead_query: ['reasoning'],
-  research_agent_reasoning: ['reasoning'],
 };
 
 function looksLikeJson(content: string): boolean {
@@ -158,13 +123,12 @@ async function callLLM(
   userPrompt: string,
   jsonMode = false
 ): Promise<{ content: string; tokensIn: number; tokensOut: number; provider: string; model: string; fallbackCount: number; fallbackLog: Array<{ provider: string; model: string; error: string }> }> {
-  const nativeJsonMode = intent === 'research_agent_reasoning' ? false : jsonMode;
   const result = await routeAndRun(supabase, {
     requiredCapabilities: TASK_CAPABILITIES[intent],
     preferredCapabilities: TASK_PREFERRED_CAPABILITIES[intent],
     systemPrompt,
     userPrompt,
-    jsonMode: nativeJsonMode,
+    jsonMode,
     validate: jsonMode ? looksLikeJson : undefined,
   });
   return {
@@ -298,21 +262,6 @@ const AGENTS = {
     `أنت Idea Generator Agent. اقترح أفكار محتوى إبداعية ومتنوعة تناسب البراند.
 سياق البراند:\n${brandStr}`,
 
-  lead_intelligence: () =>
-    `أنت Lead Intelligence Agent داخل وحدة Lead Hunter. مهمتك فهم طلبات البحث عن أفراد B2C فقط، مع أولوية استخدام حالة التأمين على الحياة دون ربط النظام بمنتج واحد. افهم العربية المصرية والفصحى والعربي المختلط بالإنجليزية. لا تخمّن أي بيانات: إذا لم يذكر المستخدم قيمة، أعدها null أو مصفوفة فارغة. لا تستخدم سمات حساسة أو محظورة للتقييم.`,
-
-  research_researcher: () =>
-    `أنت AI Sales Researcher داخل وحدة Lead Hunter — باحث حقيقي، لست محرك بحث ينفذ كلمات مفتاحية.
-تُستدعى بأدوار مختلفة (plan_round / extract_candidates / verify_candidate / round_review) وفي كل مرة تُعطى حالة البحث الفعلية حتى الآن (الاستعلامات المستخدمة، أداؤها، ما وُجد، ما رُفض ولماذا).
-قواعد صارمة يجب اتباعها دائمًا:
-1) لا تخترع أي معلومة عن أي شخص (عمر، هاتف، بريد، مهنة، موقع، جهة عمل) من الاسم فقط أو من نمط عام. إذا لم يُذكر صراحة في المصدر: استخدم null/"unknown"، ولا تفترضه.
-2) لا تفترض أن نتيجة بحث تخص الموقع أو المهنة المطلوبة لمجرد أن صفحة النتيجة تحتوي على الكلمة؛ اربط الدليل بالشخص نفسه تحديدًا.
-3) ميّز بوضوح بين شركة/صفحة عامة/مقال وبين فرد حقيقي؛ ارفض غير الأفراد.
-4) إذا كانت جولة بحث سابقة أنتجت نتائج ضعيفة أو غير مطابقة (شركات بدل أفراد، نتائج بلا موقع، إلخ)، غيّر الاستراتيجية فعليًا في الجولة التالية بدل تكرار نفس الاستعلامات.
-5) الجودة أهم من العدد: عدد قليل من المرشحين الممتازين أفضل من عدد كبير من المرشحين الضعاف.
-6) أرجع JSON فقط بالصيغة المطلوبة بالضبط في كل استدعاء دون أي نص خارجها.
-7) في plan_round يمكنك طلب أدوات حقيقية من التطبيق: search_web لجلب نتائج ويب، وfetch_public_page لقراءة صفحة عامة. لا تطلب الأداة إلا عندما تحتاجها، ولا تضع أكثر من 4 tool_calls في الجولة.
-8) tool_calls ليست Chain of Thought؛ أعد فقط سببًا مختصرًا قابلًا للعرض، ولا تستخدم روابط داخلية أو localhost.`,
 };
 
 // ---------------------------------------------------------------------------
@@ -331,10 +280,6 @@ function planAgents(intent: Intent): string[] {
       return ['analytics_advisor'];
     case 'suggest_ideas':
       return ['idea_generator'];
-    case 'understand_lead_query':
-      return ['lead_intelligence'];
-    case 'research_agent_reasoning':
-      return ['research_researcher'];
     case 'general_advice':
       return ['analytics_advisor'];
     default:
@@ -380,114 +325,6 @@ async function executeIntent(
   const memStr = memoryContextString(ctx.memory);
 
   switch (intent) {
-    case 'understand_lead_query': {
-      const prompt = `حلل طلب البحث التالي وأعد JSON فقط وفق الشكل:
-{
-  "query": {
-    "location": { "country": "Egypt", "governorate": null, "city": null, "district": null, "radiusKm": null },
-    "age": { "min": null, "max": null },
-    "gender": null,
-    "occupations": [],
-    "jobTitles": [],
-    "industries": [],
-    "seniority": [],
-    "education": [],
-    "interests": [],
-    "professionalInformation": [],
-    "contactAvailability": { "phone": null, "email": null },
-    "freshness": "unknown",
-    "qualityMin": null,
-    "customerType": "individual",
-    "objective": "life_insurance_lead",
-    "requestedCount": 100
-  },
-  "summary": [{ "label": "المعيار", "value": "القيمة" }],
-  "assumptions": [],
-  "warnings": []
-}
-حوّل الأرقام العربية والإنجليزية إلى أرقام صحيحة. إذا ذُكرت الغربية أو طنطا فاحتفظ بهما كقيمتي المحافظة والمدينة. الطلب: ${message}`;
-      const r = await callLLM(intent, AGENTS.lead_intelligence(), prompt, true);
-      const parsed = parseJsonLoose<Record<string, unknown>>(r.content, () => ({
-        query: { customerType: 'individual', objective: 'life_insurance_lead', requestedCount: 100 },
-        summary: [],
-        assumptions: ['تعذر تحليل الطلب بالكامل. راجع المعايير قبل بدء البحث.'],
-        warnings: [],
-      }));
-      return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
-    }
-
-    case 'research_agent_reasoning': {
-      const sys = AGENTS.research_researcher();
-      const step = String(runtimeContext.step ?? '');
-
-      if (step === 'plan_round') {
-        const prompt = `أنت في جولة بحث رقم ${runtimeContext.round} (نمط: ${runtimeContext.mode}).
-مواصفات البحث (Hard/Soft): ${JSON.stringify(runtimeContext.spec)}
-العدد المطلوب: ${runtimeContext.requestedCount} — تم قبول ${runtimeContext.alreadyQualified} حتى الآن.
-استعلامات اقتراحية أولية (وليست إلزامية، فكّر بحرية): ${JSON.stringify(runtimeContext.seedQueries)}
-كل الاستعلامات المستخدمة سابقًا في هذه المهمة: ${JSON.stringify(runtimeContext.queriesUsedSoFar)}
-أداء كل استعلام حتى الآن (issued/qualified/rejected): ${JSON.stringify(runtimeContext.queryPerformance)}
-مراجعة الجولة السابقة وقرارها: ${JSON.stringify(runtimeContext.previousReview ?? null)}
-قيود البحث الاختيارية: ${JSON.stringify(runtimeContext.searchConstraints ?? {})}
-قدرات المصادر المكتشفة فعليًا فقط: ${JSON.stringify(runtimeContext.sourceCapabilities ?? {})}
-نتائج الأدوات التي نفذها التطبيق في هذه الجولة: ${JSON.stringify(runtimeContext.tool_results ?? [])}
-فكّر: أي استعلامات كانت جيدة فارفع الاعتماد عليها بصيغة مختلفة أعمق، وأيها كانت ضعيفة فاستبعدها أو غيّر استراتيجيتها جذريًا. اختر WHERE/HOW/WHY/WHAT_TO_VERIFY، ولا تدّعي فئة أو محركًا أو لغة أو time_range إلا إذا كانت capability معروفة في البيانات المرسلة. إذا كان البحث الاجتماعي العام مفيدًا ومسموحًا، استخدم category متاحة أو site-specific query عامة دون منصة ثابتة في الكود.
-أعد JSON فقط:
-{ "strategy": "public_professional_discovery|social_public_discovery|verification|missing_field_search|refine_query|general_web_discovery", "queries": ["استعلام 1", "استعلام 2"], "categories": ["فئة معروفة فقط"], "engines": ["محرك معروف فقط"], "language": "لغة معروفة فقط أو null", "time_range": "قيمة مدعومة فقط أو null", "reason": "لماذا اخترت أين وكيف تبحث", "target_information": ["المعلومات المطلوب إثباتها"], "expected_result_type": "نوع النتائج المتوقع", "next_action": "CONTINUE_SAME_STRATEGY|REFINE_QUERY|CHANGE_STRATEGY|CHANGE_CATEGORY|CHANGE_ENGINE|VERIFY|SEARCH_MISSING_FIELD|STOP", "reasoning": "تحليل مختصر قابل للعرض وليس Chain of Thought", "deprioritized_queries": ["استعلامات لن تكررها"], "tool_calls": [{ "id": "tool-1", "name": "search_web|fetch_public_page", "arguments": { "query": "استعلام آمن", "url": "https://public.example/page", "source": "serper_search", "categories": [], "engines": [], "language": null, "time_range": null } }] }
-بحد أقصى 8 استعلامات، وبحد أقصى 3 فئات و5 محركات.`;
-        const r = await callLLM(intent, sys, prompt, true);
-        const parsed = parseJsonLoose<Record<string, unknown>>(r.content, () => ({ queries: [], reasoning: 'تعذر التخطيط عبر AI لهذه الجولة.' }));
-        return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
-      }
-
-      if (step === 'extract_candidates') {
-        const prompt = `مواصفات البحث المطلوبة: ${JSON.stringify(runtimeContext.spec)}
-نتائج بحث خام (عنوان/رابط/مقتطف) تحتاج قراءة فعلية وليست موافقة تلقائية:
-${JSON.stringify(runtimeContext.results)}
-لكل نتيجة: هل هي فعلًا صفحة تخص فردًا (وليست شركة/موقع مؤسسي/مقال عام/دليل هاتف)؟ إذا لا: is_candidate_person=false ولا تملأ raw.
-إذا نعم: استخرج فقط ما هو مذكور صراحة أو يُستدل منه بوضوح من نفس المقتطف/الصفحة، واربط كل حقل بدليله (evidence).
-أي حقل غير مؤكد بدليل مباشر مرتبط بهذا الشخص تحديدًا = null (وليس تخمينًا من نمط الاسم أو من كلمة عامة في الصفحة).
-أعد JSON فقط بالشكل التالي (مصفوفة بنفس ترتيب وعدد النتائج المُدخلة تمامًا). استخدم أسماء الحقول التالية بالضبط:
-{ "candidates": [
-  { "is_candidate_person": true,
-    "raw": { "full_name": null, "governorate": null, "city": null, "district": null, "occupation": null, "job_title": null, "industry": null, "employer": null, "age": null, "gender": null, "public_contact_phone": null, "business_phone": null, "public_email": null, "business_email": null, "professional_url": null, "social_url": null, "notes": null },
-    "evidence": [ { "field": "governorate", "source_url": "...", "snippet": "..." } ],
-    "confidence": "low",
-    "notes": "" }
-] }
-public_contact_phone/public_email = وسيلة اتصال عامة ظاهرة في الصفحة نفسها. professional_url/social_url = رابط الصفحة المهنية/الشخصية نفسها إن كان هو مصدر النتيجة. لا تملأ business_phone/business_email إلا إذا كان مذكورًا صراحة كخط عمل رسمي.`;
-        const r = await callLLM(intent, sys, prompt, true);
-        const parsed = parseJsonLoose<Record<string, unknown>>(r.content, () => ({ candidates: [] }));
-        return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
-      }
-
-      if (step === 'verify_candidate') {
-        const prompt = `مرشح يحتاج تحقق (§10): ${JSON.stringify(runtimeContext.candidate)}
-الدليل الأصلي: ${JSON.stringify(runtimeContext.evidence)}
-نتائج بحث إضافية للتحقق (اسم + موقع): ${JSON.stringify(runtimeContext.corroboration)}
-هل النتائج الإضافية تؤكد نفس الشخص في نفس الموقع/المهنة، أم تتعارض معه، أم لا تكفي لإثبات أي شيء؟
-لا تختر التفسير المريح — إذا كان هناك أكثر من شخص محتمل بنفس الاسم بلا دليل قاطع للتمييز بينهم فالحكم unknown، ليس confirmed.
-أعد JSON فقط: { "verdict": "confirmed" | "conflict" | "unknown", "reasoning": "..." }`;
-        const r = await callLLM(intent, sys, prompt, true);
-        const parsed = parseJsonLoose<Record<string, unknown>>(r.content, () => ({ verdict: 'unknown', reasoning: 'تعذر التحقق عبر AI.' }));
-        return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
-      }
-
-      if (step === 'round_review') {
-        const prompt = `مراجعة الجولة رقم ${runtimeContext.round}:
-نتائج خام وُجدت: ${runtimeContext.roundFound}، مؤهلون هذه الجولة: ${runtimeContext.roundQualified}، مرفوضون: ${runtimeContext.roundRejected}، مكررون: ${runtimeContext.roundDuplicates}.
-إجمالي المؤهلين حتى الآن: ${runtimeContext.totalQualified} من أصل ${runtimeContext.requestedCount} مطلوب.
-مؤهلو الجولة السابقة (null إن لم توجد جولة سابقة): ${runtimeContext.previousRoundQualified}.
-هل تستمر لجولة أخرى (وسنغيّر الاستراتيجية تلقائيًا في التخطيط القادم)، أم تتوقف الآن؟ توقف إذا: الجودة تنهار (مقارنة بالجولة السابقة)، أو لا ترى استراتيجية بحث جديدة مفيدة، أو العدد المطلوب أصبح شبه مستحيل الوصول إليه بجودة معقولة.
-أعد JSON فقط: { "decision": "continue" | "stop", "next_action": "CONTINUE_SAME_STRATEGY|REFINE_QUERY|CHANGE_STRATEGY|CHANGE_CATEGORY|CHANGE_ENGINE|VERIFY|SEARCH_MISSING_FIELD|STOP", "stop_reason": "سبب مختصر إن توقفت", "quality_signal": "improving" | "stable" | "declining", "note": "ملاحظة مختصرة تُعرض للمستخدم" }`;
-        const r = await callLLM(intent, sys, prompt, true);
-        const parsed = parseJsonLoose<Record<string, unknown>>(r.content, () => ({ decision: 'continue', quality_signal: 'stable', note: 'تعذرت مراجعة AI لهذه الجولة؛ استمرار افتراضي ضمن سقف الجولات.' }));
-        return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
-      }
-
-      return { result: { error: 'unknown_step' }, tokensIn: 0, tokensOut: 0, meta: { provider: 'none', model: 'none', fallbackCount: 0, fallbackLog: [] } };
-    }
-
     case 'generate_brand_dna': {
       const sys = AGENTS.brand_intelligence(message);
       const prompt = `بناءً على هذه المعلومات الأساسية، ابنِ هوية براند كاملة بصيغة JSON تحتوي على مفاتيح:
@@ -692,14 +529,14 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body = (await req.json()) as RequestBody;
-    const { intent, workspaceId, message, platforms, context, onBehalfOfUserId } = body;
+    const { intent, workspaceId, message, platforms, context } = body;
 
     if (!intent || !workspaceId || !message) {
       return jsonError(400, 'intent, workspaceId, and message are required');
     }
 
     // --- Authorization: verify user identity + workspace membership ---
-    const auth = await authorize(req, workspaceId, onBehalfOfUserId);
+    const auth = await authorize(req, workspaceId);
     if (!auth.ok) return auth.response;
     const userId = auth.userId;
 

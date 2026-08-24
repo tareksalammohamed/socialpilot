@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Settings, Brain, Link2, LogOut, Shield, TrendingUp, ChevronLeft, RefreshCw, Target } from 'lucide-react';
+import { Settings, Brain, Link2, LogOut, Shield, TrendingUp, ChevronLeft, RefreshCw } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { checkIsSuperAdmin } from '@/lib/superAdmin';
@@ -30,7 +30,7 @@ const PLATFORM_APP_KEY: Partial<Record<SocialPlatform, 'meta' | 'linkedin' | 'x'
   x: 'x',
 };
 
-export function MoreScreen({ onOpenLeadHunter }: { onOpenLeadHunter?: () => void }) {
+export function MoreScreen() {
   const { workspace, signOut } = useAuth();
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [brandDna, setBrandDna] = useState<BrandDna | null>(null);
@@ -47,7 +47,6 @@ export function MoreScreen({ onOpenLeadHunter }: { onOpenLeadHunter?: () => void
   const [telegramInput, setTelegramInput] = useState('');
   const [telegramBusy, setTelegramBusy] = useState(false);
   const [accountSyncBusy, setAccountSyncBusy] = useState(false);
-  const leadHunterEnabled = workspace?.settings?.lead_hunter_enabled !== false;
 
   const loadAccounts = useCallback(async () => {
     if (!workspace) return;
@@ -218,25 +217,6 @@ export function MoreScreen({ onOpenLeadHunter }: { onOpenLeadHunter?: () => void
           </div>
         </Card>
       </div>
-
-      {leadHunterEnabled && onOpenLeadHunter && (
-        <div className="mb-4">
-          <Card onClick={onOpenLeadHunter} className="border-brand-500/25">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-brand-500/15 flex items-center justify-center">
-                  <Target size={20} className="text-brand-400" />
-                </div>
-                <div>
-                  <p className="text-ink-100 text-sm font-medium">مركز العملاء</p>
-                  <p className="text-ink-500 text-xs mt-0.5">اكتشف عملاء محتملين حسب المواصفات التي تحددها.</p>
-                </div>
-              </div>
-              <ChevronLeft size={18} className="text-ink-500" />
-            </div>
-          </Card>
-        </div>
-      )}
 
       {/* Social Accounts */}
       <div className="mb-4">
