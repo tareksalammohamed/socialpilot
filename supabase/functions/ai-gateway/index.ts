@@ -12,6 +12,7 @@ const corsHeaders = {
 // ---------------------------------------------------------------------------
 
 type Intent =
+  | 'agent'
   | 'generate_brand_dna'
   | 'create_content'
   | 'create_content_plan'
@@ -86,6 +87,7 @@ async function authorize(req: Request, workspaceId: string): Promise<{ ok: true;
 // ---------------------------------------------------------------------------
 
 const TASK_CAPABILITIES: Record<Intent, CapabilityRequest['requiredCapabilities']> = {
+  agent: ['text_generation', 'structured_output'],
   generate_brand_dna: ['structured_output'],
   create_content: ['text_generation', 'structured_output'],
   create_content_plan: ['structured_output'],
@@ -95,6 +97,7 @@ const TASK_CAPABILITIES: Record<Intent, CapabilityRequest['requiredCapabilities'
 };
 
 const TASK_PREFERRED_CAPABILITIES: Record<Intent, CapabilityRequest['preferredCapabilities']> = {
+  agent: ['reasoning'],
   generate_brand_dna: ['reasoning'],
   create_content: [],
   create_content_plan: ['reasoning'],
@@ -229,6 +232,12 @@ function memoryContextString(memory: { key: string; value: string; type: string 
 // ---------------------------------------------------------------------------
 
 const AGENTS = {
+  universal_agent: (brandStr: string, memStr: string) =>
+    `أنت SocialPilot Universal Agent. افهم طلب المستخدم بحرية ولا تفترض أن الطلب واحد من قائمة أوامر ثابتة. حدد الهدف الحقيقي، والسياق المطلوب، والخطوات المنطقية لتنفيذ الطلب داخل SocialPilot. إذا كان الطلب متعلقًا بالمحتوى ففكر في المنصة، الصياغة، الوسائط، الجودة، المراجعة، والجدولة. إذا كان تحليلاً فاعتمد على البيانات المتاحة. لا تقل للمستخدم إنه يجب اختيار أمر محدد. أرجع JSON يحتوي على: intent_summary, response, next_actions, requires_media, requires_approval, requires_schedule. لا تنفذ نشرًا فعليًا أو حذفًا فعليًا من داخل هذا الـAgent إلا إذا كانت أداة تنفيذ صريحة متاحة في السياق. براند:
+${brandStr}
+الذاكرة:
+${memStr}`,
+
   brand_intelligence: (brandStr: string) =>
     `أنت Brand Intelligence Agent. مهمتك بناء هوية براند كاملة من معلومات أساسية بسيطة.
 استخرج: Identity, Positioning, Values, Differentiators, Tone, Voice, Personas, Content Pillars, Preferred Topics, Forbidden Topics, CTA Style, Vocabulary.
@@ -270,6 +279,8 @@ const AGENTS = {
 
 function planAgents(intent: Intent): string[] {
   switch (intent) {
+    case 'agent':
+      return ['universal_agent'];
     case 'generate_brand_dna':
       return ['brand_intelligence'];
     case 'create_content':
@@ -325,6 +336,18 @@ async function executeIntent(
   const memStr = memoryContextString(ctx.memory);
 
   switch (intent) {
+    case 'agent': {
+      const sys = AGENTS.universal_agent(brandStr, memStr);
+      const prompt = `طلب المستخدم الحر: "${message}"
+بيانات الأداء المتاحة: ${JSON.stringify(runtimeContext.performance ?? {})}
+المنصات المذكورة: ${JSON.stringify(platforms)}
+حلل الطلب دون تقييده بقائمة intents ثابتة. حدد ما الذي يريد المستخدم إنجازه، وما الخطوات المطلوبة، وهل يحتاج صورة/فيديو، مراجعة بشرية، أو جدولة. إذا كان الطلب بسيطًا فأجب مباشرة. أرجع JSON فقط بصيغة:
+{"intent_summary":"...","response":"...","next_actions":["..."],"requires_media":false,"requires_approval":false,"requires_schedule":false}`;
+      const r = await callLLM(intent, sys, prompt, true);
+      const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ intent_summary: message, response: raw, next_actions: [], requires_media: false, requires_approval: false, requires_schedule: false }));
+      return { result: { advice: String(parsed.response ?? ''), ...parsed }, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
+    }
+
     case 'generate_brand_dna': {
       const sys = AGENTS.brand_intelligence(message);
       const prompt = `بناءً على هذه المعلومات الأساسية، ابنِ هوية براند كاملة بصيغة JSON تحتوي على مفاتيح:
