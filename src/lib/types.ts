@@ -215,6 +215,7 @@ export type InboxMessage = {
 // ---- AI Gateway request/response shapes ----
 
 export type AiIntent =
+  | 'agent'
   | 'generate_brand_dna'
   | 'create_content'
   | 'create_content_plan'
@@ -299,6 +300,7 @@ export type ContentPlan = {
 
 export type AiGatewayResponse = {
   runId: string;
+  intent?: AiIntent;
   agents: string[];
   model: string;
   provider: string;
