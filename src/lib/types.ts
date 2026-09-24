@@ -100,12 +100,27 @@ export type ContentVariant = {
   hashtags: string[];
   cta: string | null;
   media_brief: Record<string, unknown>;
+  media_id?: string | null;
   status: 'draft' | 'review' | 'approved' | 'rejected';
   scheduled_at?: string | null;
   quality_score?: number | null;
   quality_status?: 'pending' | 'passed' | 'needs_improvement' | 'failed';
   created_at: string;
   updated_at: string;
+};
+
+export type MediaItem = {
+  id: string;
+  workspace_id: string;
+  content_id: string | null;
+  storage_path: string;
+  mime_type: string;
+  size_bytes: number;
+  kind: 'image' | 'video';
+  alt_text: string | null;
+  caption: string | null;
+  source: 'upload' | 'library' | 'ai_generated';
+  created_at: string;
 };
 
 export type QualityVerdict = 'pass' | 'review' | 'fail';
@@ -305,6 +320,45 @@ export type AiGatewayResponse = {
   fallbackCount?: number;
   latencyMs: number;
   result: GeneratedBrandDna | GeneratedContent | ContentPlan | { advice: string };
+};
+
+// ---- Universal AI Agent (agentMode) ----
+// Mirrors supabase/functions/ai-gateway/agent/types.ts on the frontend.
+// Kept deliberately loose (Record<string, unknown> outputs) since each tool
+// returns a different shape — callers narrow per the toolName they expect.
+
+export type AgentContext = {
+  currentRoute?: string;
+  currentContentId?: string;
+  currentVariantId?: string;
+  selectedPlatform?: string;
+  selectedCampaignId?: string;
+  selectedMediaId?: string;
+};
+
+export type AgentToolResult = {
+  callId: string;
+  name: string;
+  ok: boolean;
+  output?: Record<string, unknown>;
+  error?: string;
+  requiresApproval?: boolean;
+};
+
+export type AgentPlanStep = {
+  id: string;
+  label: string;
+  toolName?: string;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+};
+
+export type AgentTurnResult = {
+  reply: string;
+  plan?: { id: string; summary: string; steps: AgentPlanStep[]; requiresApprovalBeforeRun: boolean };
+  toolResults: AgentToolResult[];
+  pendingApproval?: { reason: string; toolCalls: { id: string; name: string; input: Record<string, unknown> }[] };
+  clarifyingQuestion?: string;
+  intentLabel: string;
 };
 
 // ---- AI Control Center (Super Admin) ----

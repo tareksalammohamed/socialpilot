@@ -12,7 +12,7 @@ import { getAdapter, ProviderCallError, type ChatResult } from './providers.ts';
 
 export type RoutingPolicy = 'smart_balanced' | 'free_first' | 'lowest_cost' | 'best_quality' | 'fastest';
 
-export type CapabilityName = 'text_generation' | 'vision' | 'reasoning' | 'tool_calling' | 'structured_output';
+export type CapabilityName = 'text_generation' | 'vision' | 'reasoning' | 'tool_calling' | 'structured_output' | 'web_search';
 
 export type CapabilityRequest = {
   requiredCapabilities: CapabilityName[];
@@ -59,6 +59,7 @@ export type RunResult = {
   modelUsed: string;
   fallbackCount: number;
   fallbackLog: Array<{ provider: string; model: string; error: string }>;
+  citations?: Array<{ url: string; title: string; content: string }>;
 };
 
 export class NoModelAvailableError extends Error {
@@ -120,6 +121,11 @@ async function loadCandidates(
         if (cap === 'reasoning' && !m.reasoning) return false;
         if (cap === 'tool_calling' && !m.tool_calling) return false;
         if (cap === 'structured_output' && !m.structured_output) return false;
+        // web_search isn't a per-model flag — it's the OpenRouter `web`
+        // plugin, which works the same across every model that provider
+        // routes to (see providers.ts). No other adapter here implements
+        // it, so any other provider is simply not a candidate.
+        if (cap === 'web_search' && m.provider_key !== 'openrouter') return false;
       }
       return true;
     })
@@ -259,7 +265,7 @@ async function recordHealth(
  */
 export async function routeAndRun(
   supabase: SupabaseClient,
-  req: CapabilityRequest & { systemPrompt: string; userPrompt: string; jsonMode: boolean; validate?: (content: string) => boolean }
+  req: CapabilityRequest & { systemPrompt: string; userPrompt: string; jsonMode: boolean; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
 ): Promise<RunResult> {
   const [{ candidates, providers }, { policy, allowPaidFallback }] = await Promise.all([
     loadCandidates(supabase, req.requiredCapabilities),
@@ -290,7 +296,9 @@ export async function routeAndRun(
         candidate.model_id,
         req.systemPrompt,
         req.userPrompt,
-        req.jsonMode
+        req.jsonMode,
+        undefined,
+        req.webSearchOptions ?? undefined
       );
 
       if (req.validate && !req.validate(result.content)) {
@@ -308,6 +316,7 @@ export async function routeAndRun(
         modelUsed: candidate.model_id,
         fallbackCount: fallbackLog.length,
         fallbackLog,
+        citations: result.citations,
       };
     } catch (err) {
       const latencyMs = Date.now() - started;

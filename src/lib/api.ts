@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import type { AiGatewayRequest, AiGatewayResponse, InboxConversation, InboxMessage } from './types';
+import type { AiGatewayRequest, AiGatewayResponse, InboxConversation, InboxMessage, AgentContext, AgentTurnResult, AgentToolResult } from './types';
 
 export async function startSocialOAuth(workspaceId: string, platformKey: 'meta' | 'linkedin' | 'x' = 'meta'): Promise<string> {
   const { data: session } = await supabase.auth.getSession();
@@ -128,6 +128,85 @@ export async function callAiGateway(req: AiGatewayRequest): Promise<AiGatewayRes
     throw new Error('Received an unexpected response from the AI service.');
   }
   return data;
+}
+
+// Universal AI Agent — free-text request, no fixed intent (section 2/3 of
+// the SocialPilot V2 spec). Same edge function, `agentMode: true`.
+// Phase 5 — execute tool calls the user has explicitly approved (from a
+// prior turn's `pendingApproval.toolCalls`). Sends them back unmodified.
+export async function callApprovedTools(params: {
+  workspaceId: string;
+  toolCalls: { id: string; name: string; input: Record<string, unknown> }[];
+  agentContext?: AgentContext;
+  legacyContext?: Record<string, unknown>;
+}): Promise<{ toolResults: AgentToolResult[] }> {
+  const { data: session } = await supabase.auth.getSession();
+  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-gateway`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.session?.access_token ?? ''}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+    },
+    body: JSON.stringify({
+      agentMode: true,
+      workspaceId: params.workspaceId,
+      approvedToolCalls: params.toolCalls,
+      agentContext: params.agentContext,
+      legacyContext: params.legacyContext,
+    }),
+  });
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = await res.json();
+  } catch {
+    // ignore parse errors, handled below
+  }
+  if (!res.ok) {
+    throw new Error((body?.error as string) ?? `فشل تنفيذ الإجراء المعتمد (${res.status})`);
+  }
+  return body as { toolResults: AgentToolResult[] };
+}
+
+export async function callAgentTurn(params: {
+  workspaceId: string;
+  message: string;
+  platforms?: string[];
+  agentContext?: AgentContext;
+  legacyContext?: Record<string, unknown>;
+}): Promise<AgentTurnResult> {
+  const { data: session } = await supabase.auth.getSession();
+  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-gateway`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.session?.access_token ?? ''}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+    },
+    body: JSON.stringify({
+      agentMode: true,
+      workspaceId: params.workspaceId,
+      message: params.message,
+      platforms: params.platforms,
+      agentContext: params.agentContext,
+      legacyContext: params.legacyContext,
+    }),
+  });
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = await res.json();
+  } catch {
+    // ignore parse errors, handled below
+  }
+
+  if (!res.ok) {
+    throw new Error((body?.error as string) ?? `فشل طلب الـAgent (${res.status})`);
+  }
+  return body as AgentTurnResult;
 }
 
 

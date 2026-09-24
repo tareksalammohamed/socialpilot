@@ -39,6 +39,12 @@ export type ChatResult = {
   content: string;
   tokensIn: number;
   tokensOut: number;
+  // Populated only when webSearchOptions was requested and the provider
+  // actually ran a web search for this call (currently: OpenRouter's `web`
+  // plugin, which works across every model it routes to). Every other
+  // adapter simply never sets this — absence means "no search was run",
+  // never "search ran but found nothing" (that's an empty array).
+  citations?: Array<{ url: string; title: string; content: string }>;
 };
 
 export type TestResult = { ok: boolean; error?: string };
@@ -52,7 +58,8 @@ export interface ProviderAdapter {
     systemPrompt: string,
     userPrompt: string,
     jsonMode: boolean,
-    baseUrlOverride?: string | null
+    baseUrlOverride?: string | null,
+    webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null
   ): Promise<ChatResult>;
 }
 
@@ -184,7 +191,7 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
       }).filter((m) => m.model_id);
     },
 
-    async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, baseUrlOverride) {
+    async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, baseUrlOverride, webSearchOptions) {
       const base = baseUrlOverride || defaultBaseUrl;
       const body: Record<string, unknown> = {
         model: modelId,
@@ -196,6 +203,19 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
         max_tokens: 2000,
       };
       if (jsonMode) body.response_format = { type: 'json_object' };
+      // Web search (OpenRouter only, §lead-hunter "use the app's own AI models
+      // to search, not a separate hosted search engine"): the `web` plugin
+      // runs a real search server-side and returns url_citation annotations,
+      // regardless of which underlying model is selected. This is the only
+      // adapter that implements it — every other provider silently ignores
+      // webSearchOptions, which is correct: it means "no search capability
+      // here", not "search ran and found nothing".
+      if (opts?.isOpenRouter && webSearchOptions) {
+        const plugin: Record<string, unknown> = { id: 'web', max_results: webSearchOptions.maxResults ?? 6 };
+        if (webSearchOptions.includeDomains?.length) plugin.include_domains = webSearchOptions.includeDomains;
+        if (webSearchOptions.excludeDomains?.length) plugin.exclude_domains = webSearchOptions.excludeDomains;
+        body.plugins = [plugin];
+      }
 
       const res = await fetch(`${base}/chat/completions`, {
         method: 'POST',
@@ -205,11 +225,24 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
 
       if (!res.ok) throw new ProviderCallError(res.status, await readErrorBody(res));
       const data = await res.json();
-      const content = data.choices?.[0]?.message?.content ?? '';
+      const message = data.choices?.[0]?.message ?? {};
+      const content = message.content ?? '';
+      const annotations = Array.isArray(message.annotations) ? message.annotations : [];
+      const citations = opts?.isOpenRouter && webSearchOptions
+        ? annotations
+          .filter((a: Record<string, unknown>) => a?.type === 'url_citation' && a.url_citation)
+          .map((a: Record<string, unknown>) => {
+            const uc = a.url_citation as Record<string, unknown>;
+            return { url: String(uc.url ?? ''), title: String(uc.title ?? ''), content: String(uc.content ?? '') };
+          })
+          .filter((c: { url: string }) => c.url)
+        : undefined;
+
       return {
         content,
         tokensIn: data.usage?.prompt_tokens ?? 0,
         tokensOut: data.usage?.completion_tokens ?? 0,
+        ...(citations ? { citations } : {}),
       };
     },
   };

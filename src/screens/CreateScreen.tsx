@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { callAiGateway } from '@/lib/api';
+import { callAgentTurn } from '@/lib/api';
 import { Button, Card, ErrorBanner, Spinner, Badge } from '@/components/ui';
 import { PLATFORM_META } from '@/lib/constants';
 import { parseIntent, scheduleDates, DEFAULT_SCHEDULE_HOUR } from '@/lib/intent';
@@ -69,8 +69,11 @@ export function CreateScreen() {
     setChat((prev) => [...prev, { role: 'user', text: message }]);
     setMode('thinking');
 
+    // parseIntent stays as the deterministic, non-AI source for post
+    // count/dates/platforms — the Universal Agent decides WHICH tool to run,
+    // but this data still drives create_content_plan's exact slot count
+    // (see the note in agent/types.ts on `legacyContext`).
     const parsed = parseIntent(message);
-    const intent = parsed.intent;
 
     try {
       const { data: recentInsights } = await supabase
@@ -84,31 +87,48 @@ export function CreateScreen() {
         summary[key] = (summary[key] ?? 0) + Number(row.value ?? 0);
         return summary;
       }, {});
-      const res = await callAiGateway({
-        intent,
+
+      const turn = await callAgentTurn({
         workspaceId: workspace.id,
         message,
         platforms: parsed.platforms.length > 0 ? parsed.platforms : undefined,
-        context: {
+        agentContext: { currentRoute: 'create' },
+        legacyContext: {
           post_count: parsed.postCount,
           start_date: parsed.startDate,
           end_date: parsed.endDate,
           frequency: parsed.frequency,
           schedule: parsed.schedule,
           performance,
+          content_goal: parsed.contentGoal,
+          content_type: parsed.contentType,
         },
       });
 
-      setChat((prev) => [...prev, { role: 'ai', text: summarizeResult(res.result, intent) }]);
+      if (turn.clarifyingQuestion) {
+        setChat((prev) => [...prev, { role: 'ai', text: turn.clarifyingQuestion as string }]);
+        setMode('idle');
+        return;
+      }
 
-      if (intent === 'create_content') {
-        setContent(res.result as GeneratedContent);
+      const succeeded = turn.toolResults.find((r) => r.ok && r.output);
+      if (!succeeded) {
+        const failed = turn.toolResults.find((r) => r.error);
+        throw new Error(failed?.error ?? 'الـAI مقدرش ينفذ الطلب ده دلوقتي.');
+      }
+
+      const toolName = succeeded.name;
+      const result = succeeded.output as Record<string, unknown>;
+      setChat((prev) => [...prev, { role: 'ai', text: summarizeResult(result, toolName) }]);
+
+      if (toolName === 'create_content') {
+        setContent(result as GeneratedContent);
         setMode('content');
-      } else if (intent === 'create_content_plan') {
-        setPlan(res.result as ContentPlan);
+      } else if (toolName === 'create_content_plan') {
+        setPlan(result as ContentPlan);
         setMode('plan');
       } else {
-        const r = res.result as { advice?: string };
+        const r = result as { advice?: string };
         setAdvice(r.advice ?? 'تم');
         setMode('advice');
       }

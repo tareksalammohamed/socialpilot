@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react';
-import { FileText, Calendar as CalendarIcon, ChevronLeft, ChevronRight, ChevronDown, Send, Check, ExternalLink, Pencil, Save, X } from 'lucide-react';
+import { FileText, Calendar as CalendarIcon, ChevronLeft, ChevronRight, ChevronDown, Send, Check, ExternalLink, Pencil, Save, X, Sparkles, Image as ImageIcon, Trash2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { publishVariant } from '@/lib/api';
+import { publishVariant, callAgentTurn, callApprovedTools } from '@/lib/api';
 import { Card, ScreenLoader, EmptyState, Badge, Button, ErrorBanner, Spinner } from '@/components/ui';
 import { PLATFORM_META } from '@/lib/constants';
-import type { Content, CalendarItem, ContentStatus, ContentVariant, SocialAccount, SocialPlatform } from '@/lib/types';
+import { PlatformPreview } from '@/components/PlatformPreview';
+import type { Content, CalendarItem, ContentStatus, ContentVariant, SocialAccount, SocialPlatform, MediaItem } from '@/lib/types';
+
+const MAX_MEDIA_BYTES = 10 * 1024 * 1024; // 10MB — section 10: file size validation
+const ACCEPTED_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']; // images only for this phase
 
 type View = 'list' | 'calendar';
 
@@ -53,10 +57,38 @@ export function ContentScreen() {
   const [editingText, setEditingText] = useState('');
   const [savingVariantId, setSavingVariantId] = useState<string | null>(null);
   const [editResults, setEditResults] = useState<Record<string, string>>({});
+  const [aiInstructionByVariant, setAiInstructionByVariant] = useState<Record<string, string>>({});
+  const [aiEditingVariantId, setAiEditingVariantId] = useState<string | null>(null);
+  const [aiEditResults, setAiEditResults] = useState<Record<string, string>>({});
+  const [mediaCache, setMediaCache] = useState<Record<string, MediaItem>>({});
+  const [mediaUploadingId, setMediaUploadingId] = useState<string | null>(null);
+  const [mediaErrors, setMediaErrors] = useState<Record<string, string>>({});
+  const [mediaBriefLoadingId, setMediaBriefLoadingId] = useState<string | null>(null);
+  const [previewVariantId, setPreviewVariantId] = useState<string | null>(null);
+  const [pendingApprovalByVariant, setPendingApprovalByVariant] = useState<Record<string, { reason: string; toolCalls: { id: string; name: string; input: Record<string, unknown> }[] }>>({});
+  const [approvingVariantId, setApprovingVariantId] = useState<string | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [approvalResults, setApprovalResults] = useState<Record<string, string>>({});
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [calendarMessage, setCalendarMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const missingIds = Object.values(variantsByContent)
+      .flat()
+      .map((v) => v.media_id)
+      .filter((id): id is string => !!id && !mediaCache[id]);
+    if (missingIds.length === 0) return;
+    (async () => {
+      const { data } = await supabase.from('media').select('*').in('id', missingIds);
+      if (data && data.length > 0) {
+        setMediaCache((prev) => {
+          const next = { ...prev };
+          for (const row of data as MediaItem[]) next[row.id] = row;
+          return next;
+        });
+      }
+    })();
+  }, [variantsByContent, mediaCache]);
 
   useEffect(() => {
     if (!workspace) return;
@@ -140,6 +172,191 @@ export function ContentScreen() {
       setEditResults((prev) => ({ ...prev, [variant.id]: e instanceof Error ? e.message : 'فشل حفظ تعديل المسودة' }));
     } finally {
       setSavingVariantId(null);
+    }
+  }
+
+  async function handleAiEditVariant(variant: ContentVariant) {
+    const instruction = (aiInstructionByVariant[variant.id] ?? '').trim();
+    if (!workspace || !instruction) return;
+    setAiEditingVariantId(variant.id);
+    setAiEditResults((prev) => ({ ...prev, [variant.id]: '' }));
+    try {
+      const turn = await callAgentTurn({
+        workspaceId: workspace.id,
+        message: instruction,
+        platforms: [variant.platform],
+        agentContext: {
+          currentRoute: 'content',
+          currentContentId: variant.content_id,
+          currentVariantId: variant.id,
+          selectedPlatform: variant.platform,
+        },
+      });
+
+      if (turn.clarifyingQuestion) {
+        setAiEditResults((prev) => ({ ...prev, [variant.id]: turn.clarifyingQuestion as string }));
+        return;
+      }
+
+      if (turn.pendingApproval) {
+        setPendingApprovalByVariant((prev) => ({ ...prev, [variant.id]: turn.pendingApproval! }));
+        setAiEditResults((prev) => ({ ...prev, [variant.id]: turn.pendingApproval!.reason }));
+        return;
+      }
+
+      const succeeded = turn.toolResults.find((r) => r.ok && r.output);
+      if (!succeeded) {
+        const failed = turn.toolResults.find((r) => r.error);
+        setAiEditResults((prev) => ({ ...prev, [variant.id]: failed?.error ?? 'الـAI مقدرش ينفذ التعديل ده.' }));
+        return;
+      }
+
+      const out = succeeded.output as { text?: string; hashtags?: string[]; cta?: string };
+      const nextStatus = variant.status === 'approved' ? 'review' : variant.status;
+      if (nextStatus !== variant.status) {
+        // Mirror handleSaveVariant's safety rule: an AI-driven edit invalidates
+        // a prior approval too — content shouldn't stay "approved" after its
+        // text silently changed underneath that approval.
+        await supabase.from('content_variants').update({ status: nextStatus }).eq('id', variant.id).eq('workspace_id', workspace.id);
+        setContent((prev) => prev.map((item) => item.id === variant.content_id && item.status === 'approved' ? { ...item, status: 'draft' } : item));
+      }
+      setVariantsByContent((prev) => ({
+        ...prev,
+        [variant.content_id]: (prev[variant.content_id] ?? []).map((item) => item.id === variant.id
+          ? { ...item, text: out.text ?? item.text, hashtags: out.hashtags ?? item.hashtags, cta: out.cta ?? item.cta, status: nextStatus }
+          : item),
+      }));
+      setAiInstructionByVariant((prev) => ({ ...prev, [variant.id]: '' }));
+      setAiEditResults((prev) => ({ ...prev, [variant.id]: 'تم تنفيذ التعديل.' }));
+    } catch (e) {
+      setAiEditResults((prev) => ({ ...prev, [variant.id]: e instanceof Error ? e.message : 'فشل طلب التعديل من الـAI' }));
+    } finally {
+      setAiEditingVariantId(null);
+    }
+  }
+
+  async function handleApprovePendingTool(variant: ContentVariant) {
+    const pending = pendingApprovalByVariant[variant.id];
+    if (!workspace || !pending) return;
+    setApprovingVariantId(variant.id);
+    try {
+      const { toolResults } = await callApprovedTools({
+        workspaceId: workspace.id,
+        toolCalls: pending.toolCalls,
+        agentContext: { currentRoute: 'content', currentContentId: variant.content_id, currentVariantId: variant.id, selectedPlatform: variant.platform },
+      });
+      const failed = toolResults.find((r) => !r.ok);
+      setAiEditResults((prev) => ({ ...prev, [variant.id]: failed ? (failed.error ?? 'فشل التنفيذ') : 'تم اعتماد وتنفيذ الإجراء.' }));
+    } catch (e) {
+      setAiEditResults((prev) => ({ ...prev, [variant.id]: e instanceof Error ? e.message : 'فشل تنفيذ الإجراء المعتمد' }));
+    } finally {
+      setApprovingVariantId(null);
+      setPendingApprovalByVariant((prev) => { const next = { ...prev }; delete next[variant.id]; return next; });
+    }
+  }
+
+  function handleRejectPendingTool(variant: ContentVariant) {
+    setPendingApprovalByVariant((prev) => { const next = { ...prev }; delete next[variant.id]; return next; });
+    setAiEditResults((prev) => ({ ...prev, [variant.id]: 'تم إلغاء الإجراء.' }));
+  }
+
+  function getMediaPublicUrl(path: string): string {
+    return supabase.storage.from('media').getPublicUrl(path).data.publicUrl;
+  }
+
+  async function handleUploadMedia(variant: ContentVariant, file: File | null) {
+    if (!file || !workspace) return;
+    setMediaErrors((prev) => ({ ...prev, [variant.id]: '' }));
+
+    // Section 10: file type + size validation, done before any upload call.
+    if (!ACCEPTED_MEDIA_TYPES.includes(file.type)) {
+      setMediaErrors((prev) => ({ ...prev, [variant.id]: 'نوع الملف غير مدعوم — استخدم JPG أو PNG أو WEBP أو GIF.' }));
+      return;
+    }
+    if (file.size > MAX_MEDIA_BYTES) {
+      setMediaErrors((prev) => ({ ...prev, [variant.id]: 'حجم الملف أكبر من 10MB.' }));
+      return;
+    }
+
+    setMediaUploadingId(variant.id);
+    try {
+      const ext = file.name.split('.').pop() || 'jpg';
+      const storagePath = `${workspace.id}/${crypto.randomUUID()}.${ext}`;
+      const { error: uploadError } = await supabase.storage.from('media').upload(storagePath, file, {
+        contentType: file.type,
+        upsert: false,
+      });
+      if (uploadError) throw uploadError;
+
+      const { data: mediaRow, error: insertError } = await supabase
+        .from('media')
+        .insert({
+          workspace_id: workspace.id,
+          content_id: variant.content_id,
+          storage_path: storagePath,
+          mime_type: file.type,
+          size_bytes: file.size,
+          kind: 'image',
+          source: 'upload',
+        })
+        .select('*')
+        .single();
+      if (insertError || !mediaRow) throw insertError ?? new Error('فشل حفظ سجل الميديا');
+
+      const { error: linkError } = await supabase
+        .from('content_variants')
+        .update({ media_id: mediaRow.id })
+        .eq('id', variant.id);
+      if (linkError) throw linkError;
+
+      setMediaCache((prev) => ({ ...prev, [mediaRow.id]: mediaRow as MediaItem }));
+      setVariantsByContent((prev) => ({
+        ...prev,
+        [variant.content_id]: (prev[variant.content_id] ?? []).map((item) => item.id === variant.id ? { ...item, media_id: mediaRow.id } : item),
+      }));
+    } catch (e) {
+      setMediaErrors((prev) => ({ ...prev, [variant.id]: e instanceof Error ? e.message : 'فشل رفع الصورة' }));
+    } finally {
+      setMediaUploadingId(null);
+    }
+  }
+
+  async function handleRemoveMedia(variant: ContentVariant) {
+    if (!workspace || !variant.media_id) return;
+    const { error } = await supabase.from('content_variants').update({ media_id: null }).eq('id', variant.id);
+    if (error) {
+      setMediaErrors((prev) => ({ ...prev, [variant.id]: error.message }));
+      return;
+    }
+    setVariantsByContent((prev) => ({
+      ...prev,
+      [variant.content_id]: (prev[variant.content_id] ?? []).map((item) => item.id === variant.id ? { ...item, media_id: null } : item),
+    }));
+  }
+
+  async function handleSuggestMediaBrief(variant: ContentVariant) {
+    if (!workspace) return;
+    setMediaBriefLoadingId(variant.id);
+    try {
+      const turn = await callAgentTurn({
+        workspaceId: workspace.id,
+        message: 'اقترح صورة مناسبة للمنشور ده',
+        agentContext: { currentRoute: 'content', currentContentId: variant.content_id, selectedPlatform: variant.platform },
+      });
+      const succeeded = turn.toolResults.find((r) => r.ok && r.output);
+      const brief = succeeded?.output?.mediaBrief as string | undefined;
+      if (brief) {
+        setVariantsByContent((prev) => ({
+          ...prev,
+          [variant.content_id]: (prev[variant.content_id] ?? []).map((item) => item.id === variant.id
+            ? { ...item, media_brief: { suggestion: brief } }
+            : item),
+        }));
+      }
+    } catch {
+      // Non-critical — the suggestion is a nice-to-have, fail silently in the UI beyond the missing suggestion.
+    } finally {
+      setMediaBriefLoadingId(null);
     }
   }
 
@@ -311,6 +528,11 @@ export function ContentScreen() {
                                   <span className="text-ink-200 text-sm font-medium">{meta?.label ?? v.platform}</span>
                                 </div>
                                 <div className="flex items-center gap-2 shrink-0">
+                                  <Button size="sm" variant="ghost" onClick={() => setPreviewVariantId(previewVariantId === v.id ? null : v.id)}>
+                                    <span className="flex items-center gap-1 text-[11px]">
+                                      {previewVariantId === v.id ? 'إخفاء المعاينة' : 'معاينة'}
+                                    </span>
+                                  </Button>
                                   {canEdit && !isEditing && (
                                     <Button size="sm" variant="ghost" onClick={() => startEditingVariant(v)}>
                                       <span className="flex items-center gap-1"><Pencil size={14} /> تعديل</span>
@@ -377,6 +599,104 @@ export function ContentScreen() {
                                 <p className={`text-[11px] mt-2 ${editResults[v.id].startsWith('تم حفظ') ? 'text-brand-400' : 'text-red-400'}`}>
                                   {editResults[v.id]}
                                 </p>
+                              )}
+                              {!isEditing && (
+                                <div className="mt-2 flex items-center gap-2">
+                                  <input
+                                    value={aiInstructionByVariant[v.id] ?? ''}
+                                    onChange={(event) => setAiInstructionByVariant((prev) => ({ ...prev, [v.id]: event.target.value }))}
+                                    onKeyDown={(event) => { if (event.key === 'Enter') handleAiEditVariant(v); }}
+                                    dir="auto"
+                                    placeholder="اطلب تعديل من الـAI (مثلاً: خلي الـHook أقوى)"
+                                    className="flex-1 rounded-lg border border-ink-700 bg-ink-950 px-2.5 py-1.5 text-xs text-ink-100 focus:outline-none focus:border-brand-500/50"
+                                  />
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleAiEditVariant(v)}
+                                    disabled={aiEditingVariantId === v.id || !(aiInstructionByVariant[v.id] ?? '').trim()}
+                                  >
+                                    <span className="flex items-center gap-1">
+                                      {aiEditingVariantId === v.id ? <Spinner size={14} /> : <Sparkles size={14} />}
+                                    </span>
+                                  </Button>
+                                </div>
+                              )}
+                              {aiEditResults[v.id] && (
+                                <p className={`text-[11px] mt-1 ${aiEditResults[v.id].startsWith('تم تنفيذ') ? 'text-brand-400' : 'text-ink-400'}`}>
+                                  {aiEditResults[v.id]}
+                                </p>
+                              )}
+                              {pendingApprovalByVariant[v.id] && (
+                                <div className="mt-2 rounded-lg border border-yellow-700/40 bg-yellow-900/10 px-2.5 py-2">
+                                  <p className="text-[11px] text-yellow-500">{pendingApprovalByVariant[v.id].reason}</p>
+                                  <div className="flex gap-2 mt-1.5">
+                                    <Button size="sm" onClick={() => handleApprovePendingTool(v)} disabled={approvingVariantId === v.id}>
+                                      <span className="flex items-center gap-1 text-[11px]">
+                                        {approvingVariantId === v.id ? <Spinner size={12} /> : <Check size={12} />} موافقة وتنفيذ
+                                      </span>
+                                    </Button>
+                                    <Button size="sm" variant="ghost" onClick={() => handleRejectPendingTool(v)} disabled={approvingVariantId === v.id}>
+                                      <span className="text-[11px]">إلغاء</span>
+                                    </Button>
+                                  </div>
+                                </div>
+                              )}
+                              {/* Media System — section 10/12 */}
+                              <div className="mt-3 border-t border-ink-800 pt-3">
+                                {v.media_id && mediaCache[v.media_id] ? (
+                                  <div className="flex items-start gap-2">
+                                    <img
+                                      src={getMediaPublicUrl(mediaCache[v.media_id].storage_path)}
+                                      alt={mediaCache[v.media_id].alt_text ?? ''}
+                                      className="w-16 h-16 rounded-lg object-cover border border-ink-700"
+                                    />
+                                    <div className="flex-1">
+                                      <label className="text-[11px] text-brand-400 cursor-pointer">
+                                        استبدال
+                                        <input type="file" accept={ACCEPTED_MEDIA_TYPES.join(',')} className="hidden"
+                                          onChange={(e) => handleUploadMedia(v, e.target.files?.[0] ?? null)} />
+                                      </label>
+                                      <button onClick={() => handleRemoveMedia(v)} className="ms-3 text-[11px] text-red-400 inline-flex items-center gap-1">
+                                        <Trash2 size={11} /> إزالة
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-2">
+                                    <label className="flex items-center gap-1.5 text-[11px] text-ink-300 border border-dashed border-ink-700 rounded-lg px-2.5 py-1.5 cursor-pointer hover:border-brand-500/50">
+                                      {mediaUploadingId === v.id ? <Spinner size={12} /> : <ImageIcon size={12} />}
+                                      إضافة صورة
+                                      <input type="file" accept={ACCEPTED_MEDIA_TYPES.join(',')} className="hidden"
+                                        disabled={mediaUploadingId === v.id}
+                                        onChange={(e) => handleUploadMedia(v, e.target.files?.[0] ?? null)} />
+                                    </label>
+                                    <Button size="sm" variant="ghost" onClick={() => handleSuggestMediaBrief(v)} disabled={mediaBriefLoadingId === v.id}>
+                                      <span className="flex items-center gap-1 text-[11px]">
+                                        {mediaBriefLoadingId === v.id ? <Spinner size={12} /> : <Sparkles size={12} />} اقترح صورة
+                                      </span>
+                                    </Button>
+                                  </div>
+                                )}
+                                {mediaErrors[v.id] && <p className="text-[11px] text-red-400 mt-1">{mediaErrors[v.id]}</p>}
+                                {!v.media_id && (v.media_brief as { suggestion?: string })?.suggestion && (
+                                  <p className="text-[11px] text-ink-400 mt-1.5" dir="auto">
+                                    💡 {(v.media_brief as { suggestion?: string }).suggestion}
+                                  </p>
+                                )}
+                              </div>
+                              {previewVariantId === v.id && (
+                                <div className="mt-3">
+                                  <PlatformPreview
+                                    platform={v.platform as SocialPlatform}
+                                    account={account}
+                                    text={v.text}
+                                    hashtags={v.hashtags}
+                                    cta={v.cta}
+                                    mediaUrl={v.media_id && mediaCache[v.media_id] ? getMediaPublicUrl(mediaCache[v.media_id].storage_path) : null}
+                                    scheduledAt={v.scheduled_at}
+                                  />
+                                </div>
                               )}
                               {disabledReason && !result && (
                                 <p className="text-ink-600 text-[11px] mt-2">{disabledReason}</p>

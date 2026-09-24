@@ -1,5 +1,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { routeAndRun, NoModelAvailableError, NonFailoverError, type CapabilityRequest } from './router.ts';
+import { runAgentTurn, runApprovedCalls } from './agent/pipeline.ts';
+import type { AgentContext, ToolCall } from './agent/types.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -17,32 +19,40 @@ type Intent =
   | 'create_content_plan'
   | 'analyze_performance'
   | 'suggest_ideas'
-  | 'general_advice'
-;
+  | 'general_advice';
 
 type RequestBody = {
   intent: Intent;
   workspaceId: string;
   brandDnaId?: string;
-  message: string;
+  // Required for the legacy path; optional for agentMode when
+  // approvedToolCalls is supplied instead (validated at runtime below).
+  message?: string;
   platforms?: string[];
   context?: Record<string, unknown>;
+  // Set only by trusted server-to-server callers authenticating with the
+  // service role key (see authorize() below). This key never reaches a
+  // browser — only edge functions hold it. No current caller uses this
+  // (the Lead Hunter background job that introduced it has been retired),
+  // kept as generic infra for a future background job.
+  onBehalfOfUserId?: string;
+  // New Universal Agent path (Phase 1): when true, `intent` is ignored and
+  // the free-form pipeline in ./agent/pipeline.ts handles the request
+  // instead. Old clients that never send this flag are unaffected.
+  agentMode?: boolean;
+  agentContext?: Omit<AgentContext, 'workspaceId' | 'userId'>;
+  legacyContext?: Record<string, unknown>;
+  // Phase 5 — Human Approval: when set, `message` is ignored and these
+  // previously-proposed (and now user-approved) tool calls are executed
+  // directly, bypassing planning.
+  approvedToolCalls?: { id: string; name: string; input: Record<string, unknown> }[];
 };
-
-// ---------------------------------------------------------------------------
-// Supabase admin client (service role bypasses RLS — this is the only place
-// in the system allowed to read ai_provider_secrets)
-// ---------------------------------------------------------------------------
 
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL') ?? '',
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
   { auth: { persistSession: false } }
 );
-
-// ---------------------------------------------------------------------------
-// Authorization — verify the caller is authenticated and a workspace member
-// ---------------------------------------------------------------------------
 
 function jsonError(status: number, error: string): Response {
   return new Response(
@@ -51,12 +61,29 @@ function jsonError(status: number, error: string): Response {
   );
 }
 
-async function authorize(req: Request, workspaceId: string): Promise<{ ok: true; userId: string } | { ok: false; response: Response }> {
+async function authorize(req: Request, workspaceId: string, onBehalfOfUserId?: string): Promise<{ ok: true; userId: string } | { ok: false; response: Response }> {
   const authHeader = req.headers.get('Authorization') ?? '';
   const token = authHeader.replace(/^Bearer\s+/i, '');
 
   if (!token) {
     return { ok: false, response: jsonError(401, 'Missing authentication token') };
+  }
+
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  if (serviceRoleKey && token === serviceRoleKey) {
+    if (!onBehalfOfUserId) {
+      return { ok: false, response: jsonError(400, 'onBehalfOfUserId is required for service-role calls') };
+    }
+    const { data: membership } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', workspaceId)
+      .eq('user_id', onBehalfOfUserId)
+      .maybeSingle();
+    if (!membership) {
+      return { ok: false, response: jsonError(403, 'onBehalfOfUserId is not a member of this workspace') };
+    }
+    return { ok: true, userId: onBehalfOfUserId };
   }
 
   const { data: userData, error: userError } = await supabase.auth.getUser(token);
@@ -79,11 +106,6 @@ async function authorize(req: Request, workspaceId: string): Promise<{ ok: true;
 
   return { ok: true, userId };
 }
-
-// ---------------------------------------------------------------------------
-// AI Task definitions — each intent declares required capabilities only.
-// No model ID, no provider name, anywhere in this file.
-// ---------------------------------------------------------------------------
 
 const TASK_CAPABILITIES: Record<Intent, CapabilityRequest['requiredCapabilities']> = {
   generate_brand_dna: ['structured_output'],
@@ -141,10 +163,6 @@ async function callLLM(
     fallbackLog: result.fallbackLog,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Context Assembly — gather only relevant brand + memory context per intent
-// ---------------------------------------------------------------------------
 
 async function assembleContext(workspaceId: string, intent: Intent): Promise<{
   brand: Record<string, unknown> | null;
@@ -223,11 +241,6 @@ function memoryContextString(memory: { key: string; value: string; type: string 
   return memory.map((m) => `- [${m.type}] ${m.key}: ${m.value}`).join('\n');
 }
 
-// ---------------------------------------------------------------------------
-// Agents — each agent has a focused system prompt + responsibility.
-// Agents talk only to callLLM(intent, ...) — never to a provider or model.
-// ---------------------------------------------------------------------------
-
 const AGENTS = {
   brand_intelligence: (brandStr: string) =>
     `أنت Brand Intelligence Agent. مهمتك بناء هوية براند كاملة من معلومات أساسية بسيطة.
@@ -261,12 +274,7 @@ const AGENTS = {
   idea_generator: (brandStr: string) =>
     `أنت Idea Generator Agent. اقترح أفكار محتوى إبداعية ومتنوعة تناسب البراند.
 سياق البراند:\n${brandStr}`,
-
 };
-
-// ---------------------------------------------------------------------------
-// Orchestrator — decides which agents to run per intent
-// ---------------------------------------------------------------------------
 
 function planAgents(intent: Intent): string[] {
   switch (intent) {
@@ -302,10 +310,6 @@ function parseJsonLoose<T>(content: string, fallback: (raw: string) => T): T {
     return fallback(content);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Intent execution
-// ---------------------------------------------------------------------------
 
 type ExecutionMeta = {
   provider: string;
@@ -371,9 +375,6 @@ preferred_phrases و forbidden_phrases يجب أن تكونا مصفوفتين �
     }
 
     case 'create_content_plan': {
-      // --- Deterministic slot skeleton: count/dates/platforms come from the
-      // Intent Engine (frontend), NOT from the model, so the batch always has
-      // exactly the number of posts the user asked for. ---
       const scheduleDates = (runtimeContext.schedule as { dates?: string[] } | undefined)?.dates ?? [];
       const requestedCount = Math.max(1, Number(runtimeContext.post_count ?? scheduleDates.length) || scheduleDates.length || 1);
       const plats = platforms.length > 0 ? platforms : ['linkedin', 'facebook', 'instagram'];
@@ -416,7 +417,6 @@ ${JSON.stringify(skeletons)}
         };
       });
 
-      // --- Quality Engine pass (batched), with one bounded improve+recheck round ---
       let tokensIn = r.tokensIn;
       let tokensOut = r.tokensOut;
       let fallbackCount = r.fallbackCount;
@@ -436,7 +436,7 @@ ${JSON.stringify(skeletons)}
       };
 
       const qualities = await runQuality(slots);
-      const MAX_IMPROVEMENT_ROUNDS = 1; // hard cap to prevent infinite improve/recheck loops
+      const MAX_IMPROVEMENT_ROUNDS = 1;
       for (let round = 0; round < MAX_IMPROVEMENT_ROUNDS; round++) {
         const needsWork = slots
           .map((slot, i) => ({ slot, i, q: qualities[i] as { verdict?: string; reasons?: string[]; suggested_improvements?: string[] } }))
@@ -518,10 +518,6 @@ function estimateCost(tokensIn: number, tokensOut: number, rate: { in: number; o
   return Math.max(0, (tokensIn / 1000) * safeInputRate + (tokensOut / 1000) * safeOutputRate);
 }
 
-// ---------------------------------------------------------------------------
-// Main handler
-// ---------------------------------------------------------------------------
-
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -529,22 +525,98 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body = (await req.json()) as RequestBody;
-    const { intent, workspaceId, message, platforms, context } = body;
+    const { intent, workspaceId, message, platforms, context, onBehalfOfUserId, agentMode, agentContext, legacyContext, approvedToolCalls } = body;
 
-    if (!intent || !workspaceId || !message) {
-      return jsonError(400, 'intent, workspaceId, and message are required');
+    if (!workspaceId) {
+      return jsonError(400, 'workspaceId is required');
+    }
+    if (!agentMode && !intent) {
+      return jsonError(400, 'intent is required unless agentMode is true');
+    }
+    if (!agentMode && !message) {
+      return jsonError(400, 'message is required');
+    }
+    if (agentMode && !message && !(approvedToolCalls && approvedToolCalls.length > 0)) {
+      return jsonError(400, 'message or approvedToolCalls is required');
     }
 
     // --- Authorization: verify user identity + workspace membership ---
-    const auth = await authorize(req, workspaceId);
+    const auth = await authorize(req, workspaceId, onBehalfOfUserId);
     if (!auth.ok) return auth.response;
     const userId = auth.userId;
+
+    // --- Universal Agent path (Phase 1) — bypasses the fixed 6-intent
+    // dispatch entirely and goes through Context Assembly -> Planning ->
+    // Tool Selection -> (gated) Execution. Legacy `intent` requests below
+    // are completely untouched by this branch. ---
+    if (agentMode) {
+      const fullContext: AgentContext = {
+        workspaceId,
+        userId,
+        ...(agentContext ?? {}),
+      };
+      const legacyRunner = async (
+        legacyIntent: 'generate_brand_dna' | 'create_content' | 'create_content_plan' | 'analyze_performance' | 'suggest_ideas' | 'general_advice',
+        legacyMessage: string, legacyPlatforms: string[], runtimeCtx: Record<string, unknown>,
+      ) => {
+        const ctx = await assembleContext(workspaceId, legacyIntent);
+        const { result, tokensIn, tokensOut } = await executeIntent(
+          legacyIntent, legacyMessage, ctx, legacyPlatforms, runtimeCtx,
+        );
+        return { result, tokensIn, tokensOut };
+      };
+
+      // Phase 5 — Human Approval: execute previously-proposed, now-approved
+      // side-effect tool calls directly (no re-planning).
+      if (approvedToolCalls && approvedToolCalls.length > 0) {
+        try {
+          const results = await runApprovedCalls(
+            supabase,
+            approvedToolCalls as ToolCall[],
+            fullContext,
+            legacyRunner,
+            legacyContext ?? {},
+          );
+          return new Response(JSON.stringify({ toolResults: results }), {
+            status: 200,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : 'Unknown error';
+          return jsonError(500, errMsg);
+        }
+      }
+
+      if (!message) {
+        return jsonError(400, 'message is required');
+      }
+
+      try {
+        const turn = await runAgentTurn(
+          supabase,
+          { message, context: fullContext, platforms, legacyContext },
+          legacyRunner,
+        );
+        return new Response(JSON.stringify(turn), {
+          status: 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        const status = err instanceof NoModelAvailableError ? 503 : err instanceof NonFailoverError ? 400 : 500;
+        return jsonError(status, errMsg);
+      }
+    }
+
+    // Legacy path always requires a message (validated above too; this
+    // gives TypeScript a concrete narrowing point for the calls below).
+    if (!message) {
+      return jsonError(400, 'message is required');
+    }
 
     const started = Date.now();
     const agents = planAgents(intent);
 
-    // Create AI run record — provider/model are filled in after routing,
-    // since the router (not this handler) decides them.
     const { data: run } = await supabase
       .from('ai_runs')
       .insert({
