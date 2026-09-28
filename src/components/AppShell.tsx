@@ -29,6 +29,12 @@ const TAB_PATHS: Record<Tab, string> = {
 };
 
 function tabFromPath(pathname: string): Tab {
+  // Legacy Customer Center / Lead Hunter routes are retired.
+  // Never render the retired screen even if an old bookmark/deep link exists.
+  if (pathname === '/app/customer-center' || pathname === '/app/leads' || pathname === '/app/lead-hunter') {
+    window.history.replaceState({}, '', '/app/dashboard');
+    return 'home';
+  }
   if (pathname === '/app/create') return 'create';
   if (pathname === '/app/content') return 'content';
   if (pathname === '/app/analytics') return 'analytics';
