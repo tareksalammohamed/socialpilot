@@ -235,6 +235,18 @@ export function ContentScreen() {
     }
   }
 
+  async function refreshAfterAgentAction(contentId: string) {
+    if (!workspace) return;
+    const [c, cal, v] = await Promise.all([
+      supabase.from('content').select('*').eq('workspace_id', workspace.id).order('created_at', { ascending: false }),
+      supabase.from('calendar_items').select('*').eq('workspace_id', workspace.id).order('scheduled_for', { ascending: true }),
+      supabase.from('content_variants').select('*').eq('content_id', contentId).order('platform', { ascending: true }),
+    ]);
+    if (c.data) setContent(c.data as Content[]);
+    if (cal.data) setCalendar(cal.data as CalendarItem[]);
+    if (v.data) setVariantsByContent((prev) => ({ ...prev, [contentId]: v.data as ContentVariant[] }));
+  }
+
   async function handleApprovePendingTool(variant: ContentVariant) {
     const pending = pendingApprovalByVariant[variant.id];
     if (!workspace || !pending) return;
@@ -245,8 +257,16 @@ export function ContentScreen() {
         toolCalls: pending.toolCalls,
         agentContext: { currentRoute: 'content', currentContentId: variant.content_id, currentVariantId: variant.id, selectedPlatform: variant.platform },
       });
-      const failed = toolResults.find((r) => !r.ok);
-      setAiEditResults((prev) => ({ ...prev, [variant.id]: failed ? (failed.error ?? 'فشل التنفيذ') : 'تم اعتماد وتنفيذ الإجراء.' }));
+      const failedResults = toolResults.filter((r) => !r.ok);
+      setAiEditResults((prev) => ({
+        ...prev,
+        [variant.id]: failedResults.length > 0
+          ? failedResults.map((r) => r.error ?? 'فشل التنفيذ').join(' | ')
+          : 'تم اعتماد وتنفيذ الإجراء.',
+      }));
+      // Approved tools schedule/cancel/publish server-side; reload what they
+      // may have changed so the list and calendar don't show stale status.
+      await refreshAfterAgentAction(variant.content_id);
     } catch (e) {
       setAiEditResults((prev) => ({ ...prev, [variant.id]: e instanceof Error ? e.message : 'فشل تنفيذ الإجراء المعتمد' }));
     } finally {

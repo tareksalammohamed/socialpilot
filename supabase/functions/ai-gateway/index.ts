@@ -1,7 +1,9 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
-import { routeAndRun, NoModelAvailableError, NonFailoverError, type CapabilityRequest } from './router.ts';
+import { routeAndRun, withUsageTracking, NoModelAvailableError, NonFailoverError, type CapabilityRequest } from './router.ts';
 import { runAgentTurn, runApprovedCalls } from './agent/pipeline.ts';
 import type { AgentContext, ToolCall } from './agent/types.ts';
+import { TOOL_REGISTRY } from './agent/tools.ts';
+import type { UserScope } from './agent/executors.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -62,7 +64,7 @@ function jsonError(status: number, error: string): Response {
   );
 }
 
-async function authorize(req: Request, workspaceId: string, onBehalfOfUserId?: string): Promise<{ ok: true; userId: string } | { ok: false; response: Response }> {
+async function authorize(req: Request, workspaceId: string, onBehalfOfUserId?: string): Promise<{ ok: true; userId: string; token: string; isServiceRole: boolean } | { ok: false; response: Response }> {
   const authHeader = req.headers.get('Authorization') ?? '';
   const token = authHeader.replace(/^Bearer\s+/i, '');
 
@@ -84,7 +86,7 @@ async function authorize(req: Request, workspaceId: string, onBehalfOfUserId?: s
     if (!membership) {
       return { ok: false, response: jsonError(403, 'onBehalfOfUserId is not a member of this workspace') };
     }
-    return { ok: true, userId: onBehalfOfUserId };
+    return { ok: true, userId: onBehalfOfUserId, token, isServiceRole: true };
   }
 
   const { data: userData, error: userError } = await supabase.auth.getUser(token);
@@ -105,7 +107,7 @@ async function authorize(req: Request, workspaceId: string, onBehalfOfUserId?: s
     return { ok: false, response: jsonError(403, 'You do not have access to this workspace') };
   }
 
-  return { ok: true, userId };
+  return { ok: true, userId, token, isServiceRole: false };
 }
 
 const TASK_CAPABILITIES: Record<Intent, CapabilityRequest['requiredCapabilities']> = {
@@ -547,7 +549,12 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const body = (await req.json()) as RequestBody;
+    let body: RequestBody;
+    try {
+      body = (await req.json()) as RequestBody;
+    } catch {
+      return jsonError(400, 'Invalid JSON body');
+    }
     const { intent, workspaceId, message, platforms, context, onBehalfOfUserId, agentMode, agentContext, legacyContext, approvedToolCalls } = body;
 
     if (!workspaceId) {
@@ -573,11 +580,36 @@ Deno.serve(async (req: Request) => {
     // Tool Selection -> (gated) Execution. Legacy `intent` requests below
     // are completely untouched by this branch. ---
     if (agentMode) {
+      // SECURITY: workspaceId/userId MUST come from the authorized request and
+      // must be applied AFTER the client-supplied agentContext. Previously the
+      // spread came last, so a member of workspace A could send
+      // agentContext.workspaceId = B and make the service-role executors
+      // read/write workspace B (service role bypasses RLS).
+      const safeAgentContext: Record<string, unknown> = { ...((agentContext ?? {}) as Record<string, unknown>) };
+      delete safeAgentContext.workspaceId;
+      delete safeAgentContext.userId;
       const fullContext: AgentContext = {
+        ...(safeAgentContext as Omit<AgentContext, 'workspaceId' | 'userId'>),
         workspaceId,
         userId,
-        ...(agentContext ?? {}),
       };
+
+      // Side-effecting tools (approve/schedule/publish) must run as the real
+      // user so RLS and the RPCs' auth.uid() checks apply. Service-role
+      // (background) callers get no user scope, and those tools refuse.
+      const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+      const userScope: UserScope | null = !auth.isServiceRole && anonKey
+        ? {
+            token: auth.token,
+            supabaseUrl: Deno.env.get('SUPABASE_URL') ?? '',
+            anonKey,
+            client: createClient(Deno.env.get('SUPABASE_URL') ?? '', anonKey, {
+              auth: { persistSession: false },
+              global: { headers: { Authorization: `Bearer ${auth.token}` } },
+            }),
+          }
+        : null;
+
       const legacyRunner = async (
         legacyIntent: 'generate_brand_dna' | 'create_content' | 'create_content_plan' | 'analyze_performance' | 'suggest_ideas' | 'general_advice',
         legacyMessage: string, legacyPlatforms: string[], runtimeCtx: Record<string, unknown>,
@@ -589,43 +621,109 @@ Deno.serve(async (req: Request) => {
         return { result, tokensIn, tokensOut };
       };
 
+      // Record every agent request in ai_runs (previously only the legacy
+      // path did, so agent usage/cost/failures never appeared in AI usage).
+      const startedAt = Date.now();
+      const agentRunLabel = (approvedToolCalls && approvedToolCalls.length > 0)
+        ? `approved:${approvedToolCalls.map((c) => c?.name).join(',')}`.slice(0, 200)
+        : String(message ?? '').slice(0, 200);
+      const { data: agentRun } = await supabase
+        .from('ai_runs')
+        .insert({
+          workspace_id: workspaceId,
+          user_id: userId,
+          task: 'agent',
+          intent: agentRunLabel,
+          agents: ['universal_agent'],
+          required_capabilities: TASK_CAPABILITIES.agent,
+          status: 'running',
+        })
+        .select('id')
+        .single();
+      const agentRunId: string | null = agentRun?.id ?? null;
+
+      const finishAgentRun = async (
+        usage: { tokensIn: number; tokensOut: number; costUsd: number; provider: string | null; model: string | null; fallbackCount: number; fallbackLog: unknown[] },
+        patch: Record<string, unknown>,
+      ) => {
+        if (!agentRunId) return;
+        await supabase.from('ai_runs').update({
+          input_tokens: usage.tokensIn,
+          output_tokens: usage.tokensOut,
+          cost_usd: Math.max(0, usage.costUsd),
+          latency_ms: Date.now() - startedAt,
+          provider: usage.provider,
+          model: usage.model,
+          fallback_count: usage.fallbackCount,
+          fallback_log: usage.fallbackLog,
+          ...patch,
+        }).eq('id', agentRunId);
+      };
+      const emptyUsage = { tokensIn: 0, tokensOut: 0, costUsd: 0, provider: null, model: null, fallbackCount: 0, fallbackLog: [] as unknown[] };
+
       // Phase 5 — Human Approval: execute previously-proposed, now-approved
       // side-effect tool calls directly (no re-planning).
       if (approvedToolCalls && approvedToolCalls.length > 0) {
+        const MAX_APPROVED_CALLS = 20;
+        if (!Array.isArray(approvedToolCalls) || approvedToolCalls.length > MAX_APPROVED_CALLS) {
+          await finishAgentRun(emptyUsage, { status: 'failed', error: 'too many approved tool calls' });
+          return jsonError(400, `approvedToolCalls must be an array of at most ${MAX_APPROVED_CALLS} calls`);
+        }
+        const invalid = approvedToolCalls.find((c) =>
+          !c || typeof c.id !== 'string' || typeof c.name !== 'string' || !(c.name in TOOL_REGISTRY)
+          || typeof c.input !== 'object' || c.input === null || Array.isArray(c.input));
+        if (invalid) {
+          await finishAgentRun(emptyUsage, { status: 'failed', error: 'invalid approved tool call' });
+          return jsonError(400, 'approvedToolCalls contains an unknown tool or a malformed call');
+        }
         try {
-          const results = await runApprovedCalls(
+          const { value: results, usage } = await withUsageTracking(() => runApprovedCalls(
             supabase,
             approvedToolCalls as ToolCall[],
             fullContext,
             legacyRunner,
             legacyContext ?? {},
-          );
+            userScope,
+          ));
+          await finishAgentRun(usage, {
+            status: results.every((r) => r.ok) ? 'succeeded' : 'failed',
+            error: results.filter((r) => !r.ok).map((r) => `${r.name}: ${r.error}`).join(' | ').slice(0, 500) || null,
+            result: { toolResults: results.map((r) => ({ name: r.name, ok: r.ok, error: r.error ?? null })) },
+          });
           return new Response(JSON.stringify({ toolResults: results }), {
             status: 200,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : 'Unknown error';
+          await finishAgentRun(emptyUsage, { status: 'failed', error: errMsg.slice(0, 500) });
           return jsonError(500, errMsg);
         }
       }
 
       if (!message) {
+        await finishAgentRun(emptyUsage, { status: 'failed', error: 'message is required' });
         return jsonError(400, 'message is required');
       }
 
       try {
-        const turn = await runAgentTurn(
+        const { value: turn, usage } = await withUsageTracking(() => runAgentTurn(
           supabase,
           { message, context: fullContext, platforms, legacyContext },
           legacyRunner,
-        );
+          userScope,
+        ));
+        await finishAgentRun(usage, {
+          status: 'succeeded',
+          result: { intentLabel: turn.intentLabel ?? null, steps: turn.plan?.steps?.length ?? 0, pendingApproval: Boolean(turn.pendingApproval) },
+        });
         return new Response(JSON.stringify(turn), {
           status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        await finishAgentRun(emptyUsage, { status: 'failed', error: errMsg.slice(0, 500) });
         const status = err instanceof NoModelAvailableError ? 503 : err instanceof NonFailoverError ? 400 : 500;
         return jsonError(status, errMsg);
       }

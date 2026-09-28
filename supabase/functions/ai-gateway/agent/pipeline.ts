@@ -1,7 +1,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { routeAndRun, type CapabilityRequest } from '../router.ts';
 import { TOOL_REGISTRY, listToolsForPrompt } from './tools.ts';
-import { executeTool, type LegacyRunner } from './executors.ts';
+import { executeTool, type LegacyRunner, type UserScope } from './executors.ts';
 import type {
   AgentRequest, AgentTurnResult, AgentPlan, PlanStep, ToolCall, ToolResult, ToolName, AgentIntentLabel, AgentContext,
 } from './types.ts';
@@ -103,7 +103,11 @@ async function planTurn(supabase: SupabaseClient, req: AgentRequest): Promise<Pl
 // ---------------------------------------------------------------------------
 
 function buildPlan(output: PlannerOutput): { plan: AgentPlan; toolCalls: ToolCall[] } {
-  const rawSteps = output.steps ?? [];
+  // Drop steps naming a tool that doesn't exist (model hallucination) instead
+  // of surfacing them as "Unknown tool" failures or, worse, as pending
+  // approvals the user can never complete.
+  const rawSteps = (Array.isArray(output.steps) ? output.steps : [])
+    .filter((s) => s && typeof s.tool === 'string' && s.tool in TOOL_REGISTRY);
   const steps: PlanStep[] = rawSteps.map((s, i) => ({
     id: `step-${i + 1}`,
     label: s.label,
@@ -142,10 +146,11 @@ export async function runApprovedCalls(
   context: AgentContext,
   runLegacy: LegacyRunner,
   legacyContext: Record<string, unknown> = {},
+  userScope: UserScope | null = null,
 ): Promise<ToolResult[]> {
   const results: ToolResult[] = [];
   for (const call of calls) {
-    results.push(await executeTool(call, context, runLegacy, supabase, legacyContext));
+    results.push(await executeTool(call, context, runLegacy, supabase, legacyContext, userScope));
   }
   return results;
 }
@@ -154,6 +159,7 @@ export async function runAgentTurn(
   supabase: SupabaseClient,
   req: AgentRequest,
   runLegacy: LegacyRunner,
+  userScope: UserScope | null = null,
 ): Promise<AgentTurnResult> {
   const planned = await planTurn(supabase, req);
 
@@ -175,7 +181,7 @@ export async function runAgentTurn(
   // Run only the non-destructive steps now (content drafting, analysis, reads).
   const toolResults: ToolResult[] = [];
   for (const call of safeCalls) {
-    const res = await executeTool(call, req.context, runLegacy, supabase, req.legacyContext ?? {});
+    const res = await executeTool(call, req.context, runLegacy, supabase, req.legacyContext ?? {}, userScope);
     toolResults.push(res);
     const step = plan.steps.find((s) => s.id === call.id);
     if (step) step.status = res.ok ? 'done' : 'failed';
