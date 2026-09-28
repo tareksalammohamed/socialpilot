@@ -1,5 +1,46 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { getAdapter, ProviderCallError, type ChatResult } from './providers.ts';
+
+// ---------------------------------------------------------------------------
+// Per-request usage tracking. The Universal Agent path makes several router
+// calls per turn (planner + each tool) from code that never sees the token
+// counts, so agent turns were invisible in ai_runs / the AI usage screen.
+// AsyncLocalStorage scopes an accumulator to one request, so concurrent
+// requests in the same isolate never mix their numbers and no call signature
+// has to change.
+// ---------------------------------------------------------------------------
+export type UsageAccumulator = {
+  calls: number;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  provider: string | null;
+  model: string | null;
+  fallbackCount: number;
+  fallbackLog: Array<{ provider: string; model: string; error: string }>;
+};
+
+const usageStore = new AsyncLocalStorage<UsageAccumulator>();
+
+export async function withUsageTracking<T>(fn: () => Promise<T>): Promise<{ value: T; usage: UsageAccumulator }> {
+  const usage: UsageAccumulator = { calls: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, provider: null, model: null, fallbackCount: 0, fallbackLog: [] };
+  const value = await usageStore.run(usage, fn);
+  return { value, usage };
+}
+
+function recordUsage(candidate: { provider_key: string; model_id: string; input_cost_per_1k: number | null; output_cost_per_1k: number | null }, tokensIn: number, tokensOut: number, fallbackLog: UsageAccumulator['fallbackLog']) {
+  const acc = usageStore.getStore();
+  if (!acc) return;
+  acc.calls += 1;
+  acc.tokensIn += tokensIn;
+  acc.tokensOut += tokensOut;
+  acc.costUsd += Math.max(0, (tokensIn / 1000) * Math.max(0, Number(candidate.input_cost_per_1k) || 0) + (tokensOut / 1000) * Math.max(0, Number(candidate.output_cost_per_1k) || 0));
+  acc.provider = candidate.provider_key;
+  acc.model = candidate.model_id;
+  acc.fallbackCount += fallbackLog.length;
+  acc.fallbackLog.push(...fallbackLog);
+}
 
 // ---------------------------------------------------------------------------
 // Smart Model Router
@@ -65,6 +106,20 @@ export type RunResult = {
 export class NoModelAvailableError extends Error {
   constructor() {
     super('لا يوجد Model متاح ومناسب لهذه المهمة. تأكد أن Super Admin أضّاف Provider واحد على الأقل وفعّله.');
+  }
+}
+
+// Thrown when candidates existed but every attempt failed. Extends
+// NoModelAvailableError so existing `instanceof` handling (HTTP 503) keeps
+// working, but carries the real per-attempt errors instead of the misleading
+// "no model configured" message.
+export class AllModelsFailedError extends NoModelAvailableError {
+  attempts: Array<{ provider: string; model: string; error: string }>;
+  constructor(attempts: Array<{ provider: string; model: string; error: string }>) {
+    super();
+    this.attempts = attempts;
+    const summary = attempts.slice(-3).map((a) => `${a.provider}/${a.model}: ${a.error}`).join(' | ');
+    this.message = `فشلت كل محاولات الـAI Providers المتاحة (${attempts.length}). آخر الأخطاء: ${summary.slice(0, 500)}`;
   }
 }
 
@@ -175,8 +230,10 @@ function rankCandidates(
   // If free models can cover the task, keep paid ones only as fallback
   // material — they still get appended (never dropped) unless paid
   // fallback is disabled entirely.
-  const hasFree = pool.some((m) => m.is_free);
-  if (!hasFree && !allowPaidFallback) {
+  // allow_paid_fallback=false means paid models are never used, whether or
+  // not a free model exists (previously the filter only applied when there
+  // were no free models at all, so paid models still got appended).
+  if (!allowPaidFallback) {
     pool = pool.filter((m) => m.is_free);
   }
 
@@ -248,7 +305,11 @@ async function recordHealth(
     patch.consecutive_failures = consecutive;
     patch.last_failure_at = new Date().toISOString();
     patch.last_error = errorMsg?.slice(0, 300) ?? null;
-    patch.status = consecutive >= CONSECUTIVE_FAILURES_TO_OPEN ? 'disabled' : consecutive >= 3 ? 'degraded' : 'healthy';
+    // 'degraded' (not 'disabled'): loadCandidates() excludes status='disabled'
+    // outright, which made the open-circuit cooldown unreachable and removed
+    // the model permanently. circuit_state/circuit_opened_at drive the
+    // temporary exclusion + half-open retry instead.
+    patch.status = consecutive >= 3 ? 'degraded' : 'healthy';
     if (consecutive >= CONSECUTIVE_FAILURES_TO_OPEN) {
       patch.circuit_state = 'open';
       patch.circuit_opened_at = new Date().toISOString();
@@ -279,7 +340,10 @@ export async function routeAndRun(
 
   for (const candidate of ranked) {
     const adapter = getAdapter(candidate.provider_key);
-    if (!adapter) continue;
+    if (!adapter) {
+      fallbackLog.push({ provider: candidate.provider_key, model: candidate.model_id, error: 'no adapter for provider' });
+      continue;
+    }
 
     const apiKeyRes = await supabase
       .from('ai_provider_secrets')
@@ -287,7 +351,10 @@ export async function routeAndRun(
       .eq('provider_key', candidate.provider_key)
       .maybeSingle();
     const apiKey = apiKeyRes.data?.api_key;
-    if (!apiKey) continue;
+    if (!apiKey) {
+      fallbackLog.push({ provider: candidate.provider_key, model: candidate.model_id, error: 'provider API key not configured' });
+      continue;
+    }
 
     const started = Date.now();
     try {
@@ -307,6 +374,7 @@ export async function routeAndRun(
 
       const latencyMs = Date.now() - started;
       await recordHealth(supabase, candidate.provider_key, candidate.model_id, true, latencyMs);
+      recordUsage(candidate, result.tokensIn, result.tokensOut, fallbackLog);
 
       return {
         content: result.content,
@@ -334,5 +402,5 @@ export async function routeAndRun(
     }
   }
 
-  throw new NoModelAvailableError();
+  throw fallbackLog.length > 0 ? new AllModelsFailedError(fallbackLog) : new NoModelAvailableError();
 }

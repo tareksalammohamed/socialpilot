@@ -20,3 +20,15 @@ Publishing, Scheduler, Inbox, Analytics, Authentication, Workspace, RLS، وبا
 - استدعاء Serper API فعليًا (لم يُختبر لعدم وجود شبكة في بيئة التطوير الحالية ولا مفتاح API بعد).
 - زمن استجابة/تكلفة AI الفعلية لكل خطوة استدلال ضمن حدود `max_runtime_seconds` الحالية (900 ثانية افتراضيًا).
 - أوصي بتشغيل أول Search Job حقيقي ومراقبة `lead_search_jobs.strategy_notes` و`lead_source_records` مباشرة بعد الإضافة، وتعديل الـPrompts في `AGENTS.research_researcher` إذا لزم ضبط دقيق بعد أول نتائج حقيقية.
+
+## Phase 1 stabilisation — 2026-09-28
+
+Scope: fix / complete / unify / stabilise only. No new features, no Phase 2.
+
+- **Security (ai-gateway):** `agentContext.workspaceId/userId` from the client no longer override the authorized values (cross-workspace read/write via service-role executors). Approved tool calls are validated (known tool, ≤20, well-formed).
+- **Router:** circuit breaker no longer sets `status='disabled'` (it excluded models permanently and made the cooldown unreachable); exhausted fallback chain reports the real per-provider errors (`AllModelsFailedError`, still HTTP 503); `allow_paid_fallback=false` now really excludes paid models; skipped providers are logged. Migration `0034` repairs models already stuck in `disabled`.
+- **AI observability:** agent requests (plan/tools/approved calls) are recorded in `ai_runs` with tokens, cost, fallback log (per-request `AsyncLocalStorage` accumulator).
+- **Agent tools:** `create_schedule`, `reschedule`, `cancel_schedule`, `publish`, `retry_failed_publish` implemented on top of the existing RPCs / `social-publish` (run with the caller's JWT). New RPC `cancel_calendar_item` (migration `0035`). `read_brand_dna` now reads the row instead of asking the LLM to invent one; `enforce_brand_rules` implemented (deterministic forbidden-phrase check). Unknown tools hallucinated by the planner are dropped.
+- **Publishing:** media attached via `media_id` is now actually published (Telegram photo/video, Facebook photo, Instagram JPEG); X/LinkedIn/video fail explicitly instead of posting without the media. `social-publish` applies the same quality/rejected gate as `approve_content_variant`. Same change applied in both `social-publish` and `scheduler-tick` (kept identical by design).
+- **Config:** `supabase/config.toml` declares `verify_jwt=false` for `scheduler-tick`, `inbox-webhook`, `social-linkedin-webhook` (they authenticate internally).
+- **UI:** ContentScreen reloads content/calendar/variants after approved agent actions and shows every failed step.

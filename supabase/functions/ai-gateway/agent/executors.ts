@@ -7,6 +7,9 @@ import { executeMediaLlmTool, MEDIA_LLM_TOOLS } from './executors-media.ts';
 import { executeMediaLinkTool, MEDIA_LINK_TOOLS } from './executors-media-link.ts';
 import { executeCampaignTool, CAMPAIGN_TOOLS } from './executors-campaign.ts';
 import { executeAnalyticsTool, ANALYTICS_TOOLS } from './executors-analytics.ts';
+import { executePublishingTool, PUBLISHING_TOOLS, type UserScope } from './executors-publishing.ts';
+
+export type { UserScope };
 
 // ---------------------------------------------------------------------------
 // Executors — Phase 1 bridges every tool that already has a working
@@ -36,7 +39,9 @@ const LEGACY_BRIDGE: Partial<Record<ToolCall['name'], LegacyIntent>> = {
   create_content: 'create_content',
   create_content_plan: 'create_content_plan',
   analyze_performance: 'analyze_performance',
-  read_brand_dna: 'generate_brand_dna', // read path reuses the same context assembly
+  // NOTE: read_brand_dna used to be bridged to 'generate_brand_dna', which
+  // calls the LLM to INVENT a brand identity from an empty message. It is a
+  // read tool — it now has a real executor in executors-brand.ts.
   suggest_ideas: 'suggest_ideas',
   general_advice: 'general_advice',
 };
@@ -53,8 +58,6 @@ const LEGACY_BRIDGE: Partial<Record<ToolCall['name'], LegacyIntent>> = {
 const NOT_YET_IMPLEMENTED = new Set<ToolCall['name']>([
   'repurpose_content',
   'upload_media', 'analyze_media',
-  'create_schedule', 'reschedule', 'cancel_schedule', 'publish', 'retry_failed_publish',
-  'enforce_brand_rules',
 ]);
 
 export async function executeTool(
@@ -63,6 +66,7 @@ export async function executeTool(
   runLegacy: LegacyRunner,
   supabase: SupabaseClient,
   legacyContext: Record<string, unknown> = {},
+  userScope: UserScope | null = null,
 ): Promise<ToolResult> {
   const legacyIntent = LEGACY_BRIDGE[call.name];
 
@@ -78,6 +82,10 @@ export async function executeTool(
     } catch (err) {
       return { callId: call.id, name: call.name, ok: false, error: err instanceof Error ? err.message : 'Unknown error' };
     }
+  }
+
+  if (PUBLISHING_TOOLS.has(call.name)) {
+    return executePublishingTool(call, context, supabase, userScope);
   }
 
   if (CONTENT_EDIT_TOOLS.has(call.name)) {

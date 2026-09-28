@@ -4,3 +4,17 @@
 # callback implementation.
 [functions.social-oauth-callback]
 verify_jwt = false
+
+# Endpoints below are called by systems that cannot send a Supabase user JWT
+# (pg_cron/pg_net, Meta/LinkedIn webhooks). Each authenticates the caller
+# itself inside the function (Vault cron secret / HMAC signature), so
+# verify_jwt must stay false. Without these entries a CLI redeploy from git
+# would default them to verify_jwt=true and reject every cron/webhook call.
+[functions.scheduler-tick]
+verify_jwt = false
+
+[functions.inbox-webhook]
+verify_jwt = false
+
+[functions.social-linkedin-webhook]
+verify_jwt = false

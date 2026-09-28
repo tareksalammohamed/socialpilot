@@ -79,6 +79,7 @@ type Variant = {
   hashtags: string[];
   cta: string | null;
   media_brief: Record<string, unknown>;
+  media_id?: string | null;
 };
 
 function buildPostText(variant: Variant, maxLen?: number): string {
@@ -88,6 +89,41 @@ function buildPostText(variant: Variant, maxLen?: number): string {
   let text = parts.filter(Boolean).join('\n\n');
   if (maxLen && text.length > maxLen) text = text.slice(0, maxLen - 1) + '…';
   return text;
+}
+
+// ---------------------------------------------------------------------------
+// Media resolution. The UI/Agent attach media through content_variants.media_id
+// (media table + public `media` bucket, migration 0033). Publishing used to
+// read only media_brief.image_url, which nothing ever sets, so attached media
+// was never published and Instagram always failed. media_brief.image_url is
+// kept as a legacy fallback. This block is intentionally identical in
+// social-publish and scheduler-tick (no cross-function imports in this
+// deployment model) — change both together.
+// ---------------------------------------------------------------------------
+type ResolvedMedia = { url: string; kind: 'image' | 'video'; mime: string | null } | null;
+
+async function resolveVariantMedia(variant: Variant): Promise<ResolvedMedia> {
+  if (variant.media_id) {
+    const { data: media } = await supabase
+      .from('media')
+      .select('storage_path, kind, mime_type')
+      .eq('id', variant.media_id)
+      .eq('workspace_id', variant.workspace_id)
+      .maybeSingle();
+    if (!media) throw new Error('الميديا المرفقة بالنسخة مش موجودة — أعد إرفاقها أو أزلها قبل النشر');
+    const { data } = supabase.storage.from('media').getPublicUrl(String(media.storage_path));
+    return { url: data.publicUrl, kind: media.kind === 'video' ? 'video' : 'image', mime: typeof media.mime_type === 'string' ? media.mime_type : null };
+  }
+  const legacy = variant.media_brief?.image_url;
+  return typeof legacy === 'string' && legacy ? { url: legacy, kind: 'image', mime: null } : null;
+}
+
+function assertImageOnly(media: ResolvedMedia, platformLabel: string): void {
+  if (media?.kind === 'video') throw new Error(`نشر الفيديو على ${platformLabel} غير مدعوم بعد — أزل الفيديو أو انشر يدويًا`);
+}
+
+function assertNoMedia(media: ResolvedMedia, platformLabel: string): void {
+  if (media) throw new Error(`رفع الصور/الفيديو على ${platformLabel} غير مدعوم بعد — أزل الميديا من النسخة أو انشر يدويًا (لن يُنشر النص بدون الصورة المرفقة)`);
 }
 
 async function fetchWithRetry(input: string | URL, init: RequestInit, maxAttempts = 3): Promise<Response> {
@@ -108,7 +144,7 @@ async function fetchWithRetry(input: string | URL, init: RequestInit, maxAttempt
 // sendPhoto when the variant has an image in media_brief, sendMessage
 // otherwise. Bot token lives in social_platform_app_secrets (shared bot).
 // ---------------------------------------------------------------------------
-async function publishToTelegram(variant: Variant, account: Record<string, unknown>): Promise<{ id: string; url: string | null }> {
+async function publishToTelegram(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
   const { data: secretRow } = await supabase
     .from('social_platform_app_secrets')
     .select('app_secret')
@@ -122,11 +158,9 @@ async function publishToTelegram(variant: Variant, account: Record<string, unkno
   if (!chatId) throw new Error('تعذّر تحديد قناة تيليجرام المربوطة');
 
   const text = buildPostText(variant, 4096);
-  const imageUrl = typeof variant.media_brief?.image_url === 'string' ? (variant.media_brief.image_url as string) : null;
-
-  const method = imageUrl ? 'sendPhoto' : 'sendMessage';
-  const params: Record<string, string> = imageUrl
-    ? { chat_id: String(chatId), photo: imageUrl, caption: text.slice(0, 1024) }
+  const method = media ? (media.kind === 'video' ? 'sendVideo' : 'sendPhoto') : 'sendMessage';
+  const params: Record<string, string> = media
+    ? { chat_id: String(chatId), [media.kind === 'video' ? 'video' : 'photo']: media.url, caption: text.slice(0, 1024) }
     : { chat_id: String(chatId), text };
 
   const res = await fetchWithRetry(`https://api.telegram.org/bot${botToken}/${method}`, {
@@ -200,21 +234,33 @@ async function getStoredAccessToken(accountId: string): Promise<string> {
   return String(token.access_token);
 }
 
-async function publishToFacebook(variant: Variant, account: Record<string, unknown>): Promise<{ id: string; url: string | null }> {
+async function publishToFacebook(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
   const accessToken = await getStoredAccessToken(String(account.id));
   const pageId = String(account.page_id ?? account.external_id ?? account.handle ?? '');
   if (!pageId) throw new Error('لم يتم العثور على Page ID لفيسبوك');
-  const response = await fetchWithRetry(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(pageId)}/feed`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: buildPostText(variant), access_token: accessToken }) });
+  assertImageOnly(media, 'فيسبوك');
+  // With an image the Page photo endpoint is used (it creates the feed post);
+  // it answers with post_id (the feed post) alongside id (the photo).
+  const endpoint = media ? 'photos' : 'feed';
+  const payload = media
+    ? { url: media.url, caption: buildPostText(variant), access_token: accessToken }
+    : { message: buildPostText(variant), access_token: accessToken };
+  const response = await fetchWithRetry(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(pageId)}/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   const body = await response.json();
-  if (!response.ok || !body.id) throw new Error(apiErrorMessage(body, 'فشل النشر على فيسبوك'));
-  return { id: String(body.id), url: `https://www.facebook.com/${body.id}` };
+  const postId = body.post_id ?? body.id;
+  if (!response.ok || !postId) throw new Error(apiErrorMessage(body, 'فشل النشر على فيسبوك'));
+  return { id: String(postId), url: `https://www.facebook.com/${postId}` };
 }
 
-async function publishToInstagram(variant: Variant, account: Record<string, unknown>): Promise<{ id: string; url: string | null }> {
+async function publishToInstagram(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
   const accessToken = await getStoredAccessToken(String(account.id));
   const igId = String(account.ig_user_id ?? account.external_id ?? '');
-  const imageUrl = typeof variant.media_brief?.image_url === 'string' ? variant.media_brief.image_url as string : '';
-  if (!igId || !imageUrl) throw new Error('النشر على إنستجرام يحتاج image_url وInstagram Business Account');
+  assertImageOnly(media, 'إنستجرام');
+  const imageUrl = media?.url ?? '';
+  if (!igId) throw new Error('لم يتم العثور على Instagram Business Account لهذا الحساب — أعد ربط الحساب');
+  if (!imageUrl) throw new Error('إنستجرام يحتاج صورة — أرفق صورة بالنسخة قبل النشر');
+  // Instagram Content Publishing accepts JPEG only; the UI also lets users attach PNG/WEBP/GIF.
+  if (media?.mime && media.mime !== 'image/jpeg') throw new Error('إنستجرام يقبل صور JPEG فقط — بدّل الصورة المرفقة بصيغة JPG قبل النشر');
   const createResponse = await fetchWithRetry(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(igId)}/media`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_url: imageUrl, caption: buildPostText(variant), access_token: accessToken }) });
   const createBody = await createResponse.json();
   if (!createResponse.ok || !createBody.id) throw new Error(apiErrorMessage(createBody, 'فشل إنشاء منشور إنستجرام'));
@@ -224,7 +270,8 @@ async function publishToInstagram(variant: Variant, account: Record<string, unkn
   return { id: String(publishBody.id), url: null };
 }
 
-async function publishToLinkedIn(variant: Variant, account: Record<string, unknown>): Promise<{ id: string; url: string | null }> {
+async function publishToLinkedIn(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+  assertNoMedia(media, 'لينكدإن');
   const accessToken = await getStoredAccessToken(String(account.id));
   const author = String((account.metadata as Record<string, unknown> | undefined)?.urn ?? `urn:li:person:${account.external_id ?? ''}`);
   if (!author || author.endsWith(':')) throw new Error('لم يتم العثور على هوية LinkedIn');
@@ -251,7 +298,8 @@ async function publishToLinkedIn(variant: Variant, account: Record<string, unkno
   return { id: String(postId), url: null };
 }
 
-async function publishToX(variant: Variant, account: Record<string, unknown>): Promise<{ id: string; url: string | null }> {
+async function publishToX(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+  assertNoMedia(media, 'إكس');
   const accessToken = await getFreshXToken(String(account.id));
   const text = buildPostText(variant, 280);
 
@@ -306,6 +354,15 @@ Deno.serve(async (req: Request) => {
     .eq('workspace_id', workspaceId)
     .maybeSingle();
   if (!variant) return jsonRes(404, { error: 'النسخة غير موجودة' });
+
+  // Same rule approve_content_variant enforces: Publish Now must not be a
+  // way around the quality review, and rejected variants never go out.
+  if (variant.status === 'rejected') {
+    return jsonRes(409, { error: 'النسخة دي مرفوضة — مينفعش تتنشر.' });
+  }
+  if (variant.quality_status === 'needs_improvement' || variant.quality_status === 'failed') {
+    return jsonRes(409, { error: 'مراجعة الجودة لسه مطلوبة — حسّن النسخة قبل النشر.' });
+  }
 
   const platform = variant.platform as string;
   const platformLabel = PLATFORM_LABELS[platform] ?? platform;
@@ -418,15 +475,16 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    const media = await resolveVariantMedia(variant as Variant);
     const result = platform === 'telegram'
-      ? await publishToTelegram(variant as Variant, account)
+      ? await publishToTelegram(variant as Variant, account, media)
       : platform === 'x'
-        ? await publishToX(variant as Variant, account)
+        ? await publishToX(variant as Variant, account, media)
         : platform === 'facebook'
-          ? await publishToFacebook(variant as Variant, account)
+          ? await publishToFacebook(variant as Variant, account, media)
           : platform === 'instagram'
-            ? await publishToInstagram(variant as Variant, account)
-            : await publishToLinkedIn(variant as Variant, account);
+            ? await publishToInstagram(variant as Variant, account, media)
+            : await publishToLinkedIn(variant as Variant, account, media);
 
     const publishedAt = new Date().toISOString();
     const publishState = {
