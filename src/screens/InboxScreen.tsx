@@ -6,16 +6,20 @@ import {
   MessageSquare,
   RefreshCw,
   Send,
+  Sparkles,
   UserRound,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 import {
   listInboxConversations,
   listInboxMessages,
   markInboxConversationRead,
+  analyzeInboxConversation,
+  setInboxReplyApproval,
   sendInboxReply,
 } from '@/lib/api';
-import type { InboxConversation, InboxMessage } from '@/lib/types';
+import type { InboxAiAnalysis, InboxConversation, InboxMessage } from '@/lib/types';
 import { Badge, Button, Card, EmptyState, ErrorBanner, Input, Spinner } from '@/components/ui';
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -54,6 +58,10 @@ export function InboxScreen() {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [aiAnalysis, setAiAnalysis] = useState<InboxAiAnalysis | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [approvalLoading, setApprovalLoading] = useState(false);
 
   const selectedConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
@@ -96,13 +104,61 @@ export function InboxScreen() {
       })
       .finally(() => {
         if (!cancelled) setMessagesLoading(false);
-      });
+    });
     void markInboxConversationRead(selectedId).catch(() => undefined);
+    void supabase
+      .from('inbox_ai_analyses')
+      .select('*')
+      .eq('workspace_id', workspace.id)
+      .eq('conversation_id', selectedId)
+      .maybeSingle()
+      .then(({ data }) => setAiAnalysis((data as InboxAiAnalysis | null) ?? null));
     setConversations((current) => current.map((item) => (item.id === selectedId ? { ...item, unread: false } : item)));
     return () => {
       cancelled = true;
     };
   }, [workspace?.id, selectedId]);
+
+  async function handleAnalyzeConversation() {
+    if (!selectedConversation || aiLoading) return;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      setAiAnalysis(await analyzeInboxConversation(selectedConversation.id));
+    } catch (cause) {
+      setAiError(cause instanceof Error ? cause.message : 'تعذّر تحليل المحادثة');
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  async function handleApproveReply() {
+    if (!selectedConversation || !aiAnalysis?.suggested_reply || approvalLoading) return;
+    setApprovalLoading(true);
+    setAiError(null);
+    try {
+      const approved = await setInboxReplyApproval({ conversationId: selectedConversation.id, action: 'approve_reply', reply: aiAnalysis.suggested_reply });
+      setAiAnalysis(approved);
+      setDraft(approved.approved_reply ?? approved.suggested_reply ?? '');
+    } catch (cause) {
+      setAiError(cause instanceof Error ? cause.message : 'تعذّر اعتماد الرد المقترح');
+    } finally {
+      setApprovalLoading(false);
+    }
+  }
+
+  async function handleRejectReply() {
+    if (!selectedConversation || !aiAnalysis || approvalLoading) return;
+    setApprovalLoading(true);
+    setAiError(null);
+    try {
+      setAiAnalysis(await setInboxReplyApproval({ conversationId: selectedConversation.id, action: 'reject_reply' }));
+    } catch (cause) {
+      setAiError(cause instanceof Error ? cause.message : 'تعذّر رفض الرد المقترح');
+    } finally {
+      setApprovalLoading(false);
+    }
+  }
 
   async function handleSend() {
     if (!selectedConversation || !draft.trim() || sending) return;
@@ -204,10 +260,62 @@ export function InboxScreen() {
                       </div>
                     </div>
                   </div>
-                  <button type="button" className="md:hidden text-ink-500" onClick={() => setSelectedId(null)} aria-label="رجوع">
-                    <ArrowRight size={18} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <Button variant="secondary" size="sm" onClick={() => void handleAnalyzeConversation()} disabled={aiLoading}>
+                      {aiLoading ? <Spinner size={14} /> : <Sparkles size={14} />}
+                      <span className="hidden sm:inline">تحليل AI</span>
+                    </Button>
+                    <button type="button" className="md:hidden text-ink-500" onClick={() => setSelectedId(null)} aria-label="رجوع">
+                      <ArrowRight size={18} />
+                    </button>
+                  </div>
                 </div>
+
+                {(aiError || aiAnalysis) && (
+                  <div className="px-4 pt-3">
+                    {aiError && <ErrorBanner message={aiError} />}
+                    {aiAnalysis && (
+                      <div className="rounded-xl border border-brand-500/25 bg-brand-500/5 p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-semibold text-brand-200">مساعد المبيعات AI</p>
+                          <Badge color={aiAnalysis.priority === 'urgent' || aiAnalysis.priority === 'high' ? 'warning' : 'neutral'}>
+                            أولوية {aiAnalysis.priority === 'urgent' ? 'عاجلة' : aiAnalysis.priority === 'high' ? 'عالية' : aiAnalysis.priority === 'low' ? 'منخفضة' : 'عادية'}
+                          </Badge>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs text-ink-300">
+                          <span>النية: <strong className="text-ink-100">{aiAnalysis.intent}</strong></span>
+                          <span>احتمال Lead: <strong className="text-ink-100">{aiAnalysis.lead_score}%</strong></span>
+                        </div>
+                        <p className="text-xs text-ink-300">{aiAnalysis.summary}</p>
+                        <p className="text-xs text-ink-400">الخطوة التالية: {aiAnalysis.next_best_action}</p>
+                        {aiAnalysis.suggested_reply && (
+                          <div className="rounded-lg bg-ink-900/80 p-2.5 text-xs text-ink-200">
+                            <span className="text-ink-500 block mb-1">رد مقترح — لا يتم إرساله تلقائيًا</span>
+                            <p className="whitespace-pre-wrap">{aiAnalysis.approved_reply ?? aiAnalysis.suggested_reply}</p>
+                            <div className="flex items-center gap-2 mt-2">
+                              {aiAnalysis.reply_status === 'approved' ? (
+                                <Badge color="accent">تم الاعتماد — راجع المسودة ثم أرسل يدويًا</Badge>
+                              ) : (
+                                <>
+                                  <Button size="sm" variant="secondary" onClick={() => void handleApproveReply()} disabled={approvalLoading || aiAnalysis.quality_verdict === 'fail'}>
+                                    {approvalLoading ? <Spinner size={14} /> : <Sparkles size={14} />}
+                                    اعتماد ووضعه في المسودة
+                                  </Button>
+                                  <Button size="sm" variant="ghost" onClick={() => void handleRejectReply()} disabled={approvalLoading}>
+                                    رفض
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        <p className={`text-[11px] ${aiAnalysis.quality_verdict === 'pass' ? 'text-accent-300' : 'text-warning-300'}`}>
+                          مراجعة الجودة: {aiAnalysis.quality_verdict === 'pass' ? 'مقبول مبدئيًا' : aiAnalysis.quality_verdict === 'fail' ? 'مرفوض' : 'يحتاج مراجعة بشرية'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="flex-1 p-4 space-y-3 overflow-y-auto min-h-[360px]">
                   {messagesError && <ErrorBanner message={messagesError} />}

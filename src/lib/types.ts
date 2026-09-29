@@ -227,6 +227,30 @@ export type InboxMessage = {
   created_at: string;
 };
 
+export type InboxAiAnalysis = {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  intent: string;
+  lead_score: number;
+  priority: 'low' | 'normal' | 'high' | 'urgent';
+  summary: string;
+  suggested_reply: string | null;
+  next_best_action: string;
+  quality_verdict: 'pass' | 'review' | 'fail';
+  quality_reasons: string[];
+  source_message_ids: string[];
+  provider: string | null;
+  model: string | null;
+  reply_status: 'pending' | 'approved' | 'rejected';
+  approved_reply: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejection_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 // ---- AI Gateway request/response shapes ----
 
 export type AiIntent =
