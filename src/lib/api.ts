@@ -287,6 +287,25 @@ export async function analyzeInboxConversation(conversationId: string): Promise<
   return body.analysis;
 }
 
+export async function setInboxReplyApproval(params: {
+  conversationId: string;
+  action: 'approve_reply' | 'reject_reply';
+  reply?: string;
+  rejectionReason?: string;
+}): Promise<InboxAiAnalysis> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token;
+  if (!token) throw new Error('يجب تسجيل الدخول لاعتماد الرد');
+  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/inbox-ai`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string },
+    body: JSON.stringify(params),
+  });
+  const body = await response.json().catch(() => ({})) as { error?: string; analysis?: InboxAiAnalysis };
+  if (!response.ok || !body.analysis) throw new Error(body.error ?? `فشل تحديث اعتماد الرد (${response.status})`);
+  return body.analysis;
+}
+
 
 export type AccountSyncResult = {
   account_id: string;

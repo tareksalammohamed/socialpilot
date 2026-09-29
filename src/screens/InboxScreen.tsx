@@ -16,6 +16,7 @@ import {
   listInboxMessages,
   markInboxConversationRead,
   analyzeInboxConversation,
+  setInboxReplyApproval,
   sendInboxReply,
 } from '@/lib/api';
 import type { InboxAiAnalysis, InboxConversation, InboxMessage } from '@/lib/types';
@@ -60,6 +61,7 @@ export function InboxScreen() {
   const [aiAnalysis, setAiAnalysis] = useState<InboxAiAnalysis | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [approvalLoading, setApprovalLoading] = useState(false);
 
   const selectedConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
@@ -127,6 +129,34 @@ export function InboxScreen() {
       setAiError(cause instanceof Error ? cause.message : 'تعذّر تحليل المحادثة');
     } finally {
       setAiLoading(false);
+    }
+  }
+
+  async function handleApproveReply() {
+    if (!selectedConversation || !aiAnalysis?.suggested_reply || approvalLoading) return;
+    setApprovalLoading(true);
+    setAiError(null);
+    try {
+      const approved = await setInboxReplyApproval({ conversationId: selectedConversation.id, action: 'approve_reply', reply: aiAnalysis.suggested_reply });
+      setAiAnalysis(approved);
+      setDraft(approved.approved_reply ?? approved.suggested_reply ?? '');
+    } catch (cause) {
+      setAiError(cause instanceof Error ? cause.message : 'تعذّر اعتماد الرد المقترح');
+    } finally {
+      setApprovalLoading(false);
+    }
+  }
+
+  async function handleRejectReply() {
+    if (!selectedConversation || !aiAnalysis || approvalLoading) return;
+    setApprovalLoading(true);
+    setAiError(null);
+    try {
+      setAiAnalysis(await setInboxReplyApproval({ conversationId: selectedConversation.id, action: 'reject_reply' }));
+    } catch (cause) {
+      setAiError(cause instanceof Error ? cause.message : 'تعذّر رفض الرد المقترح');
+    } finally {
+      setApprovalLoading(false);
     }
   }
 
@@ -261,7 +291,22 @@ export function InboxScreen() {
                         {aiAnalysis.suggested_reply && (
                           <div className="rounded-lg bg-ink-900/80 p-2.5 text-xs text-ink-200">
                             <span className="text-ink-500 block mb-1">رد مقترح — لا يتم إرساله تلقائيًا</span>
-                            {aiAnalysis.suggested_reply}
+                            <p className="whitespace-pre-wrap">{aiAnalysis.approved_reply ?? aiAnalysis.suggested_reply}</p>
+                            <div className="flex items-center gap-2 mt-2">
+                              {aiAnalysis.reply_status === 'approved' ? (
+                                <Badge color="accent">تم الاعتماد — راجع المسودة ثم أرسل يدويًا</Badge>
+                              ) : (
+                                <>
+                                  <Button size="sm" variant="secondary" onClick={() => void handleApproveReply()} disabled={approvalLoading || aiAnalysis.quality_verdict === 'fail'}>
+                                    {approvalLoading ? <Spinner size={14} /> : <Sparkles size={14} />}
+                                    اعتماد ووضعه في المسودة
+                                  </Button>
+                                  <Button size="sm" variant="ghost" onClick={() => void handleRejectReply()} disabled={approvalLoading}>
+                                    رفض
+                                  </Button>
+                                </>
+                              )}
+                            </div>
                           </div>
                         )}
                         <p className={`text-[11px] ${aiAnalysis.quality_verdict === 'pass' ? 'text-accent-300' : 'text-warning-300'}`}>

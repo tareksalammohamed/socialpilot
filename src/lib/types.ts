@@ -242,6 +242,11 @@ export type InboxAiAnalysis = {
   source_message_ids: string[];
   provider: string | null;
   model: string | null;
+  reply_status: 'pending' | 'approved' | 'rejected';
+  approved_reply: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejection_reason: string | null;
   created_at: string;
   updated_at: string;
 };

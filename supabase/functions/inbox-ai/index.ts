@@ -11,7 +11,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
 
-type Body = { conversationId?: string };
+type Body = { conversationId?: string; action?: 'analyze' | 'approve_reply' | 'reject_reply'; reply?: string; rejectionReason?: string };
 type Message = { id: string; direction: 'inbound' | 'outbound'; content: string; sender_name: string | null; created_at: string };
 type ParsedAnalysis = {
   intent?: unknown;
@@ -80,6 +80,42 @@ Deno.serve(async (req: Request) => {
     .eq('user_id', userData.user.id)
     .maybeSingle();
   if (!membership) return jsonResponse({ error: 'Forbidden' }, 403);
+
+  if (body.action === 'approve_reply' || body.action === 'reject_reply') {
+    const { data: existing, error: existingError } = await supabase
+      .from('inbox_ai_analyses')
+      .select('*')
+      .eq('conversation_id', conversation.id)
+      .eq('workspace_id', conversation.workspace_id)
+      .maybeSingle();
+    if (existingError) return jsonResponse({ error: existingError.message }, 500);
+    if (!existing) return jsonResponse({ error: 'لا يوجد تحليل AI لاعتماده' }, 404);
+
+    if (body.action === 'approve_reply') {
+      const approvedReply = text(body.reply ?? existing.suggested_reply);
+      if (!approvedReply) return jsonResponse({ error: 'الرد المقترح فارغ' }, 400);
+      if (existing.quality_verdict === 'fail') return jsonResponse({ error: 'لا يمكن اعتماد رد فشل في مراجعة الجودة' }, 409);
+      const { data: approved, error: approvalError } = await supabase
+        .from('inbox_ai_analyses')
+        .update({ reply_status: 'approved', approved_reply: approvedReply, approved_by: userData.user.id, approved_at: new Date().toISOString(), rejection_reason: null })
+        .eq('id', existing.id)
+        .eq('workspace_id', conversation.workspace_id)
+        .select('*')
+        .single();
+      if (approvalError) return jsonResponse({ error: approvalError.message }, 500);
+      return jsonResponse({ ok: true, analysis: approved, sendsAutomatically: false });
+    }
+
+    const { data: rejected, error: rejectionError } = await supabase
+      .from('inbox_ai_analyses')
+      .update({ reply_status: 'rejected', approved_reply: null, approved_by: null, approved_at: null, rejection_reason: text(body.rejectionReason, 'تم رفض الرد المقترح') })
+      .eq('id', existing.id)
+      .eq('workspace_id', conversation.workspace_id)
+      .select('*')
+      .single();
+    if (rejectionError) return jsonResponse({ error: rejectionError.message }, 500);
+    return jsonResponse({ ok: true, analysis: rejected, sendsAutomatically: false });
+  }
 
   const { data: messages, error: messagesError } = await supabase
     .from('inbox_messages')
