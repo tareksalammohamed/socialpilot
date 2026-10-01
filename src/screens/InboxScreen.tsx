@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   Inbox as InboxIcon,
@@ -8,6 +8,8 @@ import {
   Send,
   Sparkles,
   UserRound,
+  Settings2,
+  Save,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
@@ -33,7 +35,50 @@ const PLATFORM_LABELS: Record<string, string> = {
   tiktok: 'تيك توك',
 };
 
-const REPLY_SUPPORTED = new Set(['facebook', 'instagram', 'linkedin', 'whatsapp', 'telegram']);
+type InboxAiSettings = {
+  enabled: boolean;
+  autoAnalyze: boolean;
+  tone: 'professional' | 'friendly' | 'sales';
+  language: 'ar' | 'auto';
+  responseGoal: string;
+  businessContext: string;
+  forbiddenTopics: string;
+  maxReplyLength: number;
+};
+
+const DEFAULT_AI_SETTINGS: InboxAiSettings = {
+  enabled: true,
+  autoAnalyze: false,
+  tone: 'professional',
+  language: 'ar',
+  responseGoal: 'حل استفسار العميل بوضوح ثم توجيهه للخطوة التالية المناسبة بدون ضغط أو وعود غير مؤكدة.',
+  businessContext: '',
+  forbiddenTopics: '',
+  maxReplyLength: 320,
+};
+
+function readInboxAiSettings(settings: Record<string, unknown> | null | undefined): InboxAiSettings {
+  const raw = (settings?.inbox_ai ?? {}) as Partial<InboxAiSettings>;
+  return {
+    enabled: raw.enabled !== false,
+    autoAnalyze: raw.autoAnalyze === true,
+    tone: raw.tone === 'friendly' || raw.tone === 'sales' ? raw.tone : 'professional',
+    language: raw.language === 'auto' ? 'auto' : 'ar',
+    responseGoal: typeof raw.responseGoal === 'string' ? raw.responseGoal : DEFAULT_AI_SETTINGS.responseGoal,
+    businessContext: typeof raw.businessContext === 'string' ? raw.businessContext : '',
+    forbiddenTopics: typeof raw.forbiddenTopics === 'string' ? raw.forbiddenTopics : '',
+    maxReplyLength: typeof raw.maxReplyLength === 'number'
+      ? Math.max(80, Math.min(1000, Math.round(raw.maxReplyLength)))
+      : DEFAULT_AI_SETTINGS.maxReplyLength,
+  };
+}
+
+function canReplyToConversation(conversation: InboxConversation): boolean {
+  if (conversation.platform === 'facebook' || conversation.platform === 'instagram') return true;
+  if (conversation.platform === 'whatsapp' || conversation.platform === 'telegram') return conversation.type === 'dm';
+  if (conversation.platform === 'linkedin') return conversation.type === 'comment';
+  return false;
+}
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return '';
@@ -48,7 +93,7 @@ function messageLabel(message: InboxMessage): string {
 }
 
 export function InboxScreen() {
-  const { workspace } = useAuth();
+  const { workspace, user, refreshWorkspace } = useAuth();
   const [conversations, setConversations] = useState<InboxConversation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<InboxMessage[]>([]);
@@ -62,6 +107,18 @@ export function InboxScreen() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  const [analysisLoaded, setAnalysisLoaded] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [aiSettings, setAiSettings] = useState<InboxAiSettings>(() => readInboxAiSettings(workspace?.settings));
+  const autoAnalyzeKeyRef = useRef<string | null>(null);
+
+  const canManageAiSettings = !!workspace && !!user && workspace.owner_id === user.id;
+
+  useEffect(() => {
+    setAiSettings(readInboxAiSettings(workspace?.settings));
+  }, [workspace?.id, workspace?.settings]);
 
   const selectedConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
@@ -90,11 +147,15 @@ export function InboxScreen() {
   useEffect(() => {
     if (!workspace?.id || !selectedId) {
       setMessages([]);
+      setAiAnalysis(null);
+      setAnalysisLoaded(false);
       return;
     }
     let cancelled = false;
     setMessagesLoading(true);
     setMessagesError(null);
+    setAnalysisLoaded(false);
+    setAiAnalysis(null);
     void listInboxMessages(workspace.id, selectedId)
       .then((data) => {
         if (!cancelled) setMessages(data);
@@ -112,15 +173,83 @@ export function InboxScreen() {
       .eq('workspace_id', workspace.id)
       .eq('conversation_id', selectedId)
       .maybeSingle()
-      .then(({ data }) => setAiAnalysis((data as InboxAiAnalysis | null) ?? null));
+      .then(({ data }) => {
+        if (!cancelled) {
+          setAiAnalysis((data as InboxAiAnalysis | null) ?? null);
+          setAnalysisLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAnalysisLoaded(true);
+      });
     setConversations((current) => current.map((item) => (item.id === selectedId ? { ...item, unread: false } : item)));
     return () => {
       cancelled = true;
     };
   }, [workspace?.id, selectedId]);
 
+  useEffect(() => {
+    if (!workspace?.id) return;
+    const channel = supabase
+      .channel(`inbox:${workspace.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'inbox_conversations', filter: `workspace_id=eq.${workspace.id}` },
+        () => { void loadConversations(); },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'inbox_messages', filter: `workspace_id=eq.${workspace.id}` },
+        (payload) => {
+          const row = payload.new as InboxMessage;
+          if (row.conversation_id === selectedId) {
+            setMessages((current) => current.some((item) => item.id === row.id) ? current : [...current, row]);
+          }
+          void loadConversations();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [workspace?.id, selectedId, loadConversations]);
+
+  useEffect(() => {
+    if (!selectedConversation || !analysisLoaded || aiAnalysis || aiLoading || !aiSettings.enabled || !aiSettings.autoAnalyze) return;
+    if (autoAnalyzeKeyRef.current === selectedConversation.id) return;
+    autoAnalyzeKeyRef.current = selectedConversation.id;
+    void handleAnalyzeConversation();
+  }, [selectedConversation, analysisLoaded, aiAnalysis, aiLoading, aiSettings.enabled, aiSettings.autoAnalyze]);
+
+  async function handleSaveAiSettings() {
+    if (!workspace || !user || !canManageAiSettings || settingsSaving) return;
+    setSettingsSaving(true);
+    setSettingsNotice(null);
+    setAiError(null);
+    try {
+      const nextSettings = { ...(workspace.settings ?? {}), inbox_ai: aiSettings };
+      const { error: updateError } = await supabase
+        .from('workspaces')
+        .update({ settings: nextSettings, updated_at: new Date().toISOString() })
+        .eq('id', workspace.id)
+        .eq('owner_id', user.id);
+      if (updateError) throw updateError;
+      await refreshWorkspace();
+      setSettingsNotice('تم حفظ إعدادات مساعد الوارد.');
+    } catch (cause) {
+      setAiError(cause instanceof Error ? cause.message : 'تعذّر حفظ إعدادات مساعد الوارد');
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
   async function handleAnalyzeConversation() {
     if (!selectedConversation || aiLoading) return;
+    if (!aiSettings.enabled) {
+      setAiError('مساعد الذكاء الاصطناعي معطّل من إعدادات صندوق الوارد.');
+      return;
+    }
     setAiLoading(true);
     setAiError(null);
     try {
@@ -199,6 +328,134 @@ export function InboxScreen() {
       </div>
 
       {error && <div className="mb-4"><ErrorBanner message={error} /></div>}
+
+      <Card className="mb-4 !p-0 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setSettingsOpen((value) => !value)}
+          className="w-full px-4 py-3 flex items-center justify-between gap-3 text-right hover:bg-ink-900/50 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <Settings2 size={17} className="text-brand-400" />
+            <div>
+              <p className="text-sm font-semibold text-ink-100">إعدادات مساعد الوارد AI</p>
+              <p className="text-[11px] text-ink-500 mt-0.5">
+                {aiSettings.enabled ? 'مفعّل' : 'متوقف'} · {aiSettings.autoAnalyze ? 'تحليل تلقائي عند فتح المحادثة' : 'تحليل عند الطلب'} · الإرسال بمراجعة بشرية
+              </p>
+            </div>
+          </div>
+          <Badge color={aiSettings.enabled ? 'accent' : 'neutral'}>{aiSettings.enabled ? 'جاهز' : 'متوقف'}</Badge>
+        </button>
+
+        {settingsOpen && (
+          <div className="border-t border-ink-800 p-4 space-y-4">
+            {!canManageAiSettings && (
+              <p className="text-xs text-warning-400">تعديل هذه الإعدادات متاح لمالك مساحة العمل فقط.</p>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="flex items-center justify-between gap-3 rounded-xl bg-ink-900 px-3 py-2.5">
+                <span className="text-xs text-ink-300">تشغيل مساعد الذكاء الاصطناعي</span>
+                <input
+                  type="checkbox"
+                  checked={aiSettings.enabled}
+                  disabled={!canManageAiSettings}
+                  onChange={(event) => setAiSettings((current) => ({ ...current, enabled: event.target.checked }))}
+                />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-xl bg-ink-900 px-3 py-2.5">
+                <span className="text-xs text-ink-300">تحليل تلقائي عند فتح المحادثة</span>
+                <input
+                  type="checkbox"
+                  checked={aiSettings.autoAnalyze}
+                  disabled={!canManageAiSettings || !aiSettings.enabled}
+                  onChange={(event) => setAiSettings((current) => ({ ...current, autoAnalyze: event.target.checked }))}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-ink-500">أسلوب الرد</span>
+                <select
+                  value={aiSettings.tone}
+                  disabled={!canManageAiSettings}
+                  onChange={(event) => setAiSettings((current) => ({ ...current, tone: event.target.value as InboxAiSettings['tone'] }))}
+                  className="w-full rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-sm text-ink-100"
+                >
+                  <option value="professional">احترافي</option>
+                  <option value="friendly">ودود</option>
+                  <option value="sales">بيعي هادئ</option>
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs text-ink-500">لغة الرد</span>
+                <select
+                  value={aiSettings.language}
+                  disabled={!canManageAiSettings}
+                  onChange={(event) => setAiSettings((current) => ({ ...current, language: event.target.value as InboxAiSettings['language'] }))}
+                  className="w-full rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-sm text-ink-100"
+                >
+                  <option value="ar">العربية</option>
+                  <option value="auto">نفس لغة العميل</option>
+                </select>
+              </label>
+            </div>
+
+            <label className="block space-y-1">
+              <span className="text-xs text-ink-500">هدف الرد</span>
+              <textarea
+                value={aiSettings.responseGoal}
+                disabled={!canManageAiSettings}
+                onChange={(event) => setAiSettings((current) => ({ ...current, responseGoal: event.target.value }))}
+                rows={2}
+                className="w-full rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-sm text-ink-100 resize-y"
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs text-ink-500">معلومات النشاط التي يُسمح للـAI باستخدامها</span>
+              <textarea
+                value={aiSettings.businessContext}
+                disabled={!canManageAiSettings}
+                onChange={(event) => setAiSettings((current) => ({ ...current, businessContext: event.target.value }))}
+                rows={3}
+                placeholder="الخدمات، مواعيد العمل، سياسة الأسعار، روابط أو معلومات ثابتة..."
+                className="w-full rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-sm text-ink-100 resize-y"
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs text-ink-500">ممنوعات أو معلومات لا يذكرها المساعد</span>
+              <textarea
+                value={aiSettings.forbiddenTopics}
+                disabled={!canManageAiSettings}
+                onChange={(event) => setAiSettings((current) => ({ ...current, forbiddenTopics: event.target.value }))}
+                rows={2}
+                placeholder="مثال: لا تعد بخصومات غير مؤكدة، لا تذكر أسعارًا إلا إذا كانت موجودة بالسياق..."
+                className="w-full rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-sm text-ink-100 resize-y"
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs text-ink-500">الحد التقريبي لطول الرد: {aiSettings.maxReplyLength} حرف</span>
+              <input
+                type="range"
+                min={80}
+                max={1000}
+                step={20}
+                value={aiSettings.maxReplyLength}
+                disabled={!canManageAiSettings}
+                onChange={(event) => setAiSettings((current) => ({ ...current, maxReplyLength: Number(event.target.value) }))}
+                className="w-full"
+              />
+            </label>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] text-ink-500">الـAI يقترح ويحلل، لكن لا يرسل أي رد تلقائيًا بدون ضغط المستخدم على إرسال.</p>
+              {canManageAiSettings && (
+                <Button size="sm" onClick={() => void handleSaveAiSettings()} disabled={settingsSaving}>
+                  {settingsSaving ? <Spinner size={14} /> : <Save size={14} />}
+                  حفظ إعدادات AI
+                </Button>
+              )}
+            </div>
+            {settingsNotice && <p className="text-xs text-accent-300">{settingsNotice}</p>}
+          </div>
+        )}
+      </Card>
 
       {loading ? (
         <div className="py-20 flex justify-center"><Spinner className="text-brand-400" size={28} /></div>
@@ -339,8 +596,12 @@ export function InboxScreen() {
                 </div>
 
                 <div className="p-3 border-t border-ink-800">
-                  {!REPLY_SUPPORTED.has(selectedConversation.platform) && (
-                    <p className="text-xs text-warning-400 mb-2">الرد المباشر لهذه المنصة غير مدعوم من خلال API الحالي.</p>
+                  {!canReplyToConversation(selectedConversation) && (
+                    <p className="text-xs text-warning-400 mb-2">
+                      {selectedConversation.platform === 'linkedin' && selectedConversation.type === 'dm'
+                        ? 'LinkedIn لا يتيح إرسال الرسائل الخاصة من خلال الـAPI القياسي؛ يمكنك استخدام AI لصياغة الرد ثم إرساله يدويًا من LinkedIn.'
+                        : 'الرد المباشر لهذه المحادثة غير مدعوم من خلال API الحالي.'}
+                    </p>
                   )}
                   <div className="flex items-end gap-2">
                     <Input
@@ -352,7 +613,7 @@ export function InboxScreen() {
                     <Button
                       size="sm"
                       onClick={() => void handleSend()}
-                      disabled={sending || !draft.trim() || !REPLY_SUPPORTED.has(selectedConversation.platform)}
+                      disabled={sending || !draft.trim() || !canReplyToConversation(selectedConversation)}
                       className="shrink-0"
                     >
                       {sending ? <Spinner size={16} /> : <Send size={16} />}
