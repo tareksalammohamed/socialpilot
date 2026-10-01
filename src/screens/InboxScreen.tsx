@@ -10,6 +10,10 @@ import {
   UserRound,
   Settings2,
   Save,
+  Search,
+  UserCheck,
+  CircleCheckBig,
+  Clock3,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
@@ -107,6 +111,10 @@ export function InboxScreen() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'pending' | 'closed'>('all');
+  const [platformFilter, setPlatformFilter] = useState<string>('all');
   const [analysisLoaded, setAnalysisLoaded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -123,6 +131,23 @@ export function InboxScreen() {
   const selectedConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
     [conversations, selectedId],
+  );
+
+  const filteredConversations = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return conversations.filter((conversation) => {
+      if (statusFilter !== 'all' && conversation.status !== statusFilter) return false;
+      if (platformFilter !== 'all' && conversation.platform !== platformFilter) return false;
+      if (!needle) return true;
+      return [conversation.sender_name, conversation.snippet, conversation.platform]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(needle));
+    });
+  }, [conversations, search, statusFilter, platformFilter]);
+
+  const visiblePlatforms = useMemo(
+    () => Array.from(new Set(conversations.map((conversation) => conversation.platform))).sort(),
+    [conversations],
   );
 
   const loadConversations = useCallback(async (silent = false) => {
@@ -221,6 +246,50 @@ export function InboxScreen() {
     autoAnalyzeKeyRef.current = selectedConversation.id;
     void handleAnalyzeConversation();
   }, [selectedConversation, analysisLoaded, aiAnalysis, aiLoading, aiSettings.enabled, aiSettings.autoAnalyze]);
+
+  async function handleConversationStatus(status: 'open' | 'pending' | 'closed') {
+    if (!selectedConversation || workflowBusy) return;
+    setWorkflowBusy(true);
+    setMessagesError(null);
+    try {
+      const resolvedAt = status === 'closed' ? new Date().toISOString() : null;
+      const { error: updateError } = await supabase
+        .from('inbox_conversations')
+        .update({ status, resolved_at: resolvedAt })
+        .eq('id', selectedConversation.id)
+        .eq('workspace_id', selectedConversation.workspace_id);
+      if (updateError) throw updateError;
+      setConversations((current) => current.map((item) => (
+        item.id === selectedConversation.id ? { ...item, status, resolved_at: resolvedAt } : item
+      )));
+    } catch (cause) {
+      setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحديث حالة المحادثة');
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function handleToggleAssignment() {
+    if (!selectedConversation || !user || workflowBusy) return;
+    setWorkflowBusy(true);
+    setMessagesError(null);
+    try {
+      const assignedTo = selectedConversation.assigned_to === user.id ? null : user.id;
+      const { error: updateError } = await supabase
+        .from('inbox_conversations')
+        .update({ assigned_to: assignedTo })
+        .eq('id', selectedConversation.id)
+        .eq('workspace_id', selectedConversation.workspace_id);
+      if (updateError) throw updateError;
+      setConversations((current) => current.map((item) => (
+        item.id === selectedConversation.id ? { ...item, assigned_to: assignedTo } : item
+      )));
+    } catch (cause) {
+      setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحديث إسناد المحادثة');
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
 
   async function handleSaveAiSettings() {
     if (!workspace || !user || !canManageAiSettings || settingsSaving) return;
@@ -474,8 +543,43 @@ export function InboxScreen() {
               <span className="text-sm font-semibold text-ink-100">المحادثات</span>
               <Badge color="brand">{conversations.filter((item) => item.unread).length} جديدة</Badge>
             </div>
+            <div className="p-3 border-b border-ink-800 space-y-2">
+              <div className="relative">
+                <Search size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-600" />
+                <input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="ابحث بالاسم أو نص الرسالة..."
+                  className="w-full rounded-xl border border-ink-800 bg-ink-900 pr-9 pl-3 py-2 text-xs text-ink-100 outline-none focus:border-brand-500/50"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+                  className="rounded-xl border border-ink-800 bg-ink-900 px-2.5 py-2 text-xs text-ink-200"
+                >
+                  <option value="all">كل الحالات</option>
+                  <option value="open">مفتوحة</option>
+                  <option value="pending">معلّقة</option>
+                  <option value="closed">مغلقة</option>
+                </select>
+                <select
+                  value={platformFilter}
+                  onChange={(event) => setPlatformFilter(event.target.value)}
+                  className="rounded-xl border border-ink-800 bg-ink-900 px-2.5 py-2 text-xs text-ink-200"
+                >
+                  <option value="all">كل المنصات</option>
+                  {visiblePlatforms.map((platform) => (
+                    <option key={platform} value={platform}>{PLATFORM_LABELS[platform] || platform}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
             <div className="max-h-[560px] overflow-y-auto">
-              {conversations.map((conversation) => {
+              {filteredConversations.length === 0 ? (
+                <div className="p-5 text-center text-xs text-ink-500">لا توجد محادثات مطابقة للفلاتر.</div>
+              ) : filteredConversations.map((conversation) => {
                 const active = conversation.id === selectedId;
                 return (
                   <button
@@ -492,7 +596,11 @@ export function InboxScreen() {
                       {conversation.unread && <span className="w-2 h-2 rounded-full bg-brand-400 shrink-0 mt-1.5" />}
                     </div>
                     <div className="flex items-center justify-between gap-2 mt-2 text-[11px] text-ink-600">
-                      <span>{PLATFORM_LABELS[conversation.platform] || conversation.platform}</span>
+                      <span className="flex items-center gap-1.5">
+                        <span>{PLATFORM_LABELS[conversation.platform] || conversation.platform}</span>
+                        {conversation.status === 'closed' && <span>· مغلقة</span>}
+                        {conversation.status === 'pending' && <span>· معلّقة</span>}
+                      </span>
                       <span>{formatDate(conversation.updated_at)}</span>
                     </div>
                   </button>
@@ -511,16 +619,40 @@ export function InboxScreen() {
                     </div>
                     <div className="min-w-0">
                       <p className="font-medium text-ink-100 truncate">{selectedConversation.sender_name || 'محادثة'}</p>
-                      <div className="flex items-center gap-2 mt-1">
+                      <div className="flex items-center gap-2 mt-1 flex-wrap">
                         <Badge color="neutral">{PLATFORM_LABELS[selectedConversation.platform] || selectedConversation.platform}</Badge>
+                        <Badge color={selectedConversation.status === 'closed' ? 'accent' : selectedConversation.status === 'pending' ? 'warning' : 'brand'}>
+                          {selectedConversation.status === 'closed' ? 'مغلقة' : selectedConversation.status === 'pending' ? 'معلّقة' : 'مفتوحة'}
+                        </Badge>
+                        {selectedConversation.assigned_to === user?.id && <Badge color="neutral">مسندة لك</Badge>}
                         <span className="text-[11px] text-ink-500">{selectedConversation.type === 'comment' ? 'تعليق' : 'رسالة مباشرة'}</span>
                       </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
+                    <Button variant="ghost" size="sm" onClick={() => void handleToggleAssignment()} disabled={workflowBusy}>
+                      <UserCheck size={14} />
+                      <span className="hidden lg:inline">{selectedConversation.assigned_to === user?.id ? 'إلغاء إسنادي' : 'إسناد لي'}</span>
+                    </Button>
+                    {selectedConversation.status !== 'pending' && (
+                      <Button variant="ghost" size="sm" onClick={() => void handleConversationStatus('pending')} disabled={workflowBusy}>
+                        <Clock3 size={14} />
+                        <span className="hidden lg:inline">تعليق</span>
+                      </Button>
+                    )}
+                    {selectedConversation.status === 'closed' ? (
+                      <Button variant="ghost" size="sm" onClick={() => void handleConversationStatus('open')} disabled={workflowBusy}>
+                        فتح
+                      </Button>
+                    ) : (
+                      <Button variant="ghost" size="sm" onClick={() => void handleConversationStatus('closed')} disabled={workflowBusy}>
+                        <CircleCheckBig size={14} />
+                        <span className="hidden lg:inline">إغلاق</span>
+                      </Button>
+                    )}
                     <Button variant="secondary" size="sm" onClick={() => void handleAnalyzeConversation()} disabled={aiLoading || !aiSettings.enabled}>
                       {aiLoading ? <Spinner size={14} /> : <Sparkles size={14} />}
-                      <span className="hidden sm:inline">تحليل AI</span>
+                      <span className="hidden sm:inline">{aiAnalysis ? 'إعادة تحليل AI' : 'تحليل AI'}</span>
                     </Button>
                     <button type="button" className="md:hidden text-ink-500" onClick={() => setSelectedId(null)} aria-label="رجوع">
                       <ArrowRight size={18} />
