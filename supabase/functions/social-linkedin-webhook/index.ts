@@ -134,6 +134,8 @@ async function handleNotification(supabase: ReturnType<typeof createClient>, n: 
         external_participant_id: comment?.owner ?? null,
         snippet: text,
         unread: true,
+        status: 'open',
+        resolved_at: null,
         metadata: { source: 'linkedin_webhook', action: n.action },
       },
       { onConflict: 'account_id,platform,type,external_id' },
