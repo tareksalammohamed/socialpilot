@@ -13,6 +13,17 @@ const corsHeaders = {
 
 type Body = { conversationId?: string; action?: 'analyze' | 'approve_reply' | 'reject_reply'; reply?: string; rejectionReason?: string };
 type Message = { id: string; direction: 'inbound' | 'outbound'; content: string; sender_name: string | null; created_at: string };
+type InboxAiSettings = {
+  enabled?: boolean;
+  autoAnalyze?: boolean;
+  tone?: 'professional' | 'friendly' | 'sales';
+  language?: 'ar' | 'auto';
+  responseGoal?: string;
+  businessContext?: string;
+  forbiddenTopics?: string;
+  maxReplyLength?: number;
+};
+
 type ParsedAnalysis = {
   intent?: unknown;
   lead_score?: unknown;
@@ -81,6 +92,17 @@ Deno.serve(async (req: Request) => {
     .maybeSingle();
   if (!membership) return jsonResponse({ error: 'Forbidden' }, 403);
 
+  const { data: workspace } = await supabase
+    .from('workspaces')
+    .select('name, settings')
+    .eq('id', conversation.workspace_id)
+    .maybeSingle();
+  const workspaceSettings = ((workspace?.settings ?? {}) as Record<string, unknown>);
+  const inboxSettings = ((workspaceSettings.inbox_ai ?? {}) as InboxAiSettings);
+  if (inboxSettings.enabled === false && body.action !== 'approve_reply' && body.action !== 'reject_reply') {
+    return jsonResponse({ error: 'مساعد الذكاء الاصطناعي معطّل من إعدادات صندوق الوارد' }, 409);
+  }
+
   if (body.action === 'approve_reply' || body.action === 'reject_reply') {
     const { data: existing, error: existingError } = await supabase
       .from('inbox_ai_analyses')
@@ -128,10 +150,28 @@ Deno.serve(async (req: Request) => {
 
   const orderedMessages = ((messages ?? []) as Message[]).reverse();
   const transcript = orderedMessages.map((message) => `${message.direction === 'inbound' ? 'CUSTOMER' : 'AGENT'}: ${message.content}`).join('\n');
-  const prompt = `حلل محادثة مبيعات حقيقية من صندوق الرسائل الموحد. لا تخترع أي معلومة غير موجودة في المحادثة أو Brand DNA.
+  const toneLabel = inboxSettings.tone === 'friendly' ? 'ودود وطبيعي' : inboxSettings.tone === 'sales' ? 'بيعي هادئ ومقنع بدون ضغط' : 'احترافي وواضح';
+  const languageInstruction = inboxSettings.language === 'auto' ? 'اكتب الرد بنفس لغة العميل الأخيرة.' : 'اكتب الرد باللغة العربية.';
+  const maxReplyLength = Math.max(80, Math.min(1000, Math.round(Number(inboxSettings.maxReplyLength ?? 320))));
+  const responseGoal = text(inboxSettings.responseGoal, 'حل استفسار العميل بوضوح ثم توجيهه للخطوة التالية المناسبة بدون ضغط أو وعود غير مؤكدة.').slice(0, 2000);
+  const businessContext = text(inboxSettings.businessContext).slice(0, 5000);
+  const forbiddenTopics = text(inboxSettings.forbiddenTopics).slice(0, 3000);
+
+  const prompt = `حلل محادثة حقيقية من صندوق الرسائل الموحد واقترح ردًا قابلًا للاستخدام. لا تخترع أي معلومة غير موجودة في المحادثة أو سياق النشاط المسموح.
+اسم مساحة العمل: ${workspace?.name ?? 'غير محدد'}
 المنصة: ${conversation.platform}
 النوع: ${conversation.type}
 الاسم: ${conversation.sender_name ?? 'غير معروف'}
+أسلوب الرد المطلوب: ${toneLabel}
+تعليمات اللغة: ${languageInstruction}
+هدف الرد: ${responseGoal}
+الحد التقريبي لطول الرد: ${maxReplyLength} حرف
+سياق النشاط المسموح للـAI استخدامه:
+${businessContext || '(لا توجد معلومات إضافية محفوظة)'}
+
+ممنوعات وتعليمات لا يجب تجاوزها:
+${forbiddenTopics || '(لا توجد تعليمات إضافية)'}
+
 المحادثة:
 ${transcript || conversation.snippet || '(لا توجد رسائل)'}
 
@@ -146,7 +186,12 @@ ${transcript || conversation.snippet || '(لا توجد رسائل)'}
   "quality_verdict": "pass|review|fail",
   "quality_reasons": ["سبب أو أكثر"]
 }
-قواعد الجودة: اجعل quality_verdict=review إذا كان الرد يحتاج معلومة من الشركة أو موافقة بشرية، ولا تقترح إرسالًا تلقائيًا. lead_score تقدير احتمالي من نص المحادثة فقط.`;
+قواعد الجودة:
+- اجعل quality_verdict=review إذا كان الرد يحتاج معلومة غير موجودة أو تحققًا بشريًا.
+- اجعل quality_verdict=fail إذا خالف الرد الممنوعات أو احتوى ادعاءً غير مدعوم.
+- لا تقترح إرسالًا تلقائيًا ولا تدّع أن الرد تم إرساله.
+- suggested_reply يجب أن يلتزم بالأسلوب واللغة والهدف والسياق والحد التقريبي للطول أعلاه.
+- lead_score تقدير احتمالي من نص المحادثة فقط.`;
 
   const gatewayResponse = await fetch(`${supabaseUrl}/functions/v1/ai-gateway`, {
     method: 'POST',
@@ -156,7 +201,17 @@ ${transcript || conversation.snippet || '(لا توجد رسائل)'}
       workspaceId: conversation.workspace_id,
       onBehalfOfUserId: userData.user.id,
       message: prompt,
-      context: { source: 'inbox_ai', conversation_id: conversation.id, platform: conversation.platform, transcript },
+      context: {
+        source: 'inbox_ai',
+        conversation_id: conversation.id,
+        platform: conversation.platform,
+        transcript,
+        inbox_ai_settings: {
+          tone: inboxSettings.tone ?? 'professional',
+          language: inboxSettings.language ?? 'ar',
+          max_reply_length: maxReplyLength,
+        },
+      },
     }),
   });
   const gatewayBody = await gatewayResponse.json().catch(() => ({})) as Record<string, unknown>;
