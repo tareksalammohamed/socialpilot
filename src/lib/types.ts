@@ -206,6 +206,9 @@ export type InboxConversation = {
   snippet: string | null;
   unread: boolean;
   needs_review: boolean;
+  status: 'open' | 'pending' | 'closed';
+  assigned_to: string | null;
+  resolved_at: string | null;
   content_id: string | null;
   metadata: Record<string, unknown>;
   created_at: string;

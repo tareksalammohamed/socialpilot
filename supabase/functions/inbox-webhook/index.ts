@@ -117,6 +117,8 @@ async function upsertConversationAndMessage(
         external_participant_id: input.external_participant_id,
         snippet: input.content,
         unread: true,
+        status: 'open',
+        resolved_at: null,
         ...(input.metadata ? { metadata: input.metadata } : {}),
       },
       { onConflict: 'account_id,platform,type,external_id' },
