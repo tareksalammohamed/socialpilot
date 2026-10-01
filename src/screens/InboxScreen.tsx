@@ -125,9 +125,9 @@ export function InboxScreen() {
     [conversations, selectedId],
   );
 
-  const loadConversations = useCallback(async () => {
+  const loadConversations = useCallback(async (silent = false) => {
     if (!workspace?.id) return;
-    setLoading(true);
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const data = await listInboxConversations(workspace.id);
@@ -136,7 +136,7 @@ export function InboxScreen() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'تعذّر تحميل المحادثات');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [workspace?.id]);
 
@@ -195,7 +195,7 @@ export function InboxScreen() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'inbox_conversations', filter: `workspace_id=eq.${workspace.id}` },
-        () => { void loadConversations(); },
+        () => { void loadConversations(true); },
       )
       .on(
         'postgres_changes',
@@ -205,7 +205,7 @@ export function InboxScreen() {
           if (row.conversation_id === selectedId) {
             setMessages((current) => current.some((item) => item.id === row.id) ? current : [...current, row]);
           }
-          void loadConversations();
+          void loadConversations(true);
         },
       )
       .subscribe();
@@ -295,7 +295,7 @@ export function InboxScreen() {
     setMessagesError(null);
     try {
       const message = await sendInboxReply(selectedConversation.id, draft);
-      setMessages((current) => [...current, message]);
+      setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
       setDraft('');
       setConversations((current) => current.map((item) => (
         item.id === selectedConversation.id
@@ -518,7 +518,7 @@ export function InboxScreen() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button variant="secondary" size="sm" onClick={() => void handleAnalyzeConversation()} disabled={aiLoading}>
+                    <Button variant="secondary" size="sm" onClick={() => void handleAnalyzeConversation()} disabled={aiLoading || !aiSettings.enabled}>
                       {aiLoading ? <Spinner size={14} /> : <Sparkles size={14} />}
                       <span className="hidden sm:inline">تحليل AI</span>
                     </Button>
