@@ -1,6 +1,6 @@
 services:
   wppconnect:
-    image: wppconnect/wppconnect-server:2.10.18
+    image: wppconnect/wppconnect-server:2.10.28
     restart: unless-stopped
     ports:
       - "127.0.0.1:${PORT:-21465}:${PORT:-21465}"
