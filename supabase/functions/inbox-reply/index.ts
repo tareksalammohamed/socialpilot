@@ -36,6 +36,13 @@ type Conversation = {
   external_participant_id: string | null;
 };
 
+type WhatsAppTemplateInput = {
+  name: string;
+  language: string;
+  variables?: string[];
+  preview?: string;
+};
+
 async function getFreshAccessToken(accountId: string): Promise<string> {
   const { data: token } = await supabase
     .from('social_account_tokens')
@@ -48,6 +55,53 @@ async function getFreshAccessToken(accountId: string): Promise<string> {
     throw new Error('انتهت صلاحية التوكن — أعد ربط الحساب');
   }
   return String(token.access_token);
+}
+
+async function deliverWhatsAppTemplate(
+  conv: Conversation,
+  account: Record<string, unknown>,
+  template: WhatsAppTemplateInput,
+): Promise<string | null> {
+  const accessToken = await getFreshAccessToken(conv.account_id);
+  const phoneNumberId = account.external_id as string | undefined;
+  if (!phoneNumberId || !conv.external_participant_id) {
+    throw new Error('مفيش رقم واتساب أو مستقبل لهذه المحادثة');
+  }
+  if (!template.name?.trim() || !template.language?.trim()) {
+    throw new Error('اسم القالب واللغة مطلوبان');
+  }
+
+  const variables = (template.variables ?? []).map((value) => String(value).trim());
+  const components = variables.length > 0
+    ? [{
+        type: 'body',
+        parameters: variables.map((text) => ({ type: 'text', text })),
+      }]
+    : undefined;
+
+  const response = await fetch(`${GRAPH}/${phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: conv.external_participant_id,
+      type: 'template',
+      template: {
+        name: template.name.trim(),
+        language: { code: template.language.trim() },
+        ...(components ? { components } : {}),
+      },
+    }),
+  });
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    const apiError = payload.error as Record<string, unknown> | undefined;
+    const detail = typeof apiError?.message === 'string' ? apiError.message : `HTTP ${response.status}`;
+    throw new Error(`WhatsApp Template API: ${detail}`);
+  }
+  const messages = payload.messages as Array<Record<string, unknown>> | undefined;
+  return typeof messages?.[0]?.id === 'string' ? messages[0].id : null;
 }
 
 async function deliverToPlatform(
@@ -150,14 +204,25 @@ Deno.serve(async (req: Request) => {
   if (userError || !userData.user) return jsonRes(401, { error: 'Invalid or expired token' });
   const userId = userData.user.id;
 
-  let body: { conversationId?: string; content?: string };
+  let body: {
+    conversationId?: string;
+    content?: string;
+    mode?: 'text' | 'template';
+    template?: WhatsAppTemplateInput;
+  };
   try {
     body = await req.json();
   } catch {
     return jsonRes(400, { error: 'Invalid JSON body' });
   }
-  const { conversationId, content } = body;
-  if (!conversationId || !content?.trim()) return jsonRes(400, { error: 'conversationId و content مطلوبين' });
+  const { conversationId } = body;
+  const mode = body.mode === 'template' ? 'template' : 'text';
+  const content = body.content?.trim() ?? '';
+  if (!conversationId) return jsonRes(400, { error: 'conversationId مطلوب' });
+  if (mode === 'text' && !content) return jsonRes(400, { error: 'content مطلوب' });
+  if (mode === 'template' && (!body.template?.name?.trim() || !body.template?.language?.trim())) {
+    return jsonRes(400, { error: 'بيانات Template غير مكتملة' });
+  }
 
   const { data: conv } = await supabase
     .from('inbox_conversations')
@@ -177,7 +242,7 @@ Deno.serve(async (req: Request) => {
   const { data: account } = await supabase.from('social_accounts').select('*').eq('id', conv.account_id).maybeSingle();
   if (!account) return jsonRes(409, { error: 'الحساب المرتبط بهذه المحادثة لم يعد موجودًا' });
 
-  if (conv.platform === 'whatsapp') {
+  if (conv.platform === 'whatsapp' && mode === 'text') {
     const { data: latestInbound } = await supabase
       .from('inbox_messages')
       .select('created_at')
@@ -196,7 +261,18 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const externalMessageId = await deliverToPlatform(conv as Conversation, account, content.trim());
+    if (mode === 'template' && conv.platform !== 'whatsapp') {
+      return jsonRes(400, { error: 'إرسال Templates متاح لمحادثات WhatsApp فقط' });
+    }
+
+    const template = body.template;
+    const externalMessageId = mode === 'template'
+      ? await deliverWhatsAppTemplate(conv as Conversation, account, template!)
+      : await deliverToPlatform(conv as Conversation, account, content);
+
+    const storedContent = mode === 'template'
+      ? (template?.preview?.trim().slice(0, 4000) || `[WhatsApp Template: ${template?.name ?? ''}]`)
+      : content;
 
     const { data: message, error: insertError } = await supabase
       .from('inbox_messages')
@@ -204,12 +280,17 @@ Deno.serve(async (req: Request) => {
         workspace_id: conv.workspace_id,
         conversation_id: conversationId,
         direction: 'outbound',
-        content: content.trim(),
+        content: storedContent,
         is_ai: false,
         user_id: userId,
         ...(externalMessageId ? { external_id: externalMessageId } : {}),
         metadata: {
-          source: 'inbox_reply',
+          source: mode === 'template' ? 'whatsapp_template' : 'inbox_reply',
+          ...(mode === 'template' ? {
+            template_name: template?.name ?? null,
+            template_language: template?.language ?? null,
+            template_variables: template?.variables ?? [],
+          } : {}),
           ...(conv.platform === 'whatsapp' ? {
             delivery_status: 'accepted',
             delivery_status_at: new Date().toISOString(),
@@ -220,7 +301,7 @@ Deno.serve(async (req: Request) => {
       .single();
     if (insertError) throw insertError;
 
-    await supabase.from('inbox_conversations').update({ snippet: content.trim(), unread: false }).eq('id', conversationId);
+    await supabase.from('inbox_conversations').update({ snippet: storedContent, unread: false }).eq('id', conversationId);
 
     return jsonRes(200, { ok: true, message });
   } catch (err) {
