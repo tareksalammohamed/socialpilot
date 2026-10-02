@@ -10,6 +10,7 @@ type InboxAiSettings = {
   enabled?: boolean;
   replyMode?: 'draft' | 'auto_safe';
   autoReplyMaxPerHour?: number;
+  autoReplyDelaySeconds?: number;
   maxReplyLength?: number;
 };
 
@@ -217,6 +218,22 @@ Deno.serve(async (req: Request) => {
     }
     if ((workspaceSent ?? 0) >= 50) {
       return skip(run.id, 'workspace_hourly_rate_limit', conversation.id);
+    }
+
+    const delaySeconds = Math.max(0, Math.min(15, Math.round(Number(settings.autoReplyDelaySeconds ?? 4))));
+    if (delaySeconds > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+    }
+
+    const { data: latestBeforeAnalysis } = await supabase.from('inbox_messages')
+      .select('id')
+      .eq('conversation_id', conversation.id)
+      .eq('direction', 'inbound')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (latestBeforeAnalysis?.id !== inbound.id) {
+      return skip(run.id, 'superseded_during_aggregation_delay', conversation.id);
     }
 
     const analysisResponse = await postInternal('inbox-ai', {
