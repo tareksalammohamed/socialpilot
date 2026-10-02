@@ -242,9 +242,20 @@ Deno.serve(async (req) => {
       await evoFetch(cfg, `/instance/logout/${encodeURIComponent(currentName)}`, { method: 'DELETE' });
       await evoFetch(cfg, `/instance/delete/${encodeURIComponent(currentName)}`, { method: 'DELETE' });
       if (account?.id) {
-        await supabase.from('social_accounts').delete().eq('id', account.id).eq('workspace_id', workspaceId);
+        await supabase.from('social_accounts').update({
+          status: 'error',
+          needs_reconnect: true,
+          last_sync_at: new Date().toISOString(),
+          metadata: {
+            ...(account.metadata ?? {}),
+            provider_state: 'disconnected',
+            onboarding_state: 'disconnected',
+            disconnected_at: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        }).eq('id', account.id).eq('workspace_id', workspaceId);
       }
-      return json(200, { ok: true, connected: false, state: 'disconnected' });
+      return json(200, { ok: true, connected: false, state: 'disconnected', accountId: account?.id ?? null });
     }
 
     let secret = account?.id ? await webhookSecretFor(account.id) : null;
