@@ -162,9 +162,9 @@ Deno.serve(async (req: Request) => {
       workspace_id: workspaceId,
       user_id: authData.user.id,
       action: 'whatsapp_connected',
-      entity_type: 'social_account',
+      entity: 'social_account',
       entity_id: account.id,
-      metadata: {
+      detail: {
         phone_number_id: phoneNumberId,
         waba_id: wabaId,
         display_phone_number: displayPhone,
