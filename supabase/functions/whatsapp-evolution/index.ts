@@ -1,3 +1,4 @@
+import { closeSession, disconnectedAccount } from '../_shared/whatsapp-session.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 const CORS = {
@@ -239,12 +240,14 @@ Deno.serve(async (req) => {
 
     if (body.action === 'disconnect') {
       const currentName = String(account?.metadata?.instance_name ?? name);
-      await evoFetch(cfg, `/instance/logout/${encodeURIComponent(currentName)}`, { method: 'DELETE' });
-      await evoFetch(cfg, `/instance/delete/${encodeURIComponent(currentName)}`, { method: 'DELETE' });
+      await closeSession(`${cfg.baseUrl}/instance/delete/${encodeURIComponent(currentName)}`, { method: 'DELETE', headers: { apikey: cfg.apiKey } });
       if (account?.id) {
-        await supabase.from('social_accounts').delete().eq('id', account.id).eq('workspace_id', workspaceId);
+        const { error } = await supabase.from('social_accounts')
+          .update(disconnectedAccount((account.metadata ?? {}) as Record<string, unknown>))
+          .eq('id', account.id).eq('workspace_id', workspaceId);
+        if (error) throw new Error('تعذّر حفظ حالة الفصل');
       }
-      return json(200, { ok: true, connected: false, state: 'disconnected' });
+      return json(200, { ok: true, connected: false, state: 'disconnected', accountId: account?.id ?? null });
     }
 
     let secret = account?.id ? await webhookSecretFor(account.id) : null;
