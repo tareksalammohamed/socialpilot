@@ -600,13 +600,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                     <Input
                       value={socialAppIdInput}
                       onChange={setSocialAppIdInput}
-                      placeholder={
-                        app.platform_key === 'telegram'
-                          ? 'يوزر البوت (من غير @)'
-                          : app.platform_key === 'whatsapp'
-                            ? 'Evolution Base URL — https://evo.example.com'
-                            : 'App ID'
-                      }
+                      placeholder={app.platform_key === 'telegram' ? 'يوزر البوت (من غير @)' : 'App ID'}
                     />
                     <Input
                       value={socialAppSecretInput}
@@ -616,13 +610,9 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                           ? app.has_secret
                             ? 'Bot Token (اتركه فاضي لو مش هتغيّره)'
                             : 'Bot Token'
-                          : app.platform_key === 'whatsapp'
-                            ? app.has_secret
-                              ? 'Evolution API Key (اتركه فاضي لو مش هتغيّره)'
-                              : 'Evolution API Key'
-                            : app.has_secret
-                              ? 'App Secret (اتركه فاضي لو مش هتغيّره)'
-                              : 'App Secret'
+                          : app.has_secret
+                            ? 'App Secret (اتركه فاضي لو مش هتغيّره)'
+                            : 'App Secret'
                       }
                       type="password"
                     />
