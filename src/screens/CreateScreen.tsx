@@ -523,20 +523,25 @@ export function CreateScreen() {
   }
 
   return (
-    <div className="flex flex-col h-screen safe-top">
-      {/* Header */}
-      <div className="px-5 py-4 border-b border-ink-800 glass">
-        <div className="flex items-center gap-2">
-          <Sparkles size={20} className="text-brand-400" />
-          <div>
-            <h1 className="text-base font-bold text-ink-50">اسأل AI</h1>
-            <p className="text-ink-500 text-xs">ماذا تريد أن تحقق؟</p>
+    <div className="page-shell safe-top pb-28 max-w-5xl flex flex-col min-h-[calc(100vh-7rem)]">
+      <section className="surface-hero mb-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="status-orb"><Sparkles size={21} className="text-brand-300" /></div>
+            <div>
+              <p className="eyebrow">AI CONTENT STUDIO</p>
+              <h1 className="text-2xl font-bold text-ink-50 mt-1">أنشئ ونفّذ بالذكاء الاصطناعي</h1>
+              <p className="text-ink-400 text-sm mt-2">اطلب بوست، خطة، تحليل أو تعديل — والعملية تفضل محفوظة حتى لو تنقلت بين الصفحات.</p>
+            </div>
           </div>
+          <Badge color={mode === 'thinking' ? 'accent' : mode === 'error' ? 'danger' : content || plan || advice ? 'brand' : 'neutral'}>
+            {mode === 'thinking' ? 'يعمل الآن' : mode === 'error' ? 'يحتاج مراجعة' : content || plan || advice ? 'النتيجة جاهزة' : 'جاهز'}
+          </Badge>
         </div>
-      </div>
+      </section>
 
       {/* Chat + results */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar px-5 py-4">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar rounded-2xl border border-ink-800 bg-ink-950/40 p-4 sm:p-5">
         {restoringTask ? (
           <div className="py-16 flex items-center justify-center gap-2 text-ink-500 text-sm">
             <Spinner size={18} className="text-brand-400" />
@@ -550,12 +555,12 @@ export function CreateScreen() {
             <p className="text-ink-300 text-sm text-center max-w-xs mb-6">
               اكتب أي حاجة بالعربي أو بالمصري. النظام يفهم المقصود وينفذ المهمة.
             </p>
-            <div className="flex flex-col gap-2 w-full">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-3xl">
               {SUGGESTIONS.map((s) => (
                 <button
                   key={s}
                   onClick={() => handleSubmit(s)}
-                  className="text-right px-4 py-3 rounded-xl bg-ink-900 border border-ink-800 text-ink-200 text-sm hover:border-brand-500/30 transition-colors active:scale-[0.98]"
+                  className="text-right px-4 py-3.5 rounded-xl bg-ink-900/80 border border-ink-800 text-ink-200 text-sm hover:border-brand-500/30 hover:bg-ink-800/70 transition-all active:scale-[0.98]"
                 >
                   {s}
                 </button>
@@ -602,7 +607,7 @@ export function CreateScreen() {
         {/* Content result */}
         {content && mode === 'content' && (
           <div className="flex flex-col gap-3 animate-slide-up">
-            <Card>
+            <Card className="surface-card">
               <div className="flex items-center gap-2 mb-2">
                 <FileText size={16} className="text-brand-400" />
                 <p className="text-ink-100 font-medium">{content.title}</p>
@@ -708,19 +713,19 @@ export function CreateScreen() {
       </div>
 
       {/* Command bar */}
-      <div className="px-4 py-3 border-t border-ink-800 glass safe-bottom">
+      <div className="sticky bottom-2 mt-3 p-2.5 glass rounded-2xl border border-ink-800 shadow-2xl shadow-black/25">
         <div className="flex items-center gap-2">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
             placeholder="اكتب طلبك بالعربي..."
-            className="flex-1 bg-ink-900 border border-ink-800 rounded-xl px-4 py-2.5 text-ink-100 text-sm placeholder:text-ink-500 focus:border-brand-500/40 focus:outline-none"
+            className="flex-1 bg-ink-950/80 border border-ink-700 rounded-xl px-4 py-3 text-ink-100 text-sm placeholder:text-ink-500 focus:border-brand-500/50 focus:outline-none"
           />
           <button
             onClick={() => handleSubmit()}
             disabled={!input.trim() || mode === 'thinking'}
-            className="w-10 h-10 rounded-xl bg-brand-500 text-ink-950 flex items-center justify-center disabled:opacity-30 active:scale-95 transition-all"
+            className="w-11 h-11 rounded-xl bg-brand-500 text-ink-950 flex items-center justify-center disabled:opacity-30 active:scale-95 transition-all shadow-lg shadow-brand-500/15"
           >
             <Send size={18} />
           </button>
