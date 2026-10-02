@@ -68,7 +68,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   whatsapp: 'واتساب',
 };
 
-const SUPPORTED_PLATFORMS = new Set(['telegram', 'x', 'facebook', 'instagram', 'linkedin']);
+const SUPPORTED_PLATFORMS = new Set(['telegram', 'x', 'facebook', 'instagram', 'linkedin', 'threads']);
 
 type Variant = {
   id: string;
@@ -224,6 +224,40 @@ async function getFreshXToken(accountId: string): Promise<string> {
   return json.access_token as string;
 }
 
+async function getFreshThreadsToken(accountId: string): Promise<string> {
+  const { data: token } = await supabase
+    .from('social_account_tokens')
+    .select('access_token,expires_at')
+    .eq('account_id', accountId)
+    .maybeSingle();
+  if (!token?.access_token) throw new Error('حساب Threads محتاج إعادة ربط');
+
+  const expiresAt = token.expires_at ? new Date(token.expires_at).getTime() : null;
+  if (!expiresAt || expiresAt > Date.now() + 7 * 24 * 60 * 60 * 1000) return String(token.access_token);
+  if (expiresAt <= Date.now()) {
+    await supabase.from('social_accounts').update({ status: 'expired', needs_reconnect: true }).eq('id', accountId);
+    throw new Error('انتهت صلاحية Threads — أعد ربط الحساب');
+  }
+
+  const url = new URL('https://graph.threads.net/refresh_access_token');
+  url.searchParams.set('grant_type', 'th_refresh_token');
+  url.searchParams.set('access_token', String(token.access_token));
+  const response = await fetchWithRetry(url);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || !body.access_token) {
+    throw new Error(apiErrorMessage(body, 'فشل تجديد دخول Threads'));
+  }
+  const nextExpiresAt = typeof body.expires_in === 'number'
+    ? new Date(Date.now() + body.expires_in * 1000).toISOString()
+    : token.expires_at;
+  await supabase.from('social_account_tokens').update({
+    access_token: body.access_token,
+    expires_at: nextExpiresAt,
+    updated_at: new Date().toISOString(),
+  }).eq('account_id', accountId);
+  return String(body.access_token);
+}
+
 async function getStoredAccessToken(accountId: string): Promise<string> {
   const { data: token } = await supabase.from('social_account_tokens').select('access_token,expires_at').eq('account_id', accountId).maybeSingle();
   if (!token?.access_token) throw new Error('الحساب محتاج إعادة ربط');
@@ -267,6 +301,38 @@ async function publishToInstagram(variant: Variant, account: Record<string, unkn
   const publishResponse = await fetchWithRetry(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(igId)}/media_publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ creation_id: createBody.id, access_token: accessToken }) });
   const publishBody = await publishResponse.json();
   if (!publishResponse.ok || !publishBody.id) throw new Error(apiErrorMessage(publishBody, 'فشل نشر منشور إنستجرام'));
+  return { id: String(publishBody.id), url: null };
+}
+
+async function publishToThreads(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+  if (media?.kind === 'video') {
+    throw new Error('فيديو Threads يحتاج انتظار معالجة الـcontainer — استخدم نص أو صورة في الجدولة الحالية');
+  }
+  const accessToken = await getFreshThreadsToken(String(account.id));
+  const createUrl = new URL('https://graph.threads.net/v1.0/me/threads');
+  createUrl.searchParams.set('access_token', accessToken);
+  createUrl.searchParams.set('text', buildPostText(variant, 500));
+  if (media?.kind === 'image') {
+    createUrl.searchParams.set('media_type', 'IMAGE');
+    createUrl.searchParams.set('image_url', media.url);
+  } else {
+    createUrl.searchParams.set('media_type', 'TEXT');
+  }
+
+  const createResponse = await fetchWithRetry(createUrl, { method: 'POST' });
+  const createBody = await createResponse.json().catch(() => ({}));
+  if (!createResponse.ok || !createBody.id) {
+    throw new Error(apiErrorMessage(createBody, 'فشل إنشاء منشور Threads'));
+  }
+
+  const publishUrl = new URL('https://graph.threads.net/v1.0/me/threads_publish');
+  publishUrl.searchParams.set('access_token', accessToken);
+  publishUrl.searchParams.set('creation_id', String(createBody.id));
+  const publishResponse = await fetchWithRetry(publishUrl, { method: 'POST' });
+  const publishBody = await publishResponse.json().catch(() => ({}));
+  if (!publishResponse.ok || !publishBody.id) {
+    throw new Error(apiErrorMessage(publishBody, 'فشل نشر منشور Threads'));
+  }
   return { id: String(publishBody.id), url: null };
 }
 
@@ -484,7 +550,9 @@ Deno.serve(async (req: Request) => {
           ? await publishToFacebook(variant as Variant, account, media)
           : platform === 'instagram'
             ? await publishToInstagram(variant as Variant, account, media)
-            : await publishToLinkedIn(variant as Variant, account, media);
+            : platform === 'threads'
+              ? await publishToThreads(variant as Variant, account, media)
+              : await publishToLinkedIn(variant as Variant, account, media);
 
     const publishedAt = new Date().toISOString();
     const publishState = {
