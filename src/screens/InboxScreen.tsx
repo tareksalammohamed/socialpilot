@@ -14,6 +14,12 @@ import {
   UserCheck,
   CircleCheckBig,
   Clock3,
+  Image as ImageIcon,
+  FileText,
+  Volume2,
+  Video,
+  LayoutTemplate,
+  Download,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
@@ -24,6 +30,10 @@ import {
   analyzeInboxConversation,
   setInboxReplyApproval,
   sendInboxReply,
+  listWhatsAppTemplates,
+  sendWhatsAppTemplate,
+  fetchInboxMedia,
+  type WhatsAppTemplate,
 } from '@/lib/api';
 import type { InboxAiAnalysis, InboxConversation, InboxMessage } from '@/lib/types';
 import { Badge, Button, Card, EmptyState, ErrorBanner, Input, Spinner } from '@/components/ui';
@@ -108,6 +118,82 @@ function deliveryStatusLabel(message: InboxMessage): { label: string; className:
   return { label: status, className: 'text-ink-500' };
 }
 
+function templateKey(template: WhatsAppTemplate): string {
+  return `${template.name}::${template.language}`;
+}
+
+function renderTemplateBody(template: WhatsAppTemplate, variables: string[]): string {
+  return template.body.replace(/{{\s*(\d+)\s*}}/g, (_match, index: string) => {
+    const value = variables[Number(index) - 1]?.trim();
+    return value || `{{${index}}}`;
+  });
+}
+
+function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
+  const mediaId = typeof message.metadata?.media_id === 'string' ? message.metadata.media_id : null;
+  const type = typeof message.metadata?.message_type === 'string' ? message.metadata.message_type : null;
+  const [url, setUrl] = useState<string | null>(null);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [mediaLoading, setMediaLoading] = useState(Boolean(mediaId));
+
+  useEffect(() => {
+    if (!mediaId) return;
+    let disposed = false;
+    let objectUrl: string | null = null;
+    setMediaLoading(true);
+    setMediaError(null);
+
+    void fetchInboxMedia(message.id)
+      .then((blob) => {
+        if (disposed) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch((cause) => {
+        if (!disposed) setMediaError(cause instanceof Error ? cause.message : 'تعذّر تحميل المرفق');
+      })
+      .finally(() => {
+        if (!disposed) setMediaLoading(false);
+      });
+
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [message.id, mediaId]);
+
+  if (!mediaId || !type) return null;
+  if (mediaLoading) return <div className="mt-2 text-[11px] text-ink-500">جارٍ تحميل المرفق...</div>;
+  if (mediaError) return <div className="mt-2 text-[11px] text-warning-400">{mediaError}</div>;
+  if (!url) return null;
+
+  const filename = typeof message.metadata?.filename === 'string' ? message.metadata.filename : 'WhatsApp file';
+
+  if (type === 'image' || type === 'sticker') {
+    return (
+      <a href={url} target="_blank" rel="noreferrer" className="block mt-2">
+        <img src={url} alt={message.content || 'WhatsApp media'} className="max-h-72 max-w-full rounded-xl object-contain bg-ink-950/50" />
+      </a>
+    );
+  }
+  if (type === 'video') {
+    return <video src={url} controls preload="metadata" className="mt-2 max-h-72 max-w-full rounded-xl bg-black" />;
+  }
+  if (type === 'audio') {
+    return <audio src={url} controls preload="metadata" className="mt-2 w-full max-w-sm" />;
+  }
+  if (type === 'document') {
+    return (
+      <a href={url} download={filename} className="mt-2 flex items-center gap-2 rounded-xl border border-ink-700 bg-ink-950/40 px-3 py-2 text-xs text-ink-200 hover:border-brand-500/40">
+        <FileText size={16} />
+        <span className="truncate flex-1">{filename}</span>
+        <Download size={14} />
+      </a>
+    );
+  }
+  return null;
+}
+
 export function InboxScreen() {
   const { workspace, user, refreshWorkspace } = useAuth();
   const [conversations, setConversations] = useState<InboxConversation[]>([]);
@@ -131,6 +217,12 @@ export function InboxScreen() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [whatsappTemplates, setWhatsappTemplates] = useState<WhatsAppTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
+  const [selectedTemplateKey, setSelectedTemplateKey] = useState('');
+  const [templateVariables, setTemplateVariables] = useState<string[]>([]);
+  const [templateSending, setTemplateSending] = useState(false);
   const [aiSettings, setAiSettings] = useState<InboxAiSettings>(() => readInboxAiSettings(workspace?.settings));
   const autoAnalyzeKeyRef = useRef<string | null>(null);
 
@@ -151,6 +243,46 @@ export function InboxScreen() {
     if (!latestInbound) return false;
     return Date.now() - new Date(latestInbound.created_at).getTime() <= 24 * 60 * 60 * 1000;
   }, [selectedConversation?.platform, messages]);
+
+  const selectedWhatsAppTemplate = useMemo(
+    () => whatsappTemplates.find((template) => templateKey(template) === selectedTemplateKey) ?? null,
+    [whatsappTemplates, selectedTemplateKey],
+  );
+
+  const selectedTemplatePreview = useMemo(
+    () => selectedWhatsAppTemplate ? renderTemplateBody(selectedWhatsAppTemplate, templateVariables) : '',
+    [selectedWhatsAppTemplate, templateVariables],
+  );
+
+  useEffect(() => {
+    if (!selectedConversation || selectedConversation.platform !== 'whatsapp') {
+      setWhatsappTemplates([]);
+      setSelectedTemplateKey('');
+      setTemplateVariables([]);
+      setTemplatesError(null);
+      return;
+    }
+    let cancelled = false;
+    setTemplatesLoading(true);
+    setTemplatesError(null);
+    void listWhatsAppTemplates(selectedConversation.id)
+      .then((templates) => {
+        if (cancelled) return;
+        setWhatsappTemplates(templates);
+        const first = templates.find((template) => template.sendable) ?? templates[0] ?? null;
+        setSelectedTemplateKey(first ? templateKey(first) : '');
+        setTemplateVariables(first ? Array(first.variableCount).fill('') : []);
+      })
+      .catch((cause) => {
+        if (!cancelled) setTemplatesError(cause instanceof Error ? cause.message : 'تعذّر تحميل Templates');
+      })
+      .finally(() => {
+        if (!cancelled) setTemplatesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedConversation?.id, selectedConversation?.platform]);
 
   const filteredConversations = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -419,6 +551,39 @@ export function InboxScreen() {
       setAiError(cause instanceof Error ? cause.message : 'تعذّر رفض الرد المقترح');
     } finally {
       setApprovalLoading(false);
+    }
+  }
+
+  async function handleSendWhatsAppTemplate() {
+    if (!selectedConversation || !selectedWhatsAppTemplate || templateSending) return;
+    if (!selectedWhatsAppTemplate.sendable) {
+      setMessagesError(selectedWhatsAppTemplate.unsupportedReason ?? 'هذا القالب يحتاج بارامترات متقدمة.');
+      return;
+    }
+    if (templateVariables.some((value) => !value.trim())) {
+      setMessagesError('أكمل كل متغيرات Template قبل الإرسال.');
+      return;
+    }
+
+    setTemplateSending(true);
+    setMessagesError(null);
+    try {
+      const message = await sendWhatsAppTemplate({
+        conversationId: selectedConversation.id,
+        template: selectedWhatsAppTemplate,
+        variables: templateVariables,
+        preview: selectedTemplatePreview,
+      });
+      setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
+      setConversations((current) => current.map((item) => (
+        item.id === selectedConversation.id
+          ? { ...item, snippet: message.content, unread: false, updated_at: message.created_at }
+          : item
+      )));
+    } catch (cause) {
+      setMessagesError(cause instanceof Error ? cause.message : 'تعذّر إرسال WhatsApp Template');
+    } finally {
+      setTemplateSending(false);
     }
   }
 
@@ -799,6 +964,9 @@ export function InboxScreen() {
                             <span>{formatDate(message.created_at)}</span>
                           </div>
                           <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                          {selectedConversation.platform === 'whatsapp' && (
+                            <WhatsAppMediaPreview message={message} />
+                          )}
                           {selectedConversation.platform === 'whatsapp' && deliveryStatusLabel(message) && (
                             <div className="mt-1.5 flex items-center justify-between gap-3 text-[10px]">
                               <span className={deliveryStatusLabel(message)!.className}>{deliveryStatusLabel(message)!.label}</span>
@@ -823,8 +991,82 @@ export function InboxScreen() {
                         : 'border-warning-500/25 bg-warning-500/10 text-warning-300'
                     }`}>
                       {whatsappServiceWindowOpen
-                        ? 'نافذة خدمة WhatsApp مفتوحة — يمكنك إرسال رد نصي مباشر.'
-                        : 'نافذة الـ24 ساعة مغلقة — يلزم Template معتمد من Meta لإعادة فتح المحادثة. يمكنك استخدام AI لصياغة الرد الآن.'}
+                        ? 'نافذة خدمة WhatsApp مفتوحة — يمكنك إرسال رد نصي مباشر أو استخدام Template.'
+                        : 'نافذة الـ24 ساعة مغلقة — أرسل Template معتمد من Meta لإعادة فتح المحادثة.'}
+                    </div>
+                  )}
+
+                  {selectedConversation.platform === 'whatsapp' && !whatsappServiceWindowOpen && (
+                    <div className="mb-3 rounded-xl border border-ink-800 bg-ink-950/40 p-3 space-y-3">
+                      <div className="flex items-center gap-2 text-xs font-semibold text-ink-200">
+                        <LayoutTemplate size={15} className="text-brand-300" />
+                        WhatsApp Templates المعتمدة
+                      </div>
+                      {templatesLoading ? (
+                        <div className="flex items-center gap-2 text-xs text-ink-500"><Spinner size={14} /> جارٍ تحميل القوالب...</div>
+                      ) : templatesError ? (
+                        <ErrorBanner message={templatesError} />
+                      ) : whatsappTemplates.length === 0 ? (
+                        <p className="text-xs text-warning-400">لا توجد Templates معتمدة على هذا WhatsApp Business Account.</p>
+                      ) : (
+                        <>
+                          <select
+                            value={selectedTemplateKey}
+                            onChange={(event) => {
+                              const key = event.target.value;
+                              setSelectedTemplateKey(key);
+                              const template = whatsappTemplates.find((item) => templateKey(item) === key);
+                              setTemplateVariables(template ? Array(template.variableCount).fill('') : []);
+                            }}
+                            className="w-full rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-xs text-ink-100"
+                          >
+                            {whatsappTemplates.map((template) => (
+                              <option key={templateKey(template)} value={templateKey(template)}>
+                                {template.name} · {template.language} · {template.category}
+                              </option>
+                            ))}
+                          </select>
+
+                          {selectedWhatsAppTemplate && (
+                            <>
+                              <div className="rounded-xl bg-ink-900/70 px-3 py-2.5 text-xs text-ink-300 whitespace-pre-wrap">
+                                {selectedTemplatePreview || selectedWhatsAppTemplate.body || selectedWhatsAppTemplate.name}
+                              </div>
+                              {!selectedWhatsAppTemplate.sendable && (
+                                <p className="text-[11px] text-warning-400">{selectedWhatsAppTemplate.unsupportedReason}</p>
+                              )}
+                              {selectedWhatsAppTemplate.sendable && selectedWhatsAppTemplate.variableCount > 0 && (
+                                <div className="grid gap-2 sm:grid-cols-2">
+                                  {Array.from({ length: selectedWhatsAppTemplate.variableCount }, (_, index) => (
+                                    <Input
+                                      key={index}
+                                      value={templateVariables[index] ?? ''}
+                                      onChange={(value) => setTemplateVariables((current) => {
+                                        const next = [...current];
+                                        next[index] = value;
+                                        return next;
+                                      })}
+                                      placeholder={`قيمة {{${index + 1}}}`}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                              <Button
+                                size="sm"
+                                onClick={() => void handleSendWhatsAppTemplate()}
+                                disabled={
+                                  templateSending
+                                  || !selectedWhatsAppTemplate.sendable
+                                  || templateVariables.some((value) => !value.trim())
+                                }
+                              >
+                                {templateSending ? <Spinner size={14} /> : <Send size={14} />}
+                                إرسال Template
+                              </Button>
+                            </>
+                          )}
+                        </>
+                      )}
                     </div>
                   )}
                   {!canReplyToConversation(selectedConversation) && (
