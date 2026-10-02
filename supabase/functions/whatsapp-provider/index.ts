@@ -185,6 +185,21 @@ async function saveAccount(params: {
     updated_at: new Date().toISOString(),
   }, { onConflict: 'account_id' });
 
+  if (existingMetadata.provider !== params.provider) {
+    const { data: conversations } = await supabase.from('inbox_conversations')
+      .select('id,metadata')
+      .eq('account_id', saved.id);
+    for (const conversation of conversations ?? []) {
+      await supabase.from('inbox_conversations').update({
+        metadata: {
+          ...(conversation.metadata ?? {}),
+          provider: params.provider,
+          provider_switched_at: new Date().toISOString(),
+        },
+      }).eq('id', conversation.id);
+    }
+  }
+
   return saved;
 }
 
