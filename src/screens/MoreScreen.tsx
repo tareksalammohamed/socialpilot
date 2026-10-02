@@ -202,7 +202,7 @@ export function MoreScreen() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [workspace?.id, whatsappQrOpen, loadAccounts, loadIntegrationState]);
+  }, [workspace?.id, whatsappQrOpen, loadAccounts, loadIntegrationState, loadWhatsAppMethods]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
