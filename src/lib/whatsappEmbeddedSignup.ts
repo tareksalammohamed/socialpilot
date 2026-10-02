@@ -159,11 +159,11 @@ export function launchWhatsAppEmbeddedSignup(config: WhatsAppEmbeddedConfig): Pr
       },
       {
         config_id: config.configurationId,
+        auth_type: 'rerequest',
         response_type: 'code',
         override_default_response_type: true,
         extras: {
           setup: {},
-          sessionInfoVersion: '3',
         },
       },
     );
