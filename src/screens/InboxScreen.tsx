@@ -131,13 +131,15 @@ function renderTemplateBody(template: WhatsAppTemplate, variables: string[]): st
 
 function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
   const mediaId = typeof message.metadata?.media_id === 'string' ? message.metadata.media_id : null;
+  const storagePath = typeof message.metadata?.storage_path === 'string' ? message.metadata.storage_path : null;
+  const hasMedia = Boolean(mediaId || storagePath);
   const type = typeof message.metadata?.message_type === 'string' ? message.metadata.message_type : null;
   const [url, setUrl] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
-  const [mediaLoading, setMediaLoading] = useState(Boolean(mediaId));
+  const [mediaLoading, setMediaLoading] = useState(hasMedia);
 
   useEffect(() => {
-    if (!mediaId) return;
+    if (!hasMedia) return;
     let disposed = false;
     let objectUrl: string | null = null;
     setMediaLoading(true);
@@ -160,9 +162,9 @@ function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
       disposed = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [message.id, mediaId]);
+  }, [message.id, hasMedia]);
 
-  if (!mediaId || !type) return null;
+  if (!hasMedia || !type) return null;
   if (mediaLoading) return <div className="mt-2 text-[11px] text-ink-500">جارٍ تحميل المرفق...</div>;
   if (mediaError) return <div className="mt-2 text-[11px] text-warning-400">{mediaError}</div>;
   if (!url) return null;
