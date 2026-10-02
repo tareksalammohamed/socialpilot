@@ -11,7 +11,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
 
-type Body = { conversationId?: string; action?: 'analyze' | 'approve_reply' | 'reject_reply'; reply?: string; rejectionReason?: string };
+type Body = {
+  conversationId?: string;
+  action?: 'analyze' | 'approve_reply' | 'reject_reply';
+  reply?: string;
+  rejectionReason?: string;
+  onBehalfOfUserId?: string;
+};
 type Message = { id: string; direction: 'inbound' | 'outbound'; content: string; sender_name: string | null; created_at: string };
 type InboxAiSettings = {
   enabled?: boolean;
@@ -22,6 +28,8 @@ type InboxAiSettings = {
   businessContext?: string;
   forbiddenTopics?: string;
   maxReplyLength?: number;
+  replyMode?: 'draft' | 'auto_safe';
+  autoReplyMaxPerHour?: number;
 };
 
 type ParsedAnalysis = {
@@ -33,6 +41,8 @@ type ParsedAnalysis = {
   next_best_action?: unknown;
   quality_verdict?: unknown;
   quality_reasons?: unknown;
+  safe_to_auto_reply?: unknown;
+  automation_reason?: unknown;
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -66,15 +76,23 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405);
 
-  const authHeader = req.headers.get('Authorization') ?? '';
-  const userToken = authHeader.replace(/^Bearer\s+/i, '');
-  if (!userToken) return jsonResponse({ error: 'Missing authentication token' }, 401);
-  const { data: userData, error: userError } = await supabase.auth.getUser(userToken);
-  if (userError || !userData.user) return jsonResponse({ error: 'Invalid or expired token' }, 401);
-
   let body: Body;
   try { body = await req.json() as Body; } catch { return jsonResponse({ error: 'Invalid JSON body' }, 400); }
   if (!body.conversationId) return jsonResponse({ error: 'conversationId is required' }, 400);
+
+  const authHeader = req.headers.get('Authorization') ?? '';
+  const userToken = authHeader.replace(/^Bearer\s+/i, '');
+  if (!userToken) return jsonResponse({ error: 'Missing authentication token' }, 401);
+
+  let userId = '';
+  if (serviceRoleKey && userToken === serviceRoleKey) {
+    userId = text(body.onBehalfOfUserId);
+    if (!userId) return jsonResponse({ error: 'onBehalfOfUserId is required for service-role calls' }, 400);
+  } else {
+    const { data: userData, error: userError } = await supabase.auth.getUser(userToken);
+    if (userError || !userData.user) return jsonResponse({ error: 'Invalid or expired token' }, 401);
+    userId = userId;
+  }
 
   const { data: conversation, error: conversationError } = await supabase
     .from('inbox_conversations')
@@ -88,7 +106,7 @@ Deno.serve(async (req: Request) => {
     .from('workspace_members')
     .select('id')
     .eq('workspace_id', conversation.workspace_id)
-    .eq('user_id', userData.user.id)
+    .eq('user_id', userId)
     .maybeSingle();
   if (!membership) return jsonResponse({ error: 'Forbidden' }, 403);
 
@@ -119,7 +137,7 @@ Deno.serve(async (req: Request) => {
       if (existing.quality_verdict === 'fail') return jsonResponse({ error: 'لا يمكن اعتماد رد فشل في مراجعة الجودة' }, 409);
       const { data: approved, error: approvalError } = await supabase
         .from('inbox_ai_analyses')
-        .update({ reply_status: 'approved', approved_reply: approvedReply, approved_by: userData.user.id, approved_at: new Date().toISOString(), rejection_reason: null })
+        .update({ reply_status: 'approved', approved_reply: approvedReply, approved_by: userId, approved_at: new Date().toISOString(), rejection_reason: null })
         .eq('id', existing.id)
         .eq('workspace_id', conversation.workspace_id)
         .select('*')
@@ -177,19 +195,23 @@ ${transcript || conversation.snippet || '(لا توجد رسائل)'}
 
 أرجع JSON فقط بالمفاتيح التالية:
 {
-  "intent": "سؤال|طلب سعر|شكوى|اهتمام|متابعة|غير محدد",
+  "intent": "greeting|faq|product_info|pricing|lead|complaint|support|cancellation|legal|human_request|other",
   "lead_score": 0,
   "priority": "low|normal|high|urgent",
   "summary": "ملخص دقيق من سطرين",
-  "suggested_reply": "رد عربي قصير لا يذكر معلومات غير مؤكدة",
+  "suggested_reply": "رد قصير لا يذكر معلومات غير مؤكدة",
   "next_best_action": "الخطوة التالية العملية",
   "quality_verdict": "pass|review|fail",
-  "quality_reasons": ["سبب أو أكثر"]
+  "quality_reasons": ["سبب أو أكثر"],
+  "safe_to_auto_reply": false,
+  "automation_reason": "سبب مختصر يشرح لماذا الرد آمن أو يحتاج إنسان"
 }
-قواعد الجودة:
+قواعد الجودة والأتمتة:
 - اجعل quality_verdict=review إذا كان الرد يحتاج معلومة غير موجودة أو تحققًا بشريًا.
 - اجعل quality_verdict=fail إذا خالف الرد الممنوعات أو احتوى ادعاءً غير مدعوم.
-- لا تقترح إرسالًا تلقائيًا ولا تدّع أن الرد تم إرساله.
+- safe_to_auto_reply=true فقط للرسائل البسيطة منخفضة المخاطر التي يمكن الرد عليها بالكامل من المحادثة وسياق النشاط المسموح.
+- safe_to_auto_reply=false لأي pricing غير مثبت بوضوح، شكوى، دعم يحتاج تشخيص، إلغاء/استرجاع، موضوع قانوني، طلب موظف بشري، بيانات دفع/بطاقات/OTP/كلمات مرور، أو أي حالة فيها نقص معلومات.
+- لا تدّع أن الرد تم إرساله.
 - suggested_reply يجب أن يلتزم بالأسلوب واللغة والهدف والسياق والحد التقريبي للطول أعلاه.
 - lead_score تقدير احتمالي من نص المحادثة فقط.`;
 
@@ -199,7 +221,7 @@ ${transcript || conversation.snippet || '(لا توجد رسائل)'}
     body: JSON.stringify({
       intent: 'general_advice',
       workspaceId: conversation.workspace_id,
-      onBehalfOfUserId: userData.user.id,
+      onBehalfOfUserId: userId,
       message: prompt,
       context: {
         source: 'inbox_ai',
@@ -220,21 +242,28 @@ ${transcript || conversation.snippet || '(لا توجد رسائل)'}
   const result = (gatewayBody.result ?? {}) as Record<string, unknown>;
   const parsed = parseModelJson(result.advice ?? result);
   const qualityReasons = Array.isArray(parsed.quality_reasons) ? parsed.quality_reasons.filter((item): item is string => typeof item === 'string') : ['يجب مراجعة الرد قبل الإرسال'];
+  const parsedPriority = priority(parsed.priority);
+  const qualityVerdict = verdict(parsed.quality_verdict);
+  const safeToAutoReply = parsed.safe_to_auto_reply === true
+    && qualityVerdict === 'pass'
+    && (parsedPriority === 'low' || parsedPriority === 'normal');
   const analysis = {
     workspace_id: conversation.workspace_id,
     conversation_id: conversation.id,
-    intent: text(parsed.intent, 'غير محدد'),
+    intent: text(parsed.intent, 'other'),
     lead_score: score(parsed.lead_score),
-    priority: priority(parsed.priority),
+    priority: parsedPriority,
     summary: text(parsed.summary, 'لم يتمكن التحليل من إنشاء ملخص موثوق.'),
     suggested_reply: text(parsed.suggested_reply) || null,
     next_best_action: text(parsed.next_best_action, 'مراجعة المحادثة يدويًا.'),
-    quality_verdict: verdict(parsed.quality_verdict),
+    quality_verdict: qualityVerdict,
     quality_reasons: qualityReasons,
+    safe_to_auto_reply: safeToAutoReply,
+    automation_reason: text(parsed.automation_reason, safeToAutoReply ? 'اجتاز قواعد الأتمتة الآمنة.' : 'يحتاج مراجعة بشرية.'),
     source_message_ids: orderedMessages.map((message) => message.id),
     provider: typeof gatewayBody.provider === 'string' ? gatewayBody.provider : null,
     model: typeof gatewayBody.model === 'string' ? gatewayBody.model : null,
-    created_by: userData.user.id,
+    created_by: userId,
     updated_at: new Date().toISOString(),
   };
 
