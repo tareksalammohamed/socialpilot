@@ -1,0 +1,33 @@
+services:
+  wppconnect:
+    image: wppconnect/wppconnect-server:2.10.18
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-21465}:${PORT:-21465}"
+    environment:
+      PORT: ${PORT:-21465}
+      HOST: ${WPP_PUBLIC_URL}
+      SECRET_KEY: ${SECRET_KEY}
+      TOKEN_STORE_TYPE: file
+      CUSTOM_USER_DATA_DIR: /usr/src/wpp-server/userDataDir/
+      MANAGER_ENABLED: "false"
+      MAX_LISTENERS: "30"
+    volumes:
+      - wppconnect_tokens:/usr/src/wpp-server/tokens
+      - wppconnect_user_data:/usr/src/wpp-server/userDataDir
+      - wppconnect_uploads:/usr/src/wpp-server/uploads
+      - wppconnect_images:/usr/src/wpp-server/WhatsAppImages
+      - wppconnect_logs:/usr/src/wpp-server/log
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:$${PORT:-21465}/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  wppconnect_tokens:
+  wppconnect_user_data:
+  wppconnect_uploads:
+  wppconnect_images:
+  wppconnect_logs:
