@@ -10,8 +10,6 @@ const supabaseUrl = (Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '');
 const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
 
-declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
-
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
 }
@@ -89,21 +87,6 @@ function deliveryStatus(raw: unknown): string | null {
   if (value.includes('SENT') || value.includes('SERVER')) return 'sent';
   if (value.includes('PENDING')) return 'accepted';
   return null;
-}
-
-function scheduleAutoReply(inboundMessageId: string) {
-  if (!supabaseUrl || !serviceRoleKey) return;
-  EdgeRuntime.waitUntil(
-    fetch(`${supabaseUrl}/functions/v1/inbox-auto-reply`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${serviceRoleKey}`,
-        apikey: serviceRoleKey,
-      },
-      body: JSON.stringify({ inboundMessageId }),
-    }).catch((error) => console.error('WAHA auto-reply trigger failed', error)),
-  );
 }
 
 async function storeMedia(params: {
@@ -254,7 +237,6 @@ async function processMessage(account: Record<string, unknown>, payload: Record<
       body: body.length > 140 ? `${body.slice(0, 140)}…` : body,
       payload: { conversation_id: conversation.id, platform: 'whatsapp', provider: 'waha' },
     });
-    scheduleAutoReply(inserted.id);
   }
 }
 
