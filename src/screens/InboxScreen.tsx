@@ -96,6 +96,18 @@ function messageLabel(message: InboxMessage): string {
   return message.sender_name || 'الزائر';
 }
 
+function deliveryStatusLabel(message: InboxMessage): { label: string; className: string } | null {
+  if (message.direction !== 'outbound') return null;
+  const status = typeof message.metadata?.delivery_status === 'string' ? message.metadata.delivery_status : null;
+  if (!status) return null;
+  if (status === 'read') return { label: 'مقروءة ✓✓', className: 'text-accent-300' };
+  if (status === 'delivered') return { label: 'تم التسليم ✓✓', className: 'text-ink-400' };
+  if (status === 'sent') return { label: 'تم الإرسال ✓', className: 'text-ink-500' };
+  if (status === 'accepted') return { label: 'تم قبولها للإرسال', className: 'text-ink-500' };
+  if (status === 'failed') return { label: 'فشل الإرسال', className: 'text-danger-400' };
+  return { label: status, className: 'text-ink-500' };
+}
+
 export function InboxScreen() {
   const { workspace, user, refreshWorkspace } = useAuth();
   const [conversations, setConversations] = useState<InboxConversation[]>([]);
@@ -132,6 +144,13 @@ export function InboxScreen() {
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
     [conversations, selectedId],
   );
+
+  const whatsappServiceWindowOpen = useMemo(() => {
+    if (selectedConversation?.platform !== 'whatsapp') return true;
+    const latestInbound = [...messages].reverse().find((message) => message.direction === 'inbound');
+    if (!latestInbound) return false;
+    return Date.now() - new Date(latestInbound.created_at).getTime() <= 24 * 60 * 60 * 1000;
+  }, [selectedConversation?.platform, messages]);
 
   const filteredConversations = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -223,11 +242,29 @@ export function InboxScreen() {
       )
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'inbox_messages', filter: `workspace_id=eq.${workspace.id}` },
+        { event: '*', schema: 'public', table: 'inbox_messages', filter: `workspace_id=eq.${workspace.id}` },
         (payload) => {
           const row = payload.new as InboxMessage;
+          if (payload.eventType === 'DELETE') {
+            const oldRow = payload.old as InboxMessage;
+            if (oldRow.conversation_id === selectedId) {
+              setMessages((current) => current.filter((item) => item.id !== oldRow.id));
+            }
+            return;
+          }
           if (row.conversation_id === selectedId) {
-            setMessages((current) => current.some((item) => item.id === row.id) ? current : [...current, row]);
+            setMessages((current) => {
+              const exists = current.some((item) => item.id === row.id);
+              if (payload.eventType === 'UPDATE' && exists) {
+                return current.map((item) => item.id === row.id ? row : item);
+              }
+              return exists ? current : [...current, row];
+            });
+            if (payload.eventType === 'INSERT' && row.direction === 'inbound') {
+              autoAnalyzeKeyRef.current = null;
+              setAiAnalysis(null);
+              setAnalysisLoaded(true);
+            }
           }
           void loadConversations(true);
         },
@@ -238,6 +275,16 @@ export function InboxScreen() {
       void supabase.removeChannel(channel);
     };
   }, [workspace?.id, selectedId, loadConversations]);
+
+  useEffect(() => {
+    if (!aiAnalysis || messages.length === 0) return;
+    const latestInbound = [...messages].reverse().find((message) => message.direction === 'inbound');
+    if (!latestInbound) return;
+    if (!aiAnalysis.source_message_ids.includes(latestInbound.id)) {
+      autoAnalyzeKeyRef.current = null;
+      setAiAnalysis(null);
+    }
+  }, [messages, aiAnalysis]);
 
   useEffect(() => {
     if (!selectedConversation || !analysisLoaded || aiAnalysis || aiLoading || !aiSettings.enabled || !aiSettings.autoAnalyze) return;
@@ -752,6 +799,16 @@ export function InboxScreen() {
                             <span>{formatDate(message.created_at)}</span>
                           </div>
                           <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                          {selectedConversation.platform === 'whatsapp' && deliveryStatusLabel(message) && (
+                            <div className="mt-1.5 flex items-center justify-between gap-3 text-[10px]">
+                              <span className={deliveryStatusLabel(message)!.className}>{deliveryStatusLabel(message)!.label}</span>
+                              {message.metadata?.delivery_status === 'failed' && typeof message.metadata?.delivery_error === 'string' && (
+                                <span className="text-danger-400 truncate max-w-[220px]" title={String(message.metadata.delivery_error)}>
+                                  {String(message.metadata.delivery_error)}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))
@@ -759,6 +816,17 @@ export function InboxScreen() {
                 </div>
 
                 <div className="p-3 border-t border-ink-800">
+                  {selectedConversation.platform === 'whatsapp' && (
+                    <div className={`mb-2 rounded-xl border px-3 py-2 text-xs ${
+                      whatsappServiceWindowOpen
+                        ? 'border-brand-500/20 bg-brand-500/5 text-brand-200'
+                        : 'border-warning-500/25 bg-warning-500/10 text-warning-300'
+                    }`}>
+                      {whatsappServiceWindowOpen
+                        ? 'نافذة خدمة WhatsApp مفتوحة — يمكنك إرسال رد نصي مباشر.'
+                        : 'نافذة الـ24 ساعة مغلقة — يلزم Template معتمد من Meta لإعادة فتح المحادثة. يمكنك استخدام AI لصياغة الرد الآن.'}
+                    </div>
+                  )}
                   {!canReplyToConversation(selectedConversation) && (
                     <p className="text-xs text-warning-400 mb-2">
                       {selectedConversation.platform === 'linkedin' && selectedConversation.type === 'dm'
@@ -776,7 +844,12 @@ export function InboxScreen() {
                     <Button
                       size="sm"
                       onClick={() => void handleSend()}
-                      disabled={sending || !draft.trim() || !canReplyToConversation(selectedConversation)}
+                      disabled={
+                        sending
+                        || !draft.trim()
+                        || !canReplyToConversation(selectedConversation)
+                        || (selectedConversation.platform === 'whatsapp' && !whatsappServiceWindowOpen)
+                      }
                       className="shrink-0"
                     >
                       {sending ? <Spinner size={16} /> : <Send size={16} />}

@@ -14,6 +14,8 @@ import {
   Send,
   Bot,
   Gauge,
+  Phone,
+  KeyRound,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -24,6 +26,7 @@ import {
   connectTelegramChannel,
   syncAccounts,
   getSocialIntegrationStatus,
+  connectWhatsApp,
   type SocialIntegrationStatus,
 } from '@/lib/api';
 import { Card, Button, Badge, ErrorBanner, Input } from '@/components/ui';
@@ -66,6 +69,11 @@ export function MoreScreen() {
   const [telegramOpen, setTelegramOpen] = useState(false);
   const [telegramInput, setTelegramInput] = useState('');
   const [telegramBusy, setTelegramBusy] = useState(false);
+  const [whatsappOpen, setWhatsappOpen] = useState(false);
+  const [whatsappBusy, setWhatsappBusy] = useState(false);
+  const [whatsappWabaId, setWhatsappWabaId] = useState('');
+  const [whatsappPhoneNumberId, setWhatsappPhoneNumberId] = useState('');
+  const [whatsappAccessToken, setWhatsappAccessToken] = useState('');
   const [accountSyncBusy, setAccountSyncBusy] = useState(false);
 
   const appStatusByKey = useMemo(() => {
@@ -154,6 +162,10 @@ export function MoreScreen() {
   function integrationReady(platform: SocialPlatform): boolean {
     const capability = PLATFORM_CAPABILITIES[platform];
     if (capability.connectMode === 'bot') return Boolean(telegramBotUsername);
+    if (capability.connectMode === 'credentials') {
+      const metaApp = appStatusByKey.get('meta');
+      return Boolean(metaApp?.enabled && metaApp?.configured);
+    }
     if (capability.connectMode !== 'oauth' || !capability.appKey) return false;
     const app = appStatusByKey.get(capability.appKey);
     return Boolean(app?.enabled && app?.configured);
@@ -187,8 +199,19 @@ export function MoreScreen() {
       return;
     }
 
+    if (capability.connectMode === 'credentials' && platform === 'whatsapp') {
+      if (!integrationReady(platform)) {
+        setConnectError('إعداد Meta App الأساسي غير مكتمل؛ App ID وApp Secret وWebhook Verify Token مطلوبين أولًا.');
+        return;
+      }
+      setConnectError(null);
+      setConnectNotice(null);
+      setWhatsappOpen((open) => !open);
+      return;
+    }
+
     if (capability.connectMode === 'managed') {
-      setConnectError('واتساب يُربط كقناة WhatsApp Business من إعدادات Meta الخاصة بالنظام، وليس كحساب نشر.');
+      setConnectError('هذه القناة تتم إدارتها من إعدادات النظام.');
       return;
     }
 
@@ -237,6 +260,29 @@ export function MoreScreen() {
       setConnectError(error instanceof Error ? error.message : 'فشلت مزامنة الحسابات');
     } finally {
       setAccountSyncBusy(false);
+    }
+  }
+
+  async function handleConnectWhatsApp() {
+    if (!workspace || !whatsappWabaId.trim() || !whatsappPhoneNumberId.trim() || !whatsappAccessToken.trim()) return;
+    setWhatsappBusy(true);
+    setConnectError(null);
+    setConnectNotice(null);
+    try {
+      const result = await connectWhatsApp({
+        workspaceId: workspace.id,
+        wabaId: whatsappWabaId.trim(),
+        phoneNumberId: whatsappPhoneNumberId.trim(),
+        accessToken: whatsappAccessToken.trim(),
+      });
+      setWhatsappAccessToken('');
+      setWhatsappOpen(false);
+      setConnectNotice(`تم ربط واتساب ${result.account.handle || result.account.display_name || ''} وتفعيل Webhooks بنجاح.`);
+      await Promise.all([loadAccounts(), loadIntegrationState()]);
+    } catch (error) {
+      setConnectError(error instanceof Error ? error.message : 'تعذّر ربط واتساب');
+    } finally {
+      setWhatsappBusy(false);
     }
   }
 
@@ -372,7 +418,7 @@ export function MoreScreen() {
               } else if (account?.status === 'error') {
                 stateLabel = 'خطأ';
                 stateColor = 'danger';
-              } else if ((capability.connectMode === 'oauth' || capability.connectMode === 'bot') && !ready) {
+              } else if ((capability.connectMode === 'oauth' || capability.connectMode === 'bot' || capability.connectMode === 'credentials') && !ready) {
                 stateLabel = 'يحتاج إعداد';
                 stateColor = 'warning';
               } else if (capability.connectMode === 'managed') {
@@ -434,6 +480,54 @@ export function MoreScreen() {
                     {platform === 'tiktok' && connected && (
                       <div className="mt-3 rounded-xl bg-accent-500/10 border border-accent-500/20 px-3 py-2 text-accent-300 text-[11px]">
                         الحساب مربوط. النشر المباشر يظل مقيدًا بمتطلبات TikTok للـContent Posting API وخصوصية المستخدم والميديا.
+                      </div>
+                    )}
+
+                    {platform === 'whatsapp' && !connected && ready && whatsappOpen && (
+                      <div className="mt-3 pt-3 border-t border-ink-800 space-y-3 animate-slide-up">
+                        <div className="flex items-start gap-2 text-ink-400 text-xs leading-relaxed">
+                          <Phone size={15} className="mt-0.5 shrink-0" />
+                          <span>
+                            من Meta Developer → WhatsApp → API Setup انسخ WABA ID وPhone Number ID.
+                            استخدم Permanent System User Token بصلاحيات WhatsApp Business.
+                          </span>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <Input value={whatsappWabaId} onChange={setWhatsappWabaId} placeholder="WhatsApp Business Account ID" />
+                          <Input value={whatsappPhoneNumberId} onChange={setWhatsappPhoneNumberId} placeholder="Phone Number ID" />
+                        </div>
+                        <div className="relative">
+                          <KeyRound size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-600" />
+                          <Input
+                            type="password"
+                            value={whatsappAccessToken}
+                            onChange={setWhatsappAccessToken}
+                            placeholder="Permanent Access Token"
+                            className="pr-9"
+                          />
+                        </div>
+                        <div className="rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-[11px] text-ink-400">
+                          التوكن يُرسل مباشرة إلى Edge Function ويُحفظ server-side فقط. SocialPilot سيتحقق من أن الرقم تابع للـWABA ويشترك في Webhooks تلقائيًا.
+                        </div>
+                        <Button
+                          size="sm"
+                          onClick={() => void handleConnectWhatsApp()}
+                          disabled={whatsappBusy || !whatsappWabaId.trim() || !whatsappPhoneNumberId.trim() || !whatsappAccessToken.trim()}
+                        >
+                          {whatsappBusy ? 'جارٍ التحقق والربط...' : 'ربط WhatsApp Business'}
+                        </Button>
+                      </div>
+                    )}
+
+                    {platform === 'whatsapp' && !connected && !ready && (
+                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
+                        إعداد Meta App الأساسي غير مكتمل؛ App Secret مطلوب للتحقق الآمن من Webhook قبل تفعيل واتساب.
+                      </div>
+                    )}
+
+                    {platform === 'whatsapp' && connected && (
+                      <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-brand-200 text-[11px]">
+                        WhatsApp Cloud API متصل. الرسائل الواردة والـAI Reply وحالات sent/delivered/read/failed تعمل عبر Unified Inbox.
                       </div>
                     )}
 
