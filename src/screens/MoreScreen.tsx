@@ -60,6 +60,13 @@ function capabilityBadge(enabled: boolean, label: string) {
   return <Badge color={enabled ? 'brand' : 'neutral'}>{label}</Badge>;
 }
 
+function whatsappProviderLabel(provider: unknown): string {
+  if (provider === 'waha') return 'WAHA';
+  if (provider === 'wppconnect') return 'WPPConnect';
+  if (provider === 'evolution') return 'Evolution';
+  return 'WhatsApp Web';
+}
+
 export function MoreScreen() {
   const { workspace, signOut } = useAuth();
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
@@ -523,6 +530,9 @@ export function MoreScreen() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="text-ink-100 text-sm font-semibold">{meta.label}</p>
                             <Badge color={stateColor}>{stateLabel}</Badge>
+                            {platform === 'whatsapp' && account?.metadata?.provider && (
+                              <Badge color="neutral">{whatsappProviderLabel(account.metadata.provider)}</Badge>
+                            )}
                           </div>
                           <p className="text-ink-500 text-xs mt-1 truncate">
                             {account?.display_name || account?.handle || capability.note}
@@ -539,8 +549,8 @@ export function MoreScreen() {
                         >
                           {connected
                             ? 'فصل'
-                            : platform === 'whatsapp' && account?.metadata?.onboarding_state === 'scan_qr'
-                              ? 'عرض QR'
+                            : platform === 'whatsapp' && account?.status === 'error'
+                              ? 'إعادة الربط'
                               : busy
                                 ? 'جارٍ الربط...'
                                 : 'ربط'}
@@ -574,16 +584,91 @@ export function MoreScreen() {
                       </div>
                     )}
 
-                    {platform === 'whatsapp' && !connected && ready && !whatsappQrOpen && (
-                      <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-[11px] text-brand-200 flex items-start gap-2">
-                        <QrCode size={14} className="mt-0.5 shrink-0" />
-                        <span>اضغط «ربط». SocialPilot هيولّد QR؛ افتح WhatsApp → الأجهزة المرتبطة → ربط جهاز وامسح الكود.</span>
+                    {platform === 'whatsapp' && !connected && ready && (
+                      <div className="mt-3 rounded-2xl border border-ink-800 bg-ink-950/45 p-3 space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold text-ink-100">طرق ربط WhatsApp</p>
+                            <p className="text-[10px] text-ink-500 mt-1">
+                              Evolution أساسي، WAHA بديل مع QR/Pairing Code، وWPPConnect مسار Recovery إضافي.
+                            </p>
+                          </div>
+                          <Badge color="neutral">{whatsappProviders.filter((item) => item.configured).length} جاهز</Badge>
+                        </div>
+
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          {[...whatsappProviders]
+                            .sort((a, b) => a.fallbackOrder - b.fallbackOrder)
+                            .map((provider) => {
+                              const selected = whatsappSelectedProvider === provider.provider;
+                              return (
+                                <button
+                                  key={provider.provider}
+                                  type="button"
+                                  disabled={!provider.configured || busy}
+                                  onClick={() => {
+                                    setWhatsappSelectedProvider(provider.provider);
+                                    setWhatsappPairingMode('qr');
+                                    setWhatsappQrOpen(false);
+                                    setWhatsappQrBase64(null);
+                                    setWhatsappPairingCode(null);
+                                    setConnectError(null);
+                                  }}
+                                  className={`rounded-xl border px-3 py-2.5 text-right transition-colors ${
+                                    selected
+                                      ? 'border-brand-500/50 bg-brand-500/10'
+                                      : 'border-ink-800 bg-ink-900/70 hover:border-ink-700'
+                                  } disabled:opacity-40 disabled:cursor-not-allowed`}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-semibold text-ink-100">{provider.displayName}</span>
+                                    <span className={`w-2 h-2 rounded-full ${provider.configured ? 'bg-accent-400' : 'bg-ink-700'}`} />
+                                  </div>
+                                  <p className="text-[10px] text-ink-500 mt-1">
+                                    {provider.recommended ? 'أساسي' : provider.provider === 'waha' ? 'Fallback 1' : 'Fallback 2'}
+                                    {' · '}
+                                    {provider.configured ? 'جاهز' : 'غير مُعد'}
+                                  </p>
+                                </button>
+                              );
+                            })}
+                        </div>
+
+                        {whatsappProviders.find((item) => item.provider === whatsappSelectedProvider)?.methods.includes('code') && (
+                          <div className="grid gap-2 sm:grid-cols-[160px_minmax(0,1fr)]">
+                            <select
+                              value={whatsappPairingMode}
+                              onChange={(event) => setWhatsappPairingMode(event.target.value as WhatsAppPairingMode)}
+                              className="rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-xs text-ink-100"
+                            >
+                              <option value="qr">QR Code</option>
+                              <option value="code">Pairing Code</option>
+                            </select>
+                            {whatsappPairingMode === 'code' && (
+                              <Input
+                                value={whatsappPhoneNumber}
+                                onChange={setWhatsappPhoneNumber}
+                                placeholder="رقم الهاتف بكود الدولة — مثال 2010xxxxxxx"
+                              />
+                            )}
+                          </div>
+                        )}
+
+                        {!whatsappQrOpen && (
+                          <div className="rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-[11px] text-brand-200 flex items-start gap-2">
+                            <QrCode size={14} className="mt-0.5 shrink-0" />
+                            <span>
+                              اختر المزود ثم اضغط «{account?.status === 'error' ? 'إعادة الربط' : 'ربط'}».
+                              التبديل لمزود آخر يحتاج Pair جديد لكنه يحافظ على تاريخ Unified Inbox.
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {platform === 'whatsapp' && !connected && !ready && (
                       <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
-                        Evolution/Baileys غير مُعد على النظام. يحتاج Base URL وAPI Key من Super Admin مرة واحدة.
+                        لا يوجد مزود WhatsApp جاهز. جهّز Evolution أو WAHA أو WPPConnect من Super Admin، وبعدها الربط للمستخدم يتم من هنا فقط.
                       </div>
                     )}
 
@@ -593,7 +678,10 @@ export function MoreScreen() {
                           <div className="flex items-center gap-2">
                             <QrCode size={17} className="text-brand-300" />
                             <div>
-                              <p className="text-ink-100 text-xs font-semibold">امسح QR من WhatsApp</p>
+                              <p className="text-ink-100 text-xs font-semibold">
+                                {whatsappPairingCode ? 'أدخل Pairing Code في WhatsApp' : 'امسح QR من WhatsApp'}
+                                {' · '}{whatsappProviderLabel(whatsappSelectedProvider)}
+                              </p>
                               <p className="text-ink-500 text-[10px] mt-0.5">الحالة: {whatsappProviderState}</p>
                             </div>
                           </div>
@@ -632,14 +720,16 @@ export function MoreScreen() {
                     {platform === 'whatsapp' && connected && (
                       <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-brand-200 text-[11px] flex items-center gap-2">
                         <Wifi size={14} />
-                        WhatsApp Web متصل عبر Evolution/Baileys. الرسائل والميديا والـAI Reply تعمل من Unified Inbox.
+                        WhatsApp Web متصل عبر {whatsappProviderLabel(account?.metadata?.provider)}. الرسائل والميديا والـAI Reply تعمل من Unified Inbox.
                       </div>
                     )}
 
-                    {platform === 'whatsapp' && !connected && account?.metadata?.provider === 'evolution' && account?.status === 'error' && (
-                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px] flex items-center gap-2">
-                        <WifiOff size={14} />
-                        الجلسة غير متصلة حاليًا. اضغط «عرض QR» لإعادة الربط.
+                    {platform === 'whatsapp' && !connected && account?.status === 'error' && (
+                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px] flex items-start gap-2">
+                        <WifiOff size={14} className="mt-0.5 shrink-0" />
+                        <span>
+                          جلسة {whatsappProviderLabel(account?.metadata?.provider)} غير متصلة. اختر نفس المزود لإعادة الربط أو اختر مزودًا بديلًا جاهزًا؛ تاريخ المحادثات لن يُحذف.
+                        </span>
                       </div>
                     )}
 
