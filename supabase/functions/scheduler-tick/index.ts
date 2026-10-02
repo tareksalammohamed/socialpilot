@@ -35,6 +35,31 @@ const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
 
+declare const EdgeRuntime: {
+  waitUntil(promise: Promise<unknown>): void;
+};
+
+function wakeAssistantWorker(): void {
+  if (!supabaseUrl || !serviceRoleKey) return;
+  const task = fetch(`${supabaseUrl}/functions/v1/assistant-task-worker`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${serviceRoleKey}`,
+      apikey: serviceRoleKey,
+      'Content-Type': 'application/json',
+    },
+    body: '{}',
+  }).then(async (response) => {
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      console.error('scheduler-tick: assistant worker wake failed', response.status, detail.slice(0, 1000));
+    }
+  }).catch((error) => {
+    console.error('scheduler-tick: assistant worker wake request failed', error);
+  });
+  EdgeRuntime.waitUntil(task);
+}
+
 const META_GRAPH_VERSION = Deno.env.get('META_GRAPH_VERSION') ?? 'v26.0';
 const LINKEDIN_API_VERSION = Deno.env.get('LINKEDIN_API_VERSION') ?? '202607';
 const LINKEDIN_RESTLI_PROTOCOL_VERSION = '2.0.0';
@@ -609,6 +634,11 @@ Deno.serve(async (req: Request) => {
 
   const now = new Date().toISOString();
   const results = { checked: 0, published: 0, failed: 0, skipped: 0, errors: [] as string[] };
+
+  // Durable Create tasks are independent from the browser. The immediate
+  // dispatcher normally starts them within milliseconds, while this cron
+  // wake-up is the recovery path for missed dispatches or stale worker locks.
+  wakeAssistantWorker();
 
   try {
     const { data: dueItems, error: dueErr } = await supabase
