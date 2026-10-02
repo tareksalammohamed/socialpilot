@@ -61,6 +61,46 @@ export async function connectTelegramChannel(workspaceId: string, channelUsernam
   return callTelegramConnect<{ ok: true; account: unknown }>({ action: 'connect', workspaceId, channelUsername });
 }
 
+export type WhatsAppConnectionResult = {
+  ok: true;
+  webhookSubscribed: boolean;
+  account: {
+    id: string;
+    platform: 'whatsapp';
+    display_name: string | null;
+    handle: string | null;
+    status: string;
+    metadata: Record<string, unknown>;
+  };
+};
+
+export async function connectWhatsApp(params: {
+  workspaceId: string;
+  wabaId: string;
+  phoneNumberId: string;
+  accessToken: string;
+}): Promise<WhatsAppConnectionResult> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token;
+  if (!token) throw new Error('يجب تسجيل الدخول لربط واتساب');
+
+  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-connect`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+    },
+    body: JSON.stringify(params),
+  });
+
+  const body = await response.json().catch(() => ({})) as Partial<WhatsAppConnectionResult> & { error?: string };
+  if (!response.ok || !body.ok || !body.account) {
+    throw new Error(body.error ?? `فشل ربط واتساب (${response.status})`);
+  }
+  return body as WhatsAppConnectionResult;
+}
+
 export type SocialIntegrationStatus = {
   platform_key: string;
   display_name: string;
