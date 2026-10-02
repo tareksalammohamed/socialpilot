@@ -60,6 +60,7 @@ type InboxAiSettings = {
   maxReplyLength: number;
   replyMode: 'draft' | 'auto_safe';
   autoReplyMaxPerHour: number;
+  autoReplyDelaySeconds: number;
 };
 
 const DEFAULT_AI_SETTINGS: InboxAiSettings = {
@@ -73,6 +74,7 @@ const DEFAULT_AI_SETTINGS: InboxAiSettings = {
   maxReplyLength: 320,
   replyMode: 'draft',
   autoReplyMaxPerHour: 3,
+  autoReplyDelaySeconds: 4,
 };
 
 function readInboxAiSettings(settings: Record<string, unknown> | null | undefined): InboxAiSettings {
@@ -92,6 +94,9 @@ function readInboxAiSettings(settings: Record<string, unknown> | null | undefine
     autoReplyMaxPerHour: typeof raw.autoReplyMaxPerHour === 'number'
       ? Math.max(1, Math.min(10, Math.round(raw.autoReplyMaxPerHour)))
       : DEFAULT_AI_SETTINGS.autoReplyMaxPerHour,
+    autoReplyDelaySeconds: typeof raw.autoReplyDelaySeconds === 'number'
+      ? Math.max(0, Math.min(15, Math.round(raw.autoReplyDelaySeconds)))
+      : DEFAULT_AI_SETTINGS.autoReplyDelaySeconds,
   };
 }
 
@@ -840,6 +845,20 @@ export function InboxScreen() {
                     onChange={(event) => setAiSettings((current) => ({ ...current, autoReplyMaxPerHour: Number(event.target.value) }))}
                     className="w-full"
                   />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs text-ink-400">مهلة تجميع رسائل العميل قبل الرد: {aiSettings.autoReplyDelaySeconds} ثوانٍ</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={15}
+                    step={1}
+                    value={aiSettings.autoReplyDelaySeconds}
+                    disabled={!canManageAiSettings}
+                    onChange={(event) => setAiSettings((current) => ({ ...current, autoReplyDelaySeconds: Number(event.target.value) }))}
+                    className="w-full"
+                  />
+                  <p className="text-[10px] text-ink-500">تمنع الرد على أول رسالة إذا أرسل العميل رسالة ثانية بعدها مباشرة.</p>
                 </label>
               </div>
             )}
