@@ -96,6 +96,18 @@ function messageLabel(message: InboxMessage): string {
   return message.sender_name || 'الزائر';
 }
 
+function deliveryStatusLabel(message: InboxMessage): { label: string; className: string } | null {
+  if (message.direction !== 'outbound') return null;
+  const status = typeof message.metadata?.delivery_status === 'string' ? message.metadata.delivery_status : null;
+  if (!status) return null;
+  if (status === 'read') return { label: 'مقروءة ✓✓', className: 'text-accent-300' };
+  if (status === 'delivered') return { label: 'تم التسليم ✓✓', className: 'text-ink-400' };
+  if (status === 'sent') return { label: 'تم الإرسال ✓', className: 'text-ink-500' };
+  if (status === 'accepted') return { label: 'تم قبولها للإرسال', className: 'text-ink-500' };
+  if (status === 'failed') return { label: 'فشل الإرسال', className: 'text-danger-400' };
+  return { label: status, className: 'text-ink-500' };
+}
+
 export function InboxScreen() {
   const { workspace, user, refreshWorkspace } = useAuth();
   const [conversations, setConversations] = useState<InboxConversation[]>([]);
@@ -223,11 +235,24 @@ export function InboxScreen() {
       )
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'inbox_messages', filter: `workspace_id=eq.${workspace.id}` },
+        { event: '*', schema: 'public', table: 'inbox_messages', filter: `workspace_id=eq.${workspace.id}` },
         (payload) => {
           const row = payload.new as InboxMessage;
+          if (payload.eventType === 'DELETE') {
+            const oldRow = payload.old as InboxMessage;
+            if (oldRow.conversation_id === selectedId) {
+              setMessages((current) => current.filter((item) => item.id !== oldRow.id));
+            }
+            return;
+          }
           if (row.conversation_id === selectedId) {
-            setMessages((current) => current.some((item) => item.id === row.id) ? current : [...current, row]);
+            setMessages((current) => {
+              const exists = current.some((item) => item.id === row.id);
+              if (payload.eventType === 'UPDATE' && exists) {
+                return current.map((item) => item.id === row.id ? row : item);
+              }
+              return exists ? current : [...current, row];
+            });
           }
           void loadConversations(true);
         },
@@ -752,6 +777,16 @@ export function InboxScreen() {
                             <span>{formatDate(message.created_at)}</span>
                           </div>
                           <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                          {selectedConversation.platform === 'whatsapp' && deliveryStatusLabel(message) && (
+                            <div className="mt-1.5 flex items-center justify-between gap-3 text-[10px]">
+                              <span className={deliveryStatusLabel(message)!.className}>{deliveryStatusLabel(message)!.label}</span>
+                              {message.metadata?.delivery_status === 'failed' && typeof message.metadata?.delivery_error === 'string' && (
+                                <span className="text-danger-400 truncate max-w-[220px]" title={String(message.metadata.delivery_error)}>
+                                  {String(message.metadata.delivery_error)}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))
