@@ -28,10 +28,12 @@ import {
   connectTelegramChannel,
   syncAccounts,
   getSocialIntegrationStatus,
-  startWhatsAppEvolution,
-  getWhatsAppEvolutionStatus,
-  disconnectWhatsAppEvolution,
+  startWhatsAppProvider,
+  switchWhatsAppProvider,
+  getWhatsAppProviderStatus,
+  disconnectWhatsAppProvider,
   type SocialIntegrationStatus,
+  type WhatsAppProviderKey,
 } from '@/lib/api';
 import { Card, Button, Badge, ErrorBanner, Input, Spinner } from '@/components/ui';
 import { PLATFORMS, PLATFORM_META } from '@/lib/constants';
@@ -77,6 +79,10 @@ export function MoreScreen() {
   const [whatsappQrBase64, setWhatsappQrBase64] = useState<string | null>(null);
   const [whatsappPairingCode, setWhatsappPairingCode] = useState<string | null>(null);
   const [whatsappProviderState, setWhatsappProviderState] = useState<string>('not_created');
+  const [whatsappProviderKey, setWhatsappProviderKey] = useState<WhatsAppProviderKey | null>(null);
+  const [whatsappProviderLabel, setWhatsappProviderLabel] = useState<string | null>(null);
+  const [whatsappAlternatives, setWhatsappAlternatives] = useState<WhatsAppProviderKey[]>([]);
+  const [whatsappSwitchBusy, setWhatsappSwitchBusy] = useState(false);
   const [accountSyncBusy, setAccountSyncBusy] = useState(false);
 
   const appStatusByKey = useMemo(() => {
@@ -132,9 +138,12 @@ export function MoreScreen() {
       if (checking || cancelled) return;
       checking = true;
       try {
-        const status = await getWhatsAppEvolutionStatus(workspace.id);
+        const status = await getWhatsAppProviderStatus(workspace.id);
         if (cancelled) return;
         setWhatsappProviderState(status.state);
+        setWhatsappProviderKey(status.providerKey ?? null);
+        setWhatsappProviderLabel(status.providerLabel ?? null);
+        setWhatsappAlternatives(status.alternatives ?? []);
         if (status.connected) {
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
@@ -218,11 +227,14 @@ export function MoreScreen() {
       setConnectError(null);
       try {
         if (platform === 'whatsapp') {
-          await disconnectWhatsAppEvolution(workspace.id);
+          await disconnectWhatsAppProvider(workspace.id);
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
           setWhatsappPairingCode(null);
           setWhatsappProviderState('disconnected');
+          setWhatsappProviderKey(null);
+          setWhatsappProviderLabel(null);
+          setWhatsappAlternatives([]);
         } else {
           const { error } = await supabase.from('social_accounts').delete().eq('id', existing.id).eq('workspace_id', workspace.id);
           if (error) throw error;
@@ -253,8 +265,11 @@ export function MoreScreen() {
       setConnectNotice(null);
       setConnectingPlatform('whatsapp');
       try {
-        const result = await startWhatsAppEvolution(workspace.id);
+        const result = await startWhatsAppProvider(workspace.id);
         setWhatsappProviderState(result.state);
+        setWhatsappProviderKey(result.providerKey ?? null);
+        setWhatsappProviderLabel(result.providerLabel ?? null);
+        setWhatsappAlternatives(result.alternatives ?? []);
         if (result.connected) {
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
@@ -307,6 +322,33 @@ export function MoreScreen() {
     } catch (error) {
       setConnectError(error instanceof Error ? error.message : 'تعذّر بدء عملية الربط');
       setConnectingPlatform(null);
+    }
+  }
+
+  async function handleSwitchWhatsAppProvider(providerKey?: WhatsAppProviderKey) {
+    if (!workspace || whatsappSwitchBusy) return;
+    setWhatsappSwitchBusy(true);
+    setConnectError(null);
+    setConnectNotice(null);
+    try {
+      const result = await switchWhatsAppProvider(workspace.id, providerKey);
+      setWhatsappProviderState(result.state);
+      setWhatsappProviderKey(result.providerKey ?? null);
+      setWhatsappProviderLabel(result.providerLabel ?? null);
+      setWhatsappAlternatives(result.alternatives ?? []);
+      setWhatsappQrBase64(result.qrBase64 ?? null);
+      setWhatsappPairingCode(result.pairingCode ?? null);
+      setWhatsappQrOpen(!result.connected);
+      await loadAccounts();
+      if (result.connected) {
+        setConnectNotice(`تم التحويل إلى ${result.providerLabel ?? result.providerKey ?? 'المزود البديل'} واتصال WhatsApp جاهز.`);
+      } else {
+        setConnectNotice(`تم تجهيز ${result.providerLabel ?? result.providerKey ?? 'المزود البديل'}. امسح QR لإكمال الربط.`);
+      }
+    } catch (error) {
+      setConnectError(error instanceof Error ? error.message : 'تعذّر التحويل إلى مزود WhatsApp بديل');
+    } finally {
+      setWhatsappSwitchBusy(false);
     }
   }
 
@@ -546,7 +588,7 @@ export function MoreScreen() {
 
                     {platform === 'whatsapp' && !connected && !ready && (
                       <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
-                        Evolution/Baileys غير مُعد على النظام. يحتاج Base URL وAPI Key من Super Admin مرة واحدة.
+                        لا يوجد WhatsApp Provider سليم ومفعّل. Super Admin يقدر يجهز Evolution أو WAHA أو WPPConnect، والنظام يجربهم حسب الأولوية.
                       </div>
                     )}
 
@@ -557,7 +599,9 @@ export function MoreScreen() {
                             <QrCode size={17} className="text-brand-300" />
                             <div>
                               <p className="text-ink-100 text-xs font-semibold">امسح QR من WhatsApp</p>
-                              <p className="text-ink-500 text-[10px] mt-0.5">الحالة: {whatsappProviderState}</p>
+                              <p className="text-ink-500 text-[10px] mt-0.5">
+                                {whatsappProviderLabel || whatsappProviderKey || 'WhatsApp Provider'} · الحالة: {whatsappProviderState}
+                              </p>
                             </div>
                           </div>
                           <Button variant="ghost" size="sm" onClick={() => void togglePlatform('whatsapp')} disabled={busy}>
@@ -595,14 +639,34 @@ export function MoreScreen() {
                     {platform === 'whatsapp' && connected && (
                       <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-brand-200 text-[11px] flex items-center gap-2">
                         <Wifi size={14} />
-                        WhatsApp Web متصل عبر Evolution/Baileys. الرسائل والميديا والـAI Reply تعمل من Unified Inbox.
+                        WhatsApp متصل عبر {String(account?.metadata?.provider_label ?? whatsappProviderLabel ?? account?.metadata?.provider ?? 'WhatsApp Web')}. الرسائل والميديا والـAI Reply تعمل من Unified Inbox.
                       </div>
                     )}
 
-                    {platform === 'whatsapp' && !connected && account?.metadata?.provider === 'evolution' && account?.status === 'error' && (
-                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px] flex items-center gap-2">
-                        <WifiOff size={14} />
-                        الجلسة غير متصلة حاليًا. اضغط «عرض QR» لإعادة الربط.
+                    {platform === 'whatsapp' && !connected && account?.status === 'error' && (
+                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px] space-y-2">
+                        <div className="flex items-center gap-2">
+                          <WifiOff size={14} />
+                          <span>
+                            الجلسة غير متصلة عبر {String(account?.metadata?.provider_label ?? account?.metadata?.provider ?? 'المزود الحالي')}.
+                          </span>
+                        </div>
+                        {whatsappAlternatives.length > 0 && (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[10px] text-ink-500">بدائل جاهزة:</span>
+                            {whatsappAlternatives.map((provider) => (
+                              <Button
+                                key={provider}
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => void handleSwitchWhatsAppProvider(provider)}
+                                disabled={whatsappSwitchBusy}
+                              >
+                                {whatsappSwitchBusy ? 'جارٍ التحويل...' : provider === 'evolution' ? 'Evolution' : provider === 'waha' ? 'WAHA' : 'WPPConnect'}
+                              </Button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
 
