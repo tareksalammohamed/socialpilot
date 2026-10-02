@@ -144,6 +144,30 @@ export function MoreScreen() {
   }, []);
 
   useEffect(() => {
+    if (!workspace?.id) return;
+    const account = accounts.find((item) => item.platform === 'whatsapp');
+    if (!account) {
+      setWhatsappProviderKey(null);
+      setWhatsappProviderLabel(null);
+      setWhatsappAlternatives([]);
+      return;
+    }
+    let cancelled = false;
+    void getWhatsAppProviderStatus(workspace.id)
+      .then((status) => {
+        if (cancelled) return;
+        setWhatsappProviderState(status.state);
+        setWhatsappProviderKey(status.providerKey ?? null);
+        setWhatsappProviderLabel(status.providerLabel ?? null);
+        setWhatsappAlternatives(status.alternatives ?? []);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace?.id, accounts]);
+
+  useEffect(() => {
     if (!workspace?.id || !whatsappQrOpen) return;
     let cancelled = false;
     let checking = false;
