@@ -27,3 +27,8 @@ verify_jwt = false
 # The function validates a unique per-instance x-socialpilot-secret header.
 [functions.whatsapp-evolution-webhook]
 verify_jwt = false
+
+
+# Internal background worker; it accepts only the exact Supabase service-role token.
+[functions.inbox-auto-reply]
+verify_jwt = false
