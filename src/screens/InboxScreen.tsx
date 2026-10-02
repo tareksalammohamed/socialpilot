@@ -17,6 +17,8 @@ import {
   FileText,
   LayoutTemplate,
   Download,
+  Paperclip,
+  X,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
@@ -30,6 +32,7 @@ import {
   listWhatsAppTemplates,
   sendWhatsAppTemplate,
   fetchInboxMedia,
+  sendInboxMedia,
   type WhatsAppTemplate,
 } from '@/lib/api';
 import type { InboxAiAnalysis, InboxConversation, InboxMessage } from '@/lib/types';
@@ -220,8 +223,10 @@ export function InboxScreen() {
   const [selectedTemplateKey, setSelectedTemplateKey] = useState('');
   const [templateVariables, setTemplateVariables] = useState<string[]>([]);
   const [templateSending, setTemplateSending] = useState(false);
+  const [pendingAttachment, setPendingAttachment] = useState<File | null>(null);
   const [aiSettings, setAiSettings] = useState<InboxAiSettings>(() => readInboxAiSettings(workspace?.settings));
   const autoAnalyzeKeyRef = useRef<string | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   const canManageAiSettings = !!workspace && !!user && workspace.owner_id === user.id;
 
@@ -318,6 +323,8 @@ export function InboxScreen() {
   }, [loadConversations]);
 
   useEffect(() => {
+    setPendingAttachment(null);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = '';
     if (!workspace?.id || !selectedId) {
       setMessages([]);
       setAiAnalysis(null);
@@ -584,14 +591,48 @@ export function InboxScreen() {
     }
   }
 
+  function handleAttachmentPicked(file: File | null) {
+    if (!file) {
+      setPendingAttachment(null);
+      return;
+    }
+    const maxBytes = 15 * 1024 * 1024;
+    const imageMaxBytes = 5 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      setMessagesError('الحد الأقصى للمرفق داخل SocialPilot هو 15MB.');
+      if (attachmentInputRef.current) attachmentInputRef.current.value = '';
+      return;
+    }
+    if (['image/jpeg', 'image/png'].includes(file.type) && file.size > imageMaxBytes) {
+      setMessagesError('صور WhatsApp يجب ألا تتجاوز 5MB.');
+      if (attachmentInputRef.current) attachmentInputRef.current.value = '';
+      return;
+    }
+    setMessagesError(null);
+    setPendingAttachment(file);
+  }
+
+  function clearPendingAttachment() {
+    setPendingAttachment(null);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = '';
+  }
+
   async function handleSend() {
-    if (!selectedConversation || !draft.trim() || sending) return;
+    if (!selectedConversation || sending) return;
+    if (!draft.trim() && !pendingAttachment) return;
     setSending(true);
     setMessagesError(null);
     try {
-      const message = await sendInboxReply(selectedConversation.id, draft);
+      const message = pendingAttachment
+        ? await sendInboxMedia({
+            conversationId: selectedConversation.id,
+            file: pendingAttachment,
+            caption: draft.trim() || undefined,
+          })
+        : await sendInboxReply(selectedConversation.id, draft);
       setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
       setDraft('');
+      clearPendingAttachment();
       setConversations((current) => current.map((item) => (
         item.id === selectedConversation.id
           ? { ...item, snippet: message.content, unread: false, updated_at: message.created_at }
@@ -1073,11 +1114,47 @@ export function InboxScreen() {
                         : 'الرد المباشر لهذه المحادثة غير مدعوم من خلال API الحالي.'}
                     </p>
                   )}
+                  {pendingAttachment && (
+                    <div className="mb-2 flex items-center gap-2 rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-xs text-ink-300">
+                      <Paperclip size={14} className="text-brand-300 shrink-0" />
+                      <span className="truncate flex-1">{pendingAttachment.name}</span>
+                      <span className="text-[10px] text-ink-500 shrink-0">{(pendingAttachment.size / 1024 / 1024).toFixed(1)} MB</span>
+                      <button
+                        type="button"
+                        onClick={clearPendingAttachment}
+                        className="rounded-lg p-1 text-ink-500 hover:bg-ink-800 hover:text-ink-200"
+                        aria-label="إزالة المرفق"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  )}
                   <div className="flex items-end gap-2">
+                    {selectedConversation.platform === 'whatsapp' && (
+                      <>
+                        <input
+                          ref={attachmentInputRef}
+                          type="file"
+                          className="hidden"
+                          accept="image/jpeg,image/png,video/mp4,video/3gpp,audio/aac,audio/amr,audio/mpeg,audio/mp4,audio/ogg,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip"
+                          onChange={(event) => handleAttachmentPicked(event.target.files?.[0] ?? null)}
+                        />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => attachmentInputRef.current?.click()}
+                          disabled={sending || !whatsappServiceWindowOpen}
+                          className="shrink-0"
+                        >
+                          <Paperclip size={16} />
+                          <span className="sr-only">إرفاق ملف</span>
+                        </Button>
+                      </>
+                    )}
                     <Input
                       value={draft}
                       onChange={setDraft}
-                      placeholder="اكتب ردًا..."
+                      placeholder={pendingAttachment ? 'أضف تعليقًا اختياريًا للمرفق...' : 'اكتب ردًا...'}
                       className="flex-1"
                     />
                     <Button
@@ -1085,14 +1162,14 @@ export function InboxScreen() {
                       onClick={() => void handleSend()}
                       disabled={
                         sending
-                        || !draft.trim()
+                        || (!draft.trim() && !pendingAttachment)
                         || !canReplyToConversation(selectedConversation)
                         || (selectedConversation.platform === 'whatsapp' && !whatsappServiceWindowOpen)
                       }
                       className="shrink-0"
                     >
                       {sending ? <Spinner size={16} /> : <Send size={16} />}
-                      <span className="sr-only">إرسال</span>
+                      <span className="sr-only">{pendingAttachment ? 'إرسال المرفق' : 'إرسال'}</span>
                     </Button>
                   </div>
                 </div>
