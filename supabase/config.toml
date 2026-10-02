@@ -27,3 +27,12 @@ verify_jwt = false
 # The function validates a unique per-instance x-socialpilot-secret header.
 [functions.whatsapp-evolution-webhook]
 verify_jwt = false
+
+
+# WAHA signs provider webhooks with a per-workspace HMAC secret.
+[functions.whatsapp-waha-webhook]
+verify_jwt = false
+
+# WPPConnect identifies the workspace with a random per-account webhook secret.
+[functions.whatsapp-wppconnect-webhook]
+verify_jwt = false
