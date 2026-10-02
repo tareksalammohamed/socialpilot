@@ -22,6 +22,46 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+async function ensureMetaWhatsAppWebhook(): Promise<string> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps').select('app_id').eq('platform_key', 'meta').maybeSingle(),
+    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', 'meta').maybeSingle(),
+  ]);
+  const verifyToken = Deno.env.get('META_WEBHOOK_VERIFY_TOKEN');
+  const supabaseUrl = (Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '');
+  if (!app?.app_id || !secret?.app_secret || !verifyToken || !supabaseUrl) {
+    throw new Error('إعداد Meta Webhook غير مكتمل: App ID / App Secret / Verify Token مطلوبين');
+  }
+
+  const callbackUrl = `${supabaseUrl}/functions/v1/inbox-webhook`;
+  const form = new URLSearchParams({
+    object: 'whatsapp_business_account',
+    callback_url: callbackUrl,
+    fields: 'messages',
+    verify_token: verifyToken,
+    access_token: `${app.app_id}|${secret.app_secret}`,
+  });
+
+  const response = await fetch(
+    `${GRAPH}/${encodeURIComponent(String(app.app_id))}/subscriptions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+    },
+  );
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok || (body.success !== true && body.success !== 'true')) {
+    const apiError = body.error as Record<string, unknown> | undefined;
+    throw new Error(
+      typeof apiError?.message === 'string'
+        ? `فشل إعداد WhatsApp Webhook: ${apiError.message}`
+        : 'Meta لم تؤكد إعداد WhatsApp Webhook',
+    );
+  }
+  return callbackUrl;
+}
+
 async function graphJson(
   url: string,
   accessToken: string,
@@ -83,6 +123,8 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    const webhookUrl = await ensureMetaWhatsAppWebhook();
+
     const phonesBody = await graphJson(
       `${GRAPH}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status,name_status`,
       accessToken,
@@ -133,6 +175,7 @@ Deno.serve(async (req: Request) => {
           code_verification_status: phone.code_verification_status ?? null,
           name_status: phone.name_status ?? null,
           webhook_subscribed: true,
+          webhook_url: webhookUrl,
           connected_via: 'whatsapp-connect',
         },
         last_sync_at: new Date().toISOString(),
@@ -182,6 +225,7 @@ Deno.serve(async (req: Request) => {
         metadata: account.metadata,
       },
       webhookSubscribed: true,
+      webhookUrl,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'فشل ربط واتساب';
