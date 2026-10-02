@@ -290,26 +290,60 @@ async function whatsappProviderRuntime(account: AccountRow, provider: WhatsAppWe
   secret: string;
   sessionToken: string | null;
 }> {
-  const [{ data: config }, { data: providerSecret }, { data: tokenRow }] = await Promise.all([
-    supabase.from('whatsapp_provider_configs')
-      .select('base_url,enabled,status')
-      .eq('provider_key', provider)
+  const [{ data: app }, { data: secretRow }, { data: tokenRow }] = await Promise.all([
+    supabase.from('social_platform_apps')
+      .select('app_id,enabled,has_secret')
+      .eq('platform_key', 'whatsapp')
       .maybeSingle(),
-    supabase.from('whatsapp_provider_secrets')
-      .select('primary_secret')
-      .eq('provider_key', provider)
+    supabase.from('social_platform_app_secrets')
+      .select('app_secret')
+      .eq('platform_key', 'whatsapp')
       .maybeSingle(),
     supabase.from('social_account_tokens')
       .select('access_token')
       .eq('account_id', account.id)
       .maybeSingle(),
   ]);
-  if (!config?.enabled || config.status !== 'connected' || !config.base_url || !providerSecret?.primary_secret) {
+
+  const raw = typeof secretRow?.app_secret === 'string' ? secretRow.app_secret.trim() : '';
+  let selected: { baseUrl?: string; credential?: string; enabled?: boolean; status?: string } | undefined;
+
+  if (raw.startsWith('{')) {
+    try {
+      const bundle = JSON.parse(raw) as {
+        providers?: Partial<Record<WhatsAppWebProvider, {
+          baseUrl?: string;
+          credential?: string;
+          enabled?: boolean;
+          status?: string;
+        }>>;
+      };
+      selected = bundle.providers?.[provider];
+    } catch {
+      selected = undefined;
+    }
+  } else if (provider === 'evolution' && raw && typeof app?.app_id === 'string' && /^https?:\/\//i.test(app.app_id)) {
+    selected = {
+      baseUrl: app.app_id,
+      credential: raw,
+      enabled: Boolean(app.enabled),
+      status: app.enabled ? 'connected' : 'error',
+    };
+  }
+
+  if (
+    !app?.has_secret
+    || !selected?.baseUrl
+    || !selected.credential
+    || selected.enabled !== true
+    || selected.status !== 'connected'
+  ) {
     throw new Error(`WhatsApp provider ${provider} غير جاهز`);
   }
+
   return {
-    baseUrl: String(config.base_url).trim().replace(/\/+$/, ''),
-    secret: String(providerSecret.primary_secret),
+    baseUrl: selected.baseUrl.trim().replace(/\/+$/, ''),
+    secret: selected.credential,
     sessionToken: typeof tokenRow?.access_token === 'string' ? tokenRow.access_token : null,
   };
 }
@@ -326,7 +360,7 @@ async function ensureEvolutionWebhook(
   const secret = typeof tokenRow?.refresh_token === 'string' ? tokenRow.refresh_token : '';
   if (!secret) throw new Error('Webhook secret غير موجود لجلسة WhatsApp');
 
-  const webhookUrl = `${(Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '')}/functions/v1/whatsapp-provider-webhook?provider=evolution`;
+  const webhookUrl = `${(Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '')}/functions/v1/whatsapp-evolution-webhook`;
   const payload = {
     webhook: {
       enabled: true,
@@ -369,9 +403,9 @@ async function ensureWahaWebhook(
   const secret = typeof tokenRow?.refresh_token === 'string' ? tokenRow.refresh_token : '';
   if (!secret) throw new Error('Webhook secret غير موجود لجلسة WhatsApp');
 
-  const webhookUrl = `${(Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '')}/functions/v1/whatsapp-provider-webhook?provider=waha`;
+  const webhookUrl = `${(Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '')}/functions/v1/whatsapp-waha-webhook`;
   const response = await fetch(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
-    method: 'POST',
+    method: 'PUT',
     headers: {
       'X-Api-Key': runtime.secret,
       'Content-Type': 'application/json',
@@ -436,7 +470,7 @@ async function wppState(runtime: { baseUrl: string; sessionToken: string | null 
 function providerConnected(provider: WhatsAppWebProvider, state: string): boolean {
   if (provider === 'evolution') return ['open', 'connected'].includes(state);
   if (provider === 'waha') return ['working', 'connected', 'authenticated'].includes(state);
-  return ['connected', 'islogged', 'logged', 'open', 'inchat'].includes(state.replace(/\s+/g, ''));
+  return ['connected', 'islogged', 'logged', 'open', 'inchat', 'ischat'].includes(state.replace(/\s+/g, ''));
 }
 
 async function checkWhatsAppWeb(account: AccountRow, provider: WhatsAppWebProvider): Promise<SyncOutcome> {
