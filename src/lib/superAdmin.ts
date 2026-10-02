@@ -94,9 +94,40 @@ async function callSocialAdmin<T>(action: string, payload: Record<string, unknow
 export const socialAdmin = {
   listApps: () => callSocialAdmin<{ apps: SocialPlatformApp[] }>('list_apps'),
   saveApp: (platformKey: SocialPlatformAppKey, appId: string, appSecret?: string, redirectUri?: string, configurationId?: string) =>
-    callSocialAdmin<{ ok: true; redirectUri: string }>('save_app', { platformKey, appId, appSecret, redirectUri, configurationId }),
+    callSocialAdmin<{ ok: true; redirectUri: string | null }>('save_app', { platformKey, appId, appSecret, redirectUri, configurationId }),
   setEnabled: (platformKey: SocialPlatformAppKey, enabled: boolean) =>
     callSocialAdmin<{ ok: true }>('set_enabled', { platformKey, enabled }),
   removeApp: (platformKey: SocialPlatformAppKey) =>
     callSocialAdmin<{ ok: true }>('remove_app', { platformKey }),
+  saveWhatsAppProvider: (
+    providerKey: import('@/lib/types').WhatsAppProviderKey,
+    baseUrl: string,
+    credential: string | undefined,
+    enabled: boolean,
+    priority: number,
+  ) => callSocialAdmin<{
+    ok: true;
+    activeProvider: import('@/lib/types').WhatsAppProviderKey | null;
+    provider: import('@/lib/types').WhatsAppProviderConfig;
+  }>('save_whatsapp_provider', { providerKey, baseUrl, credential, enabled, priority }),
+  testWhatsAppProviders: () => callSocialAdmin<{
+    ok: true;
+    activeProvider: import('@/lib/types').WhatsAppProviderKey | null;
+    providers: import('@/lib/types').WhatsAppProviderConfig[];
+  }>('test_whatsapp_providers'),
+  setWhatsAppProviderEnabled: (providerKey: import('@/lib/types').WhatsAppProviderKey, enabled: boolean) =>
+    callSocialAdmin<{ ok: true; activeProvider: import('@/lib/types').WhatsAppProviderKey | null }>(
+      'set_whatsapp_provider_enabled',
+      { providerKey, enabled },
+    ),
+  setWhatsAppActiveProvider: (providerKey: import('@/lib/types').WhatsAppProviderKey) =>
+    callSocialAdmin<{ ok: true; activeProvider: import('@/lib/types').WhatsAppProviderKey }>(
+      'set_whatsapp_active_provider',
+      { providerKey },
+    ),
+  removeWhatsAppProvider: (providerKey: import('@/lib/types').WhatsAppProviderKey) =>
+    callSocialAdmin<{ ok: true; activeProvider: import('@/lib/types').WhatsAppProviderKey | null }>(
+      'remove_whatsapp_provider',
+      { providerKey },
+    ),
 };
