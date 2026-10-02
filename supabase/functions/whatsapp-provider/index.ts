@@ -95,31 +95,71 @@ async function requireAdmin(req: Request, workspaceId: string): Promise<{ userId
 }
 
 async function providerRuntimes(): Promise<ProviderRuntime[]> {
-  const [{ data: configs, error }, { data: secrets }] = await Promise.all([
-    supabase
-      .from('whatsapp_provider_configs')
-      .select('provider_key,display_name,base_url,enabled,priority,status,last_error')
-      .order('priority')
-      .order('provider_key'),
-    supabase
-      .from('whatsapp_provider_secrets')
-      .select('provider_key,primary_secret'),
+  const [{ data: app }, { data: secretRow }] = await Promise.all([
+    supabase.from('social_platform_apps')
+      .select('app_id,enabled,has_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
+    supabase.from('social_platform_app_secrets')
+      .select('app_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
   ]);
-  if (error) throw error;
 
-  const secretMap = new Map((secrets ?? []).map((row) => [String(row.provider_key), String(row.primary_secret)]));
-  return (configs ?? [])
-    .filter((row) => validProvider(row.provider_key))
-    .map((row) => ({
-      providerKey: row.provider_key as ProviderKey,
-      displayName: String(row.display_name ?? LABELS[row.provider_key as ProviderKey]),
-      baseUrl: row.base_url ? normalizeBaseUrl(String(row.base_url)) : '',
-      secret: secretMap.get(String(row.provider_key)) ?? '',
-      enabled: Boolean(row.enabled),
-      priority: Number(row.priority ?? 999),
-      status: row.status as ProviderRuntime['status'],
-      lastError: typeof row.last_error === 'string' ? row.last_error : null,
-    }));
+  const raw = typeof secretRow?.app_secret === 'string' ? secretRow.app_secret.trim() : '';
+  const defaults: Record<ProviderKey, number> = { evolution: 10, waha: 20, wppconnect: 30 };
+  const runtimes = PROVIDERS.map((providerKey) => ({
+    providerKey,
+    displayName: LABELS[providerKey],
+    baseUrl: '',
+    secret: '',
+    enabled: false,
+    priority: defaults[providerKey],
+    status: 'not_configured' as ProviderRuntime['status'],
+    lastError: null as string | null,
+  }));
+
+  if (raw.startsWith('{')) {
+    try {
+      const bundle = JSON.parse(raw) as {
+        version?: number;
+        providers?: Partial<Record<ProviderKey, {
+          baseUrl?: string;
+          credential?: string;
+          enabled?: boolean;
+          priority?: number;
+          status?: ProviderRuntime['status'];
+          lastError?: string | null;
+        }>>;
+      };
+      for (const runtime of runtimes) {
+        const config = bundle.providers?.[runtime.providerKey];
+        if (!config) continue;
+        runtime.baseUrl = config.baseUrl ? normalizeBaseUrl(config.baseUrl) : '';
+        runtime.secret = config.credential ?? '';
+        runtime.enabled = config.enabled === true;
+        runtime.priority = Number(config.priority ?? runtime.priority);
+        runtime.status = config.status ?? 'not_configured';
+        runtime.lastError = config.lastError ?? null;
+      }
+      return runtimes.sort((a, b) => a.priority - b.priority || a.providerKey.localeCompare(b.providerKey));
+    } catch {
+      throw new Error('WhatsApp provider registry is invalid JSON');
+    }
+  }
+
+  // Backward compatibility for the single-provider Evolution setup.
+  if (raw && typeof app?.app_id === 'string' && /^https?:\/\//i.test(app.app_id)) {
+    const evolution = runtimes.find((runtime) => runtime.providerKey === 'evolution');
+    if (evolution) {
+      evolution.baseUrl = normalizeBaseUrl(app.app_id);
+      evolution.secret = raw;
+      evolution.enabled = Boolean(app.enabled);
+      evolution.status = app.enabled ? 'connected' : 'error';
+    }
+  }
+
+  return runtimes;
 }
 
 function healthyProviders(runtimes: ProviderRuntime[], exclude?: ProviderKey | null): ProviderRuntime[] {
