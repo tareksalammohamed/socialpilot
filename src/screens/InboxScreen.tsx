@@ -145,6 +145,13 @@ export function InboxScreen() {
     [conversations, selectedId],
   );
 
+  const whatsappServiceWindowOpen = useMemo(() => {
+    if (selectedConversation?.platform !== 'whatsapp') return true;
+    const latestInbound = [...messages].reverse().find((message) => message.direction === 'inbound');
+    if (!latestInbound) return false;
+    return Date.now() - new Date(latestInbound.created_at).getTime() <= 24 * 60 * 60 * 1000;
+  }, [selectedConversation?.platform, messages]);
+
   const filteredConversations = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return conversations.filter((conversation) => {
@@ -809,6 +816,17 @@ export function InboxScreen() {
                 </div>
 
                 <div className="p-3 border-t border-ink-800">
+                  {selectedConversation.platform === 'whatsapp' && (
+                    <div className={`mb-2 rounded-xl border px-3 py-2 text-xs ${
+                      whatsappServiceWindowOpen
+                        ? 'border-brand-500/20 bg-brand-500/5 text-brand-200'
+                        : 'border-warning-500/25 bg-warning-500/10 text-warning-300'
+                    }`}>
+                      {whatsappServiceWindowOpen
+                        ? 'نافذة خدمة WhatsApp مفتوحة — يمكنك إرسال رد نصي مباشر.'
+                        : 'نافذة الـ24 ساعة مغلقة — يلزم Template معتمد من Meta لإعادة فتح المحادثة. يمكنك استخدام AI لصياغة الرد الآن.'}
+                    </div>
+                  )}
                   {!canReplyToConversation(selectedConversation) && (
                     <p className="text-xs text-warning-400 mb-2">
                       {selectedConversation.platform === 'linkedin' && selectedConversation.type === 'dm'
@@ -826,7 +844,12 @@ export function InboxScreen() {
                     <Button
                       size="sm"
                       onClick={() => void handleSend()}
-                      disabled={sending || !draft.trim() || !canReplyToConversation(selectedConversation)}
+                      disabled={
+                        sending
+                        || !draft.trim()
+                        || !canReplyToConversation(selectedConversation)
+                        || (selectedConversation.platform === 'whatsapp' && !whatsappServiceWindowOpen)
+                      }
                       className="shrink-0"
                     >
                       {sending ? <Spinner size={16} /> : <Send size={16} />}
