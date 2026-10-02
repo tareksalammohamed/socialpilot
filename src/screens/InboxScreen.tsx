@@ -253,6 +253,11 @@ export function InboxScreen() {
               }
               return exists ? current : [...current, row];
             });
+            if (payload.eventType === 'INSERT' && row.direction === 'inbound') {
+              autoAnalyzeKeyRef.current = null;
+              setAiAnalysis(null);
+              setAnalysisLoaded(true);
+            }
           }
           void loadConversations(true);
         },
@@ -263,6 +268,16 @@ export function InboxScreen() {
       void supabase.removeChannel(channel);
     };
   }, [workspace?.id, selectedId, loadConversations]);
+
+  useEffect(() => {
+    if (!aiAnalysis || messages.length === 0) return;
+    const latestInbound = [...messages].reverse().find((message) => message.direction === 'inbound');
+    if (!latestInbound) return;
+    if (!aiAnalysis.source_message_ids.includes(latestInbound.id)) {
+      autoAnalyzeKeyRef.current = null;
+      setAiAnalysis(null);
+    }
+  }, [messages, aiAnalysis]);
 
   useEffect(() => {
     if (!selectedConversation || !analysisLoaded || aiAnalysis || aiLoading || !aiSettings.enabled || !aiSettings.autoAnalyze) return;
