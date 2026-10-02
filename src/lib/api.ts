@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import type { AiGatewayRequest, AiGatewayResponse, InboxConversation, InboxMessage, InboxAiAnalysis, AgentContext, AgentTurnResult, AgentToolResult } from './types';
 
-export async function startSocialOAuth(workspaceId: string, platformKey: 'meta' | 'linkedin' | 'x' = 'meta'): Promise<string> {
+export async function startSocialOAuth(workspaceId: string, platformKey: 'meta' | 'linkedin' | 'x' | 'threads' | 'tiktok' = 'meta'): Promise<string> {
   const { data: session } = await supabase.auth.getSession();
   const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/social-oauth-start`;
   const res = await fetch(url, {
