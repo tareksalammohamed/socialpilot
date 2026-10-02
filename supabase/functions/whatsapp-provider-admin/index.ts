@@ -158,6 +158,7 @@ async function listProviders(): Promise<Array<ProviderConfig & { has_secret: boo
   return (configs ?? []).map((row) => ({
     ...(row as ProviderConfig),
     has_secret: secretKeys.has(row.provider_key),
+    configured: Boolean(row.base_url && secretKeys.has(row.provider_key)),
   }));
 }
 
