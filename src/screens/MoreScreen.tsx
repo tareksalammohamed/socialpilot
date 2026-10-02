@@ -200,6 +200,10 @@ export function MoreScreen() {
     }
 
     if (capability.connectMode === 'credentials' && platform === 'whatsapp') {
+      if (!integrationReady(platform)) {
+        setConnectError('إعداد Meta App الأساسي غير مكتمل؛ App ID وApp Secret وWebhook Verify Token مطلوبين أولًا.');
+        return;
+      }
       setConnectError(null);
       setConnectNotice(null);
       setWhatsappOpen((open) => !open);
