@@ -36,6 +36,8 @@ type StartResult = {
   sessionToken: string | null;
 };
 
+const PROVIDERS: ProviderKey[] = ['evolution', 'waha', 'wppconnect'];
+
 const LABELS: Record<ProviderKey, string> = {
   evolution: 'Evolution / Baileys',
   waha: 'WAHA',
