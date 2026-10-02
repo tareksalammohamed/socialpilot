@@ -33,6 +33,8 @@ function socialDeveloperPortalLabel(key: SocialPlatformAppKey): string {
   if (key === 'threads') return 'Meta / Threads App Dashboard';
   if (key === 'telegram') return 'BotFather';
   if (key === 'whatsapp') return 'Evolution API';
+  if (key === 'whatsapp_waha') return 'WAHA';
+  if (key === 'whatsapp_wppconnect') return 'WPPConnect Server';
   return 'Meta Developer';
 }
 
@@ -333,7 +335,11 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                           ? 'يوزر البوت (من غير @)'
                           : app.platform_key === 'whatsapp'
                             ? 'Evolution Base URL — https://evo.example.com'
-                            : 'App ID'
+                            : app.platform_key === 'whatsapp_waha'
+                              ? 'WAHA Base URL — https://waha.example.com'
+                              : app.platform_key === 'whatsapp_wppconnect'
+                                ? 'WPPConnect Base URL — https://wpp.example.com'
+                                : 'App ID'
                       }
                     />
                     <Input
@@ -348,9 +354,17 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                             ? app.has_secret
                               ? 'Evolution API Key (اتركه فاضي لو مش هتغيّره)'
                               : 'Evolution API Key'
-                            : app.has_secret
-                              ? 'App Secret (اتركه فاضي لو مش هتغيّره)'
-                              : 'App Secret'
+                            : app.platform_key === 'whatsapp_waha'
+                              ? app.has_secret
+                                ? 'WAHA API Key (اتركه فاضي لو مش هتغيّره)'
+                                : 'WAHA API Key'
+                              : app.platform_key === 'whatsapp_wppconnect'
+                                ? app.has_secret
+                                  ? 'WPPConnect Secret Key (اتركه فاضي لو مش هتغيّره)'
+                                  : 'WPPConnect Secret Key'
+                                : app.has_secret
+                                  ? 'App Secret (اتركه فاضي لو مش هتغيّره)'
+                                  : 'App Secret'
                       }
                       type="password"
                     />
@@ -395,7 +409,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
         </div>
         <div className="mt-3 rounded-xl border border-ink-800 bg-ink-900/60 px-3 py-3 text-ink-500 text-[11px] leading-relaxed">
           <p>Meta يغطي فيسبوك وإنستجرام. Threads له App ID/Secret منفصل داخل Meta ويستخدم نفس محرك الحسابات والنشر بعد الربط.</p>
-          <p className="mt-1">WhatsApp يستخدم Evolution/Baileys: أدخل Base URL وAPI Key للسيرفر الذاتي مرة واحدة، وبعدها مساحات العمل تربط أرقامها بالـQR.</p>
+          <p className="mt-1">WhatsApp Multi-Provider: Evolution هو المسار الأساسي، وWAHA وWPPConnect بدائل مستقلة. فعّل مزودًا واحدًا على الأقل؛ مساحات العمل تختار مزود الربط بالـQR/Pairing Code وتقدر تنتقل لبديل مع الحفاظ على تاريخ الـInbox.</p>
           <p className="mt-1">TikTok يمكن ربطه وتحديث توكنه تلقائيًا، لكن النشر المباشر يظل متوقفًا حتى استكمال متطلبات Content Posting API وتجربة الخصوصية والميديا.</p>
           <p className="mt-1">Telegram يستخدم Bot Token بدل OAuth، ويجب إضافة البوت Admin للقناة/السوبرجروب.</p>
         </div>
