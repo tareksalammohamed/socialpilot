@@ -12,7 +12,7 @@ WPPConnect is the second fallback provider.
    - Secret Key: the exact `SECRET_KEY`.
    - Priority: normally `30`.
 
-The container is pinned to `2.10.18` rather than `latest`.
+The container is pinned to `2.10.28` rather than `latest`.
 
 SocialPilot generates a WPPConnect bearer token per workspace session and stores it only server-side. The per-workspace webhook URL also contains an independent random ingress token.
 
