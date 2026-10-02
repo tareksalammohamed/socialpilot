@@ -58,6 +58,9 @@ type InboxAiSettings = {
   businessContext: string;
   forbiddenTopics: string;
   maxReplyLength: number;
+  replyMode: 'draft' | 'auto_safe';
+  autoReplyMaxPerHour: number;
+  autoReplyDelaySeconds: number;
 };
 
 const DEFAULT_AI_SETTINGS: InboxAiSettings = {
@@ -69,6 +72,9 @@ const DEFAULT_AI_SETTINGS: InboxAiSettings = {
   businessContext: '',
   forbiddenTopics: '',
   maxReplyLength: 320,
+  replyMode: 'draft',
+  autoReplyMaxPerHour: 3,
+  autoReplyDelaySeconds: 4,
 };
 
 function readInboxAiSettings(settings: Record<string, unknown> | null | undefined): InboxAiSettings {
@@ -84,6 +90,13 @@ function readInboxAiSettings(settings: Record<string, unknown> | null | undefine
     maxReplyLength: typeof raw.maxReplyLength === 'number'
       ? Math.max(80, Math.min(1000, Math.round(raw.maxReplyLength)))
       : DEFAULT_AI_SETTINGS.maxReplyLength,
+    replyMode: raw.replyMode === 'auto_safe' ? 'auto_safe' : 'draft',
+    autoReplyMaxPerHour: typeof raw.autoReplyMaxPerHour === 'number'
+      ? Math.max(1, Math.min(10, Math.round(raw.autoReplyMaxPerHour)))
+      : DEFAULT_AI_SETTINGS.autoReplyMaxPerHour,
+    autoReplyDelaySeconds: typeof raw.autoReplyDelaySeconds === 'number'
+      ? Math.max(0, Math.min(15, Math.round(raw.autoReplyDelaySeconds)))
+      : DEFAULT_AI_SETTINGS.autoReplyDelaySeconds,
   };
 }
 
@@ -291,7 +304,7 @@ export function InboxScreen() {
     return () => {
       cancelled = true;
     };
-  }, [selectedConversation?.id, selectedConversation?.platform, selectedConversation?.metadata?.provider]);
+  }, [selectedConversation]);
 
   const filteredConversations = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -697,7 +710,7 @@ export function InboxScreen() {
             <div>
               <p className="text-sm font-semibold text-ink-100">إعدادات مساعد الوارد AI</p>
               <p className="text-[11px] text-ink-500 mt-0.5">
-                {aiSettings.enabled ? 'مفعّل' : 'متوقف'} · {aiSettings.autoAnalyze ? 'تحليل تلقائي عند فتح المحادثة' : 'تحليل عند الطلب'} · الإرسال بمراجعة بشرية
+                {aiSettings.enabled ? 'مفعّل' : 'متوقف'} · {aiSettings.autoAnalyze ? 'تحليل تلقائي عند فتح المحادثة' : 'تحليل عند الطلب'} · {aiSettings.replyMode === 'auto_safe' ? 'Auto Safe للواتساب' : 'Draft فقط'}
               </p>
             </div>
           </div>
@@ -753,6 +766,18 @@ export function InboxScreen() {
                   <option value="auto">نفس لغة العميل</option>
                 </select>
               </label>
+              <label className="space-y-1 sm:col-span-2">
+                <span className="text-xs text-ink-500">وضع إرسال ردود AI</span>
+                <select
+                  value={aiSettings.replyMode}
+                  disabled={!canManageAiSettings || !aiSettings.enabled}
+                  onChange={(event) => setAiSettings((current) => ({ ...current, replyMode: event.target.value as InboxAiSettings['replyMode'] }))}
+                  className="w-full rounded-xl border border-ink-800 bg-ink-900 px-3 py-2.5 text-sm text-ink-100"
+                >
+                  <option value="draft">Draft Only — اقتراح ومراجعة بشرية</option>
+                  <option value="auto_safe">Auto Safe — إرسال تلقائي للحالات الآمنة فقط</option>
+                </select>
+              </label>
             </div>
 
             <label className="block space-y-1">
@@ -800,8 +825,49 @@ export function InboxScreen() {
                 className="w-full"
               />
             </label>
+            {aiSettings.replyMode === 'auto_safe' && (
+              <div className="rounded-xl border border-warning-500/25 bg-warning-500/10 p-3 space-y-3">
+                <div>
+                  <p className="text-xs font-semibold text-warning-200">Auto Safe — WhatsApp Evolution فقط</p>
+                  <p className="text-[11px] text-warning-300/90 mt-1 leading-relaxed">
+                    يرسل تلقائيًا فقط للنصوص الفردية البسيطة التي تجتاز مراجعة الجودة. الشكاوى، الإلغاء، الأسعار غير المثبتة، طلب موظف، بيانات الدفع، الميديا أو الحالات عالية الأولوية تذهب للمراجعة البشرية.
+                  </p>
+                </div>
+                <label className="block space-y-1">
+                  <span className="text-xs text-ink-400">أقصى ردود تلقائية لنفس المحادثة في الساعة: {aiSettings.autoReplyMaxPerHour}</span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={10}
+                    step={1}
+                    value={aiSettings.autoReplyMaxPerHour}
+                    disabled={!canManageAiSettings}
+                    onChange={(event) => setAiSettings((current) => ({ ...current, autoReplyMaxPerHour: Number(event.target.value) }))}
+                    className="w-full"
+                  />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs text-ink-400">مهلة تجميع رسائل العميل قبل الرد: {aiSettings.autoReplyDelaySeconds} ثوانٍ</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={15}
+                    step={1}
+                    value={aiSettings.autoReplyDelaySeconds}
+                    disabled={!canManageAiSettings}
+                    onChange={(event) => setAiSettings((current) => ({ ...current, autoReplyDelaySeconds: Number(event.target.value) }))}
+                    className="w-full"
+                  />
+                  <p className="text-[10px] text-ink-500">تمنع الرد على أول رسالة إذا أرسل العميل رسالة ثانية بعدها مباشرة.</p>
+                </label>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-3">
-              <p className="text-[11px] text-ink-500">الـAI يقترح ويحلل، لكن لا يرسل أي رد تلقائيًا بدون ضغط المستخدم على إرسال.</p>
+              <p className="text-[11px] text-ink-500">
+                {aiSettings.replyMode === 'auto_safe'
+                  ? 'Auto Safe اختياري ومقيد بقواعد أمان وidempotency؛ أي حالة غير واضحة تتحول للمراجعة البشرية.'
+                  : 'Draft Only: الـAI يقترح ويحلل، ولا يرسل بدون مراجعة المستخدم.'}
+              </p>
               {canManageAiSettings && (
                 <Button size="sm" onClick={() => void handleSaveAiSettings()} disabled={settingsSaving}>
                   {settingsSaving ? <Spinner size={14} /> : <Save size={14} />}
@@ -970,7 +1036,9 @@ export function InboxScreen() {
                             <span className="text-ink-500 block mb-1">رد مقترح — لا يتم إرساله تلقائيًا</span>
                             <p className="whitespace-pre-wrap">{aiAnalysis.approved_reply ?? aiAnalysis.suggested_reply}</p>
                             <div className="flex items-center gap-2 mt-2">
-                              {aiAnalysis.reply_status === 'approved' ? (
+                              {aiAnalysis.reply_status === 'auto_sent' ? (
+                                <Badge color="brand">تم الإرسال تلقائيًا عبر Auto Safe</Badge>
+                              ) : aiAnalysis.reply_status === 'approved' ? (
                                 <Badge color="accent">تم الاعتماد — راجع المسودة ثم أرسل يدويًا</Badge>
                               ) : (
                                 <>
@@ -989,6 +1057,9 @@ export function InboxScreen() {
                         <p className={`text-[11px] ${aiAnalysis.quality_verdict === 'pass' ? 'text-accent-300' : 'text-warning-300'}`}>
                           مراجعة الجودة: {aiAnalysis.quality_verdict === 'pass' ? 'مقبول مبدئيًا' : aiAnalysis.quality_verdict === 'fail' ? 'مرفوض' : 'يحتاج مراجعة بشرية'}
                         </p>
+                        {aiAnalysis.safe_to_auto_reply && aiAnalysis.reply_status !== 'auto_sent' && (
+                          <p className="text-[11px] text-brand-300">مؤهل مبدئيًا لـAuto Safe: {aiAnalysis.automation_reason || 'اجتاز قواعد الأمان.'}</p>
+                        )}
                       </div>
                     )}
                   </div>

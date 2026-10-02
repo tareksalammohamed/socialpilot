@@ -245,7 +245,10 @@ export type InboxAiAnalysis = {
   source_message_ids: string[];
   provider: string | null;
   model: string | null;
-  reply_status: 'pending' | 'approved' | 'rejected';
+  reply_status: 'pending' | 'approved' | 'rejected' | 'auto_sent';
+  safe_to_auto_reply: boolean;
+  automation_reason: string | null;
+  automated_at: string | null;
   approved_reply: string | null;
   approved_by: string | null;
   approved_at: string | null;

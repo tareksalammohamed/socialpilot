@@ -14,9 +14,10 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
 
+const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL') ?? '',
-  Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+  serviceRoleKey,
   { auth: { persistSession: false } },
 );
 
@@ -252,21 +253,33 @@ Deno.serve(async (req: Request) => {
 
   const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
   if (!token) return jsonRes(401, { error: 'Missing authentication token' });
-  const { data: userData, error: userError } = await supabase.auth.getUser(token);
-  if (userError || !userData.user) return jsonRes(401, { error: 'Invalid or expired token' });
-  const userId = userData.user.id;
 
   let body: {
     conversationId?: string;
     content?: string;
     mode?: 'text' | 'template';
     template?: WhatsAppTemplateInput;
+    onBehalfOfUserId?: string;
+    isAi?: boolean;
+    aiAnalysisId?: string;
+    autoReplyRunId?: string;
   };
   try {
     body = await req.json();
   } catch {
     return jsonRes(400, { error: 'Invalid JSON body' });
   }
+  let userId = '';
+  const serviceCall = Boolean(serviceRoleKey && token === serviceRoleKey);
+  if (serviceCall) {
+    userId = body.onBehalfOfUserId?.trim() ?? '';
+    if (!userId) return jsonRes(400, { error: 'onBehalfOfUserId is required for service-role calls' });
+  } else {
+    const { data: userData, error: userError } = await supabase.auth.getUser(token);
+    if (userError || !userData.user) return jsonRes(401, { error: 'Invalid or expired token' });
+    userId = userData.user.id;
+  }
+
   const { conversationId } = body;
   const mode = body.mode === 'template' ? 'template' : 'text';
   const content = body.content?.trim() ?? '';
@@ -340,11 +353,17 @@ Deno.serve(async (req: Request) => {
         conversation_id: conversationId,
         direction: 'outbound',
         content: storedContent,
-        is_ai: false,
+        is_ai: serviceCall && body.isAi === true,
         user_id: userId,
         ...(externalMessageId ? { external_id: externalMessageId } : {}),
         metadata: {
-          source: mode === 'template' ? 'whatsapp_template' : 'inbox_reply',
+          source: serviceCall && body.isAi === true
+            ? (body.autoReplyRunId ? 'ai_auto_reply' : 'ai_assisted_reply')
+            : mode === 'template'
+              ? 'whatsapp_template'
+              : 'inbox_reply',
+          ...(serviceCall && body.aiAnalysisId ? { ai_analysis_id: body.aiAnalysisId } : {}),
+          ...(serviceCall && body.autoReplyRunId ? { auto_reply_run_id: body.autoReplyRunId } : {}),
           ...(mode === 'template' ? {
             template_name: template?.name ?? null,
             template_language: template?.language ?? null,

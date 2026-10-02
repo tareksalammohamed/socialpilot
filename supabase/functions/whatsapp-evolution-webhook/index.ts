@@ -7,11 +7,17 @@ const CORS = {
 };
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
 
+const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const supabase = createClient(
-  Deno.env.get('SUPABASE_URL') ?? '',
-  Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+  supabaseUrl,
+  serviceRoleKey,
   { auth: { persistSession: false } },
 );
+
+declare const EdgeRuntime: {
+  waitUntil(promise: Promise<unknown>): void;
+};
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -22,6 +28,28 @@ function json(status: number, body: unknown): Response {
 
 function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '');
+}
+
+function scheduleSafeAutoReply(inboundMessageId: string): void {
+  if (!supabaseUrl || !serviceRoleKey) return;
+  const task = fetch(`${supabaseUrl}/functions/v1/inbox-auto-reply`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${serviceRoleKey}`,
+      apikey: serviceRoleKey,
+    },
+    body: JSON.stringify({ inboundMessageId }),
+  }).then(async (response) => {
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      console.error('inbox-auto-reply background call failed', response.status, body.slice(0, 1000));
+    }
+  }).catch((error) => {
+    console.error('inbox-auto-reply background fetch failed', error);
+  });
+
+  EdgeRuntime.waitUntil(task);
 }
 
 async function providerConfig(): Promise<{ baseUrl: string; apiKey: string }> {
@@ -318,6 +346,7 @@ async function upsertMessage(params: {
       body: parsed.content.length > 140 ? `${parsed.content.slice(0, 140)}…` : parsed.content,
       payload: { conversation_id: conversation.id, platform: 'whatsapp', inbox_type: 'dm' },
     });
+    scheduleSafeAutoReply(inserted.id);
   }
 }
 
