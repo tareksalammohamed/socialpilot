@@ -28,10 +28,14 @@ import {
   connectTelegramChannel,
   syncAccounts,
   getSocialIntegrationStatus,
-  startWhatsAppEvolution,
-  getWhatsAppEvolutionStatus,
-  disconnectWhatsAppEvolution,
+  startWhatsAppProvider,
+  switchWhatsAppProvider,
+  getWhatsAppProviderStatus,
+  disconnectWhatsAppProvider,
+  listWhatsAppProviderMethods,
   type SocialIntegrationStatus,
+  type WhatsAppProviderKey,
+  type WhatsAppProviderMethod,
 } from '@/lib/api';
 import { Card, Button, Badge, ErrorBanner, Input, Spinner } from '@/components/ui';
 import { PLATFORMS, PLATFORM_META } from '@/lib/constants';
@@ -77,6 +81,11 @@ export function MoreScreen() {
   const [whatsappQrBase64, setWhatsappQrBase64] = useState<string | null>(null);
   const [whatsappPairingCode, setWhatsappPairingCode] = useState<string | null>(null);
   const [whatsappProviderState, setWhatsappProviderState] = useState<string>('not_created');
+  const [whatsappProviderKey, setWhatsappProviderKey] = useState<WhatsAppProviderKey | null>(null);
+  const [whatsappProviderLabel, setWhatsappProviderLabel] = useState<string | null>(null);
+  const [whatsappAlternatives, setWhatsappAlternatives] = useState<WhatsAppProviderKey[]>([]);
+  const [whatsappMethods, setWhatsappMethods] = useState<WhatsAppProviderMethod[]>([]);
+  const [whatsappSwitchBusy, setWhatsappSwitchBusy] = useState(false);
   const [accountSyncBusy, setAccountSyncBusy] = useState(false);
 
   const appStatusByKey = useMemo(() => {
@@ -102,16 +111,27 @@ export function MoreScreen() {
     setIntegrationApps(result.apps);
   }, [workspace]);
 
+  const loadWhatsAppMethods = useCallback(async () => {
+    if (!workspace) return;
+    try {
+      const result = await listWhatsAppProviderMethods(workspace.id);
+      setWhatsappMethods(result.methods);
+    } catch {
+      setWhatsappMethods([]);
+    }
+  }, [workspace]);
+
   useEffect(() => {
     if (!workspace) return;
     void Promise.all([
       loadAccounts(),
       loadIntegrationState(),
+      loadWhatsAppMethods(),
       supabase.from('brand_dna').select('*').eq('workspace_id', workspace.id).maybeSingle(),
     ])
-      .then(([, , dna]) => setBrandDna(dna.data as BrandDna | null))
+      .then(([, , , dna]) => setBrandDna(dna.data as BrandDna | null))
       .catch((error) => setConnectError(error instanceof Error ? error.message : 'تعذّر تحميل إعدادات التكاملات'));
-  }, [workspace, loadAccounts, loadIntegrationState]);
+  }, [workspace, loadAccounts, loadIntegrationState, loadWhatsAppMethods]);
 
   useEffect(() => {
     void checkIsSuperAdmin().then(setIsSuperAdmin);
@@ -124,6 +144,30 @@ export function MoreScreen() {
   }, []);
 
   useEffect(() => {
+    if (!workspace?.id) return;
+    const account = accounts.find((item) => item.platform === 'whatsapp');
+    if (!account) {
+      setWhatsappProviderKey(null);
+      setWhatsappProviderLabel(null);
+      setWhatsappAlternatives([]);
+      return;
+    }
+    let cancelled = false;
+    void getWhatsAppProviderStatus(workspace.id)
+      .then((status) => {
+        if (cancelled) return;
+        setWhatsappProviderState(status.state);
+        setWhatsappProviderKey(status.providerKey ?? null);
+        setWhatsappProviderLabel(status.providerLabel ?? null);
+        setWhatsappAlternatives(status.alternatives ?? []);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace?.id, accounts]);
+
+  useEffect(() => {
     if (!workspace?.id || !whatsappQrOpen) return;
     let cancelled = false;
     let checking = false;
@@ -132,15 +176,18 @@ export function MoreScreen() {
       if (checking || cancelled) return;
       checking = true;
       try {
-        const status = await getWhatsAppEvolutionStatus(workspace.id);
+        const status = await getWhatsAppProviderStatus(workspace.id);
         if (cancelled) return;
         setWhatsappProviderState(status.state);
+        setWhatsappProviderKey(status.providerKey ?? null);
+        setWhatsappProviderLabel(status.providerLabel ?? null);
+        setWhatsappAlternatives(status.alternatives ?? []);
         if (status.connected) {
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
           setWhatsappPairingCode(null);
           setConnectNotice('تم ربط WhatsApp بالـQR وأصبح جاهزًا في Unified Inbox.');
-          await Promise.all([loadAccounts(), loadIntegrationState()]);
+          await Promise.all([loadAccounts(), loadIntegrationState(), loadWhatsAppMethods()]);
         }
       } catch (error) {
         if (!cancelled) setConnectError(error instanceof Error ? error.message : 'تعذّر فحص حالة WhatsApp');
@@ -155,7 +202,7 @@ export function MoreScreen() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [workspace?.id, whatsappQrOpen, loadAccounts, loadIntegrationState]);
+  }, [workspace?.id, whatsappQrOpen, loadAccounts, loadIntegrationState, loadWhatsAppMethods]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -195,13 +242,23 @@ export function MoreScreen() {
   const connectedAccounts = accounts.filter((account) => account.status === 'connected');
   const needsAttention = accounts.filter((account) => account.needs_reconnect || account.status === 'error' || account.status === 'expired');
   const operationalChannels = connectedAccounts.filter((account) => platformOperationalScore(account.platform) >= 3).length;
+  const availableWhatsAppMethods = whatsappMethods.filter((method) => method.available).sort((a, b) => a.priority - b.priority);
+
+  const whatsappProviderName = (provider: WhatsAppProviderKey | null | undefined) => (
+    provider === 'evolution' ? 'Evolution / Baileys'
+      : provider === 'waha' ? 'WAHA'
+        : provider === 'wppconnect' ? 'WPPConnect'
+          : 'WhatsApp Web'
+  );
 
   function integrationReady(platform: SocialPlatform): boolean {
     const capability = PLATFORM_CAPABILITIES[platform];
     if (capability.connectMode === 'bot') return Boolean(telegramBotUsername);
     if (capability.connectMode === 'qr') {
       const provider = appStatusByKey.get('whatsapp');
-      return platform === 'whatsapp' && Boolean(provider?.enabled && provider?.configured);
+      return platform === 'whatsapp' && Boolean(
+        availableWhatsAppMethods.length > 0 || (provider?.enabled && provider?.configured),
+      );
     }
     if (capability.connectMode !== 'oauth' || !capability.appKey) return false;
     const app = appStatusByKey.get(capability.appKey);
@@ -218,17 +275,20 @@ export function MoreScreen() {
       setConnectError(null);
       try {
         if (platform === 'whatsapp') {
-          await disconnectWhatsAppEvolution(workspace.id);
+          await disconnectWhatsAppProvider(workspace.id);
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
           setWhatsappPairingCode(null);
           setWhatsappProviderState('disconnected');
+          setWhatsappProviderKey(null);
+          setWhatsappProviderLabel(null);
+          setWhatsappAlternatives([]);
         } else {
           const { error } = await supabase.from('social_accounts').delete().eq('id', existing.id).eq('workspace_id', workspace.id);
           if (error) throw error;
         }
         setConnectNotice(`تم فصل ${PLATFORM_META[platform].label} من مساحة العمل`);
-        await Promise.all([loadAccounts(), loadIntegrationState()]);
+        await Promise.all([loadAccounts(), loadIntegrationState(), loadWhatsAppMethods()]);
       } catch (error) {
         setConnectError(error instanceof Error ? error.message : 'تعذّر فصل الحساب');
       } finally {
@@ -246,26 +306,29 @@ export function MoreScreen() {
 
     if (capability.connectMode === 'qr' && platform === 'whatsapp') {
       if (!integrationReady(platform)) {
-        setConnectError('مزود WhatsApp غير مُعد. Super Admin لازم يضيف Evolution Base URL وAPI Key أولًا.');
+        setConnectError('لا يوجد WhatsApp Provider سليم. Super Admin يقدر يجهز Evolution أو WAHA أو WPPConnect.');
         return;
       }
       setConnectError(null);
       setConnectNotice(null);
       setConnectingPlatform('whatsapp');
       try {
-        const result = await startWhatsAppEvolution(workspace.id);
+        const result = await startWhatsAppProvider(workspace.id);
         setWhatsappProviderState(result.state);
+        setWhatsappProviderKey(result.providerKey ?? null);
+        setWhatsappProviderLabel(result.providerLabel ?? null);
+        setWhatsappAlternatives(result.alternatives ?? []);
         if (result.connected) {
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
           setWhatsappPairingCode(null);
           setConnectNotice('WhatsApp متصل بالفعل وجاهز.');
-          await loadAccounts();
+          await Promise.all([loadAccounts(), loadWhatsAppMethods()]);
         } else {
           setWhatsappQrBase64(result.qrBase64 ?? null);
           setWhatsappPairingCode(result.pairingCode ?? null);
           setWhatsappQrOpen(true);
-          await loadAccounts();
+          await Promise.all([loadAccounts(), loadWhatsAppMethods()]);
         }
       } catch (error) {
         setConnectError(error instanceof Error ? error.message : 'تعذّر إنشاء QR لواتساب');
@@ -310,6 +373,33 @@ export function MoreScreen() {
     }
   }
 
+  async function handleSwitchWhatsAppProvider(providerKey?: WhatsAppProviderKey) {
+    if (!workspace || whatsappSwitchBusy) return;
+    setWhatsappSwitchBusy(true);
+    setConnectError(null);
+    setConnectNotice(null);
+    try {
+      const result = await switchWhatsAppProvider(workspace.id, providerKey);
+      setWhatsappProviderState(result.state);
+      setWhatsappProviderKey(result.providerKey ?? null);
+      setWhatsappProviderLabel(result.providerLabel ?? null);
+      setWhatsappAlternatives(result.alternatives ?? []);
+      setWhatsappQrBase64(result.qrBase64 ?? null);
+      setWhatsappPairingCode(result.pairingCode ?? null);
+      setWhatsappQrOpen(!result.connected);
+      await Promise.all([loadAccounts(), loadWhatsAppMethods()]);
+      if (result.connected) {
+        setConnectNotice(`تم التحويل إلى ${result.providerLabel ?? result.providerKey ?? 'المزود البديل'} واتصال WhatsApp جاهز.`);
+      } else {
+        setConnectNotice(`تم تجهيز ${result.providerLabel ?? result.providerKey ?? 'المزود البديل'}. امسح QR لإكمال الربط.`);
+      }
+    } catch (error) {
+      setConnectError(error instanceof Error ? error.message : 'تعذّر التحويل إلى مزود WhatsApp بديل');
+    } finally {
+      setWhatsappSwitchBusy(false);
+    }
+  }
+
   async function handleSyncAccounts() {
     if (!workspace) return;
     setAccountSyncBusy(true);
@@ -340,7 +430,7 @@ export function MoreScreen() {
       setTelegramInput('');
       setTelegramOpen(false);
       setConnectNotice('تم ربط تيليجرام وتفعيل مسار الـInbox.');
-      await Promise.all([loadAccounts(), loadIntegrationState()]);
+      await Promise.all([loadAccounts(), loadIntegrationState(), loadWhatsAppMethods()]);
     } catch (error) {
       setConnectError(error instanceof Error ? error.message : 'تعذّر ربط تيليجرام');
     } finally {
@@ -538,15 +628,27 @@ export function MoreScreen() {
                     )}
 
                     {platform === 'whatsapp' && !connected && ready && !whatsappQrOpen && (
-                      <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-[11px] text-brand-200 flex items-start gap-2">
-                        <QrCode size={14} className="mt-0.5 shrink-0" />
-                        <span>اضغط «ربط». SocialPilot هيولّد QR؛ افتح WhatsApp → الأجهزة المرتبطة → ربط جهاز وامسح الكود.</span>
+                      <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-3 text-[11px] text-brand-200">
+                        <div className="flex items-start gap-2">
+                          <QrCode size={14} className="mt-0.5 shrink-0" />
+                          <span>اضغط «ربط». SocialPilot يجرب طرق الربط السليمة حسب الأولوية ويعرض QR لأول طريقة تعمل.</span>
+                        </div>
+                        {availableWhatsAppMethods.length > 0 && (
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <span className="text-ink-500">الطرق الجاهزة:</span>
+                            {availableWhatsAppMethods.map((method, index) => (
+                              <Badge key={method.providerKey} color={index === 0 ? 'brand' : 'neutral'}>
+                                {index === 0 ? 'افتراضي · ' : ''}{method.displayName}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {platform === 'whatsapp' && !connected && !ready && (
                       <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
-                        Evolution/Baileys غير مُعد على النظام. يحتاج Base URL وAPI Key من Super Admin مرة واحدة.
+                        لا يوجد WhatsApp Provider سليم ومفعّل. Super Admin يقدر يجهز Evolution أو WAHA أو WPPConnect، والنظام يجربهم حسب الأولوية.
                       </div>
                     )}
 
@@ -557,7 +659,9 @@ export function MoreScreen() {
                             <QrCode size={17} className="text-brand-300" />
                             <div>
                               <p className="text-ink-100 text-xs font-semibold">امسح QR من WhatsApp</p>
-                              <p className="text-ink-500 text-[10px] mt-0.5">الحالة: {whatsappProviderState}</p>
+                              <p className="text-ink-500 text-[10px] mt-0.5">
+                                {whatsappProviderLabel || whatsappProviderKey || 'WhatsApp Provider'} · الحالة: {whatsappProviderState}
+                              </p>
                             </div>
                           </div>
                           <Button variant="ghost" size="sm" onClick={() => void togglePlatform('whatsapp')} disabled={busy}>
@@ -585,6 +689,26 @@ export function MoreScreen() {
                           </div>
                         )}
 
+                        {availableWhatsAppMethods.filter((method) => method.providerKey !== whatsappProviderKey).length > 0 && (
+                          <div className="mt-3 pt-3 border-t border-ink-800">
+                            <p className="text-[10px] text-ink-500 mb-2">لو QR الحالي مش شغال، جرّب طريقة أخرى:</p>
+                            <div className="flex flex-wrap gap-2">
+                              {availableWhatsAppMethods
+                                .filter((method) => method.providerKey !== whatsappProviderKey)
+                                .map((method) => (
+                                  <Button
+                                    key={method.providerKey}
+                                    size="sm"
+                                    variant="secondary"
+                                    onClick={() => void handleSwitchWhatsAppProvider(method.providerKey)}
+                                    disabled={whatsappSwitchBusy}
+                                  >
+                                    {whatsappSwitchBusy ? 'جارٍ التحويل...' : `جرب ${method.displayName}`}
+                                  </Button>
+                                ))}
+                            </div>
+                          </div>
+                        )}
                         <div className="mt-3 flex items-start gap-2 text-[11px] text-ink-500 leading-relaxed">
                           <Phone size={14} className="mt-0.5 shrink-0" />
                           <span>من الهاتف: WhatsApp → الإعدادات → الأجهزة المرتبطة → ربط جهاز. الاتصال يُحدّث تلقائيًا بدون Refresh للصفحة.</span>
@@ -595,14 +719,39 @@ export function MoreScreen() {
                     {platform === 'whatsapp' && connected && (
                       <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-brand-200 text-[11px] flex items-center gap-2">
                         <Wifi size={14} />
-                        WhatsApp Web متصل عبر Evolution/Baileys. الرسائل والميديا والـAI Reply تعمل من Unified Inbox.
+                        WhatsApp متصل عبر {String(account?.metadata?.provider_label ?? whatsappProviderLabel ?? account?.metadata?.provider ?? 'WhatsApp Web')}. الرسائل والميديا والـAI Reply تعمل من Unified Inbox.
                       </div>
                     )}
 
-                    {platform === 'whatsapp' && !connected && account?.metadata?.provider === 'evolution' && account?.status === 'error' && (
-                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px] flex items-center gap-2">
-                        <WifiOff size={14} />
-                        الجلسة غير متصلة حاليًا. اضغط «عرض QR» لإعادة الربط.
+                    {platform === 'whatsapp' && !connected && account?.status === 'error' && (
+                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px] space-y-2">
+                        <div className="flex items-center gap-2">
+                          <WifiOff size={14} />
+                          <span>
+                            الجلسة غير متصلة عبر {String(account?.metadata?.provider_label ?? account?.metadata?.provider ?? 'المزود الحالي')}.
+                          </span>
+                        </div>
+                        {(whatsappAlternatives.length > 0 || availableWhatsAppMethods.some((method) => method.providerKey !== account?.metadata?.provider)) && (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[10px] text-ink-500">بدائل جاهزة:</span>
+                            {(whatsappAlternatives.length > 0
+                              ? whatsappAlternatives
+                              : availableWhatsAppMethods
+                                  .map((method) => method.providerKey)
+                                  .filter((provider) => provider !== account?.metadata?.provider)
+                            ).map((provider) => (
+                              <Button
+                                key={provider}
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => void handleSwitchWhatsAppProvider(provider)}
+                                disabled={whatsappSwitchBusy}
+                              >
+                                {whatsappSwitchBusy ? 'جارٍ التحويل...' : `جرب ${whatsappProviderName(provider)}`}
+                              </Button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
 
