@@ -4,8 +4,11 @@ import {
   CircleDashed, ChevronDown, Sparkles,
 } from 'lucide-react';
 import { Card, Button, Badge, Input, Select, ScreenLoader, ErrorBanner } from '@/components/ui';
-import { aiAdmin, socialAdmin } from '@/lib/superAdmin';
-import type { AiProvider, AiProviderKey, AiModel, AiRoutingPolicyValue, AiUsageSummary, SocialPlatformApp, SocialPlatformAppKey } from '@/lib/types';
+import { aiAdmin, socialAdmin, whatsappProviderAdmin } from '@/lib/superAdmin';
+import type {
+  AiProvider, AiProviderKey, AiModel, AiRoutingPolicyValue, AiUsageSummary,
+  SocialPlatformApp, SocialPlatformAppKey, WhatsAppProviderConfig, WhatsAppProviderKey,
+} from '@/lib/types';
 
 const PROVIDER_KEYS: AiProviderKey[] = [
   'openrouter', 'huggingface', 'groq', 'gemini', 'cerebras', 'deepseek',
@@ -55,6 +58,11 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
   const [socialAppIdInput, setSocialAppIdInput] = useState('');
   const [socialAppSecretInput, setSocialAppSecretInput] = useState('');
   const [socialConfigurationIdInput, setSocialConfigurationIdInput] = useState('');
+  const [waEditingProvider, setWaEditingProvider] = useState<WhatsAppProviderKey | null>(null);
+  const [waBaseUrl, setWaBaseUrl] = useState('');
+  const [waCredential, setWaCredential] = useState('');
+  const [waPriority, setWaPriority] = useState('10');
+  const [waProviderBusy, setWaProviderBusy] = useState<string | null>(null);
 
   async function loadAll() {
     setLoading(true);
@@ -78,8 +86,31 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
   async function loadSocialApps() {
     setSocialError(null);
     try {
-      const res = await socialAdmin.listApps();
-      setSocialApps(res.apps);
+      const [res, whatsapp] = await Promise.all([
+        socialAdmin.listApps(),
+        whatsappProviderAdmin.list(),
+      ]);
+      const preferred = whatsapp.activeProvider
+        ? whatsapp.providers.find((provider) => provider.provider_key === whatsapp.activeProvider) ?? null
+        : [...whatsapp.providers]
+            .filter((provider) => provider.enabled && provider.status === 'connected')
+            .sort((a, b) => a.priority - b.priority)[0] ?? null;
+      setSocialApps(res.apps.map((app) => (
+        app.platform_key === 'whatsapp'
+          ? {
+              ...app,
+              whatsapp_providers: whatsapp.providers,
+              active_provider: preferred?.provider_key ?? null,
+              enabled: Boolean(preferred),
+              has_secret: whatsapp.providers.some((provider) => provider.configured),
+              status: preferred
+                ? 'connected'
+                : whatsapp.providers.some((provider) => provider.status === 'error')
+                  ? 'error'
+                  : 'not_configured',
+            }
+          : app
+      )));
     } catch (e) {
       setSocialError(e instanceof Error ? e.message : 'تعذّر تحميل تكاملات التواصل الاجتماعي');
     }
@@ -118,6 +149,89 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
       setSocialError(e instanceof Error ? e.message : 'فشل حفظ إعدادات الربط');
     } finally {
       setSocialBusyKey(null);
+    }
+  }
+
+  function editWhatsAppProvider(provider: WhatsAppProviderConfig) {
+    setWaEditingProvider(provider.provider_key);
+    setWaBaseUrl(provider.base_url ?? '');
+    setWaCredential('');
+    setWaPriority(String(provider.priority));
+  }
+
+  async function handleSaveWhatsAppProvider(provider: WhatsAppProviderConfig) {
+    if (!waBaseUrl.trim()) return;
+    setWaProviderBusy(provider.provider_key);
+    setSocialError(null);
+    try {
+      await whatsappProviderAdmin.save(
+        provider.provider_key,
+        waBaseUrl.trim(),
+        waCredential.trim() || undefined,
+        Number(waPriority) || provider.priority,
+      );
+      setWaEditingProvider(null);
+      setWaBaseUrl('');
+      setWaCredential('');
+      await loadSocialApps();
+    } catch (error) {
+      setSocialError(error instanceof Error ? error.message : 'فشل حفظ WhatsApp Provider');
+      await loadSocialApps();
+    } finally {
+      setWaProviderBusy(null);
+    }
+  }
+
+  async function handleTestWhatsAppProviders() {
+    setWaProviderBusy('test-all');
+    setSocialError(null);
+    try {
+      await whatsappProviderAdmin.testAll();
+      await loadSocialApps();
+    } catch (error) {
+      setSocialError(error instanceof Error ? error.message : 'فشل فحص WhatsApp Providers');
+    } finally {
+      setWaProviderBusy(null);
+    }
+  }
+
+  async function handleSetActiveWhatsAppProvider(provider: WhatsAppProviderConfig) {
+    setWaProviderBusy(provider.provider_key);
+    setSocialError(null);
+    try {
+      await whatsappProviderAdmin.setActive(provider.provider_key);
+      await loadSocialApps();
+    } catch (error) {
+      setSocialError(error instanceof Error ? error.message : 'تعذّر تعيين المزود الأساسي');
+    } finally {
+      setWaProviderBusy(null);
+    }
+  }
+
+  async function handleWhatsAppProviderEnabled(provider: WhatsAppProviderConfig) {
+    setWaProviderBusy(provider.provider_key);
+    setSocialError(null);
+    try {
+      await whatsappProviderAdmin.setEnabled(provider.provider_key, !provider.enabled);
+      await loadSocialApps();
+    } catch (error) {
+      setSocialError(error instanceof Error ? error.message : 'تعذّر تغيير حالة المزود');
+    } finally {
+      setWaProviderBusy(null);
+    }
+  }
+
+  async function handleRemoveWhatsAppProvider(provider: WhatsAppProviderConfig) {
+    setWaProviderBusy(provider.provider_key);
+    setSocialError(null);
+    try {
+      await whatsappProviderAdmin.remove(provider.provider_key);
+      if (waEditingProvider === provider.provider_key) setWaEditingProvider(null);
+      await loadSocialApps();
+    } catch (error) {
+      setSocialError(error instanceof Error ? error.message : 'تعذّر إزالة المزود');
+    } finally {
+      setWaProviderBusy(null);
     }
   }
 
@@ -305,6 +419,164 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
           {socialApps.map((app) => {
             const isEditing = socialEditingKey === app.platform_key;
             const busy = socialBusyKey === app.platform_key;
+
+            if (app.platform_key === 'whatsapp') {
+              const waProviders = app.whatsapp_providers ?? [];
+              return (
+                <Card key={app.platform_key} className="!p-0 overflow-hidden">
+                  <div className="p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-ink-100 text-sm font-semibold">WhatsApp Provider Router</span>
+                          <Badge color={app.enabled ? 'brand' : app.has_secret ? 'warning' : 'neutral'}>
+                            {app.enabled ? 'جاهز' : app.has_secret ? 'يحتاج مزود سليم' : 'غير مُعد'}
+                          </Badge>
+                          {app.active_provider && <Badge color="accent">الأساسي: {app.active_provider}</Badge>}
+                        </div>
+                        <p className="text-ink-500 text-[11px] mt-1 leading-relaxed">
+                          ترتيب احتياطي Controlled Failover: Evolution/Baileys → WAHA → WPPConnect. تغيير المزود لجلسة مرتبطة يحتاج QR جديد لمنع الرسائل المكررة.
+                        </p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => void handleTestWhatsAppProviders()}
+                        disabled={waProviderBusy === 'test-all'}
+                      >
+                        <RefreshCw size={14} className={waProviderBusy === 'test-all' ? 'animate-spin' : ''} />
+                        فحص الكل
+                      </Button>
+                    </div>
+
+                    <div className="mt-4 grid gap-3">
+                      {waProviders.map((provider) => {
+                        const providerBusy = waProviderBusy === provider.provider_key;
+                        const editingProvider = waEditingProvider === provider.provider_key;
+                        const isActive = app.active_provider === provider.provider_key;
+                        return (
+                          <div key={provider.provider_key} className="rounded-xl border border-ink-800 bg-ink-950/40 p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-ink-100 text-xs font-semibold">{provider.display_name}</span>
+                                  <Badge color={
+                                    provider.status === 'connected'
+                                      ? 'brand'
+                                      : provider.status === 'error'
+                                        ? 'danger'
+                                        : 'neutral'
+                                  }>
+                                    {provider.status === 'connected' ? 'سليم' : provider.status === 'error' ? 'خطأ' : 'غير مُعد'}
+                                  </Badge>
+                                  {isActive && <Badge color="accent">Primary</Badge>}
+                                  {provider.configured && (
+                                    <Badge color={provider.enabled ? 'brand' : 'neutral'}>
+                                      {provider.enabled ? 'مفعّل' : 'معطّل'}
+                                    </Badge>
+                                  )}
+                                </div>
+                                <p className="text-ink-600 text-[10px] mt-1" dir="ltr">
+                                  {provider.base_url ?? 'No URL'} · priority {provider.priority}
+                                </p>
+                              </div>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => editingProvider ? setWaEditingProvider(null) : editWhatsAppProvider(provider)}
+                              >
+                                {editingProvider ? 'إغلاق' : provider.configured ? 'تعديل' : 'إضافة'}
+                              </Button>
+                            </div>
+
+                            {provider.last_error && <div className="mt-2"><ErrorBanner message={provider.last_error} /></div>}
+
+                            {editingProvider && (
+                              <div className="mt-3 pt-3 border-t border-ink-800 grid gap-2 animate-slide-up">
+                                <Input
+                                  value={waBaseUrl}
+                                  onChange={setWaBaseUrl}
+                                  placeholder={
+                                    provider.provider_key === 'evolution'
+                                      ? 'https://evolution.example.com'
+                                      : provider.provider_key === 'waha'
+                                        ? 'https://waha.example.com'
+                                        : 'https://wpp.example.com'
+                                  }
+                                />
+                                <Input
+                                  value={waCredential}
+                                  onChange={setWaCredential}
+                                  type="password"
+                                  placeholder={
+                                    provider.has_secret
+                                      ? provider.provider_key === 'wppconnect'
+                                        ? 'Secret Key — اتركه فارغًا للاحتفاظ بالحالي'
+                                        : 'API Key — اتركه فارغًا للاحتفاظ بالحالي'
+                                      : provider.provider_key === 'wppconnect'
+                                        ? 'Secret Key'
+                                        : 'API Key'
+                                  }
+                                />
+                                <Input
+                                  value={waPriority}
+                                  onChange={(value) => setWaPriority(value.replace(/\D/g, '').slice(0, 3))}
+                                  placeholder="Priority — الأقل يُجرب أولًا"
+                                />
+                                <div className="flex flex-wrap gap-2">
+                                  <Button
+                                    size="sm"
+                                    onClick={() => void handleSaveWhatsAppProvider(provider)}
+                                    disabled={providerBusy || !waBaseUrl.trim() || (!provider.has_secret && !waCredential.trim())}
+                                  >
+                                    {providerBusy ? 'جارٍ الاختبار...' : 'حفظ واختبار'}
+                                  </Button>
+                                  {provider.configured && (
+                                    <Button
+                                      size="sm"
+                                      variant="secondary"
+                                      onClick={() => void handleWhatsAppProviderEnabled(provider)}
+                                      disabled={providerBusy}
+                                    >
+                                      {provider.enabled ? 'تعطيل' : 'تفعيل'}
+                                    </Button>
+                                  )}
+                                  {provider.configured
+                                    && provider.enabled
+                                    && provider.status === 'connected'
+                                    && !isActive
+                                    && (
+                                      <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        onClick={() => void handleSetActiveWhatsAppProvider(provider)}
+                                        disabled={providerBusy}
+                                      >
+                                        جعله Primary
+                                      </Button>
+                                    )}
+                                  {provider.configured && (
+                                    <Button
+                                      size="sm"
+                                      variant="danger"
+                                      onClick={() => void handleRemoveWhatsAppProvider(provider)}
+                                      disabled={providerBusy}
+                                    >
+                                      إزالة
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </Card>
+              );
+            }
+
             return (
               <Card key={app.platform_key} className="!p-0 overflow-hidden">
                 <button
@@ -395,7 +667,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
         </div>
         <div className="mt-3 rounded-xl border border-ink-800 bg-ink-900/60 px-3 py-3 text-ink-500 text-[11px] leading-relaxed">
           <p>Meta يغطي فيسبوك وإنستجرام. Threads له App ID/Secret منفصل داخل Meta ويستخدم نفس محرك الحسابات والنشر بعد الربط.</p>
-          <p className="mt-1">WhatsApp يستخدم Evolution/Baileys: أدخل Base URL وAPI Key للسيرفر الذاتي مرة واحدة، وبعدها مساحات العمل تربط أرقامها بالـQR.</p>
+          <p className="mt-1">WhatsApp يدعم Evolution/Baileys وWAHA وWPPConnect. اضبط أكثر من مزود ورتّب الأولوية؛ الربط الأولي يجرب البدائل السليمة تلقائيًا، والتحويل لجلسة قائمة يتم Controlled Reconnect بالـQR.</p>
           <p className="mt-1">TikTok يمكن ربطه وتحديث توكنه تلقائيًا، لكن النشر المباشر يظل متوقفًا حتى استكمال متطلبات Content Posting API وتجربة الخصوصية والميديا.</p>
           <p className="mt-1">Telegram يستخدم Bot Token بدل OAuth، ويجب إضافة البوت Admin للقناة/السوبرجروب.</p>
         </div>
