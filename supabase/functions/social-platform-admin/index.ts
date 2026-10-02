@@ -41,7 +41,7 @@ async function requireSuperAdmin(req: Request): Promise<{ ok: true; userId: stri
   return { ok: true, userId: userData.user.id };
 }
 
-const VALID_PLATFORM_KEYS = new Set(['meta', 'linkedin', 'telegram', 'x', 'threads', 'tiktok']);
+const VALID_PLATFORM_KEYS = new Set(['meta', 'linkedin', 'telegram', 'x', 'threads', 'tiktok', 'whatsapp']);
 
 // Telegram doesn't use redirect-based OAuth (no app is "installed" on a
 // domain) — app_id holds the shared bot's @username and app_secret holds
@@ -86,7 +86,16 @@ Deno.serve(async (req: Request) => {
 
       case 'save_app': {
         if (!VALID_PLATFORM_KEYS.has(body.platformKey)) return jsonRes(400, { error: 'Unknown platform' });
-        if (!body.appId || body.appId.trim().length < 3) return jsonRes(400, { error: 'App ID is required' });
+        if (!body.appId || body.appId.trim().length < 3) return jsonRes(400, { error: body.platformKey === 'whatsapp' ? 'Evolution Base URL is required' : 'App ID is required' });
+
+        if (body.platformKey === 'whatsapp') {
+          try {
+            const url = new URL(body.appId.trim());
+            if (!['http:', 'https:'].includes(url.protocol)) throw new Error('bad protocol');
+          } catch {
+            return jsonRes(400, { error: 'Evolution Base URL غير صالح' });
+          }
+        }
 
         const functionsBase = `${Deno.env.get('SUPABASE_URL') ?? ''}/functions/v1`;
         const redirectUri = REDIRECT_URI_PLATFORMS.has(body.platformKey)
