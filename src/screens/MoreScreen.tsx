@@ -26,8 +26,11 @@ import {
   connectTelegramChannel,
   syncAccounts,
   getSocialIntegrationStatus,
-  connectWhatsApp,
+  getWhatsAppEmbeddedConfig,
+  completeWhatsAppEmbeddedSignup,
+  registerWhatsAppEmbeddedNumber,
   type SocialIntegrationStatus,
+  type WhatsAppEmbeddedConfig,
 } from '@/lib/api';
 import { Card, Button, Badge, ErrorBanner, Input } from '@/components/ui';
 import { PLATFORMS, PLATFORM_META } from '@/lib/constants';
@@ -39,6 +42,7 @@ import {
 import { SuperAdminScreen } from '@/screens/SuperAdminScreen';
 import { AiUsageScreen } from '@/screens/AiUsageScreen';
 import { SettingsScreen } from '@/screens/SettingsScreen';
+import { launchWhatsAppEmbeddedSignup, prepareWhatsAppEmbeddedSignup } from '@/lib/whatsappEmbeddedSignup';
 import type { SocialAccount, SocialPlatform, BrandDna, SocialPlatformAppKey } from '@/lib/types';
 
 function formatSyncDate(value: string | null | undefined): string {
@@ -69,11 +73,11 @@ export function MoreScreen() {
   const [telegramOpen, setTelegramOpen] = useState(false);
   const [telegramInput, setTelegramInput] = useState('');
   const [telegramBusy, setTelegramBusy] = useState(false);
-  const [whatsappOpen, setWhatsappOpen] = useState(false);
-  const [whatsappBusy, setWhatsappBusy] = useState(false);
-  const [whatsappWabaId, setWhatsappWabaId] = useState('');
-  const [whatsappPhoneNumberId, setWhatsappPhoneNumberId] = useState('');
-  const [whatsappAccessToken, setWhatsappAccessToken] = useState('');
+  const [whatsappConfig, setWhatsappConfig] = useState<WhatsAppEmbeddedConfig | null>(null);
+  const [whatsappSdkReady, setWhatsappSdkReady] = useState(false);
+  const [whatsappSetupReason, setWhatsappSetupReason] = useState<string | null>(null);
+  const [whatsappPin, setWhatsappPin] = useState('');
+  const [whatsappPinBusy, setWhatsappPinBusy] = useState(false);
   const [accountSyncBusy, setAccountSyncBusy] = useState(false);
 
   const appStatusByKey = useMemo(() => {
@@ -121,6 +125,31 @@ export function MoreScreen() {
   }, []);
 
   useEffect(() => {
+    if (!workspace?.id) return;
+    let cancelled = false;
+    setWhatsappSdkReady(false);
+    setWhatsappSetupReason(null);
+
+    void getWhatsAppEmbeddedConfig(workspace.id)
+      .then(async (config) => {
+        if (cancelled) return;
+        setWhatsappConfig(config);
+        await prepareWhatsAppEmbeddedSignup(config);
+        if (!cancelled) setWhatsappSdkReady(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setWhatsappConfig(null);
+        setWhatsappSdkReady(false);
+        setWhatsappSetupReason(error instanceof Error ? error.message : 'WhatsApp Embedded Signup غير جاهز');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace?.id]);
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const social = params.get('social');
     if (!social) return;
@@ -162,9 +191,8 @@ export function MoreScreen() {
   function integrationReady(platform: SocialPlatform): boolean {
     const capability = PLATFORM_CAPABILITIES[platform];
     if (capability.connectMode === 'bot') return Boolean(telegramBotUsername);
-    if (capability.connectMode === 'credentials') {
-      const metaApp = appStatusByKey.get('meta');
-      return Boolean(metaApp?.enabled && metaApp?.configured);
+    if (capability.connectMode === 'embedded') {
+      return platform === 'whatsapp' && Boolean(whatsappConfig && whatsappSdkReady);
     }
     if (capability.connectMode !== 'oauth' || !capability.appKey) return false;
     const app = appStatusByKey.get(capability.appKey);
@@ -199,14 +227,33 @@ export function MoreScreen() {
       return;
     }
 
-    if (capability.connectMode === 'credentials' && platform === 'whatsapp') {
-      if (!integrationReady(platform)) {
-        setConnectError('إعداد Meta App الأساسي غير مكتمل؛ App ID وApp Secret وWebhook Verify Token مطلوبين أولًا.');
+    if (capability.connectMode === 'embedded' && platform === 'whatsapp') {
+      if (!whatsappConfig || !whatsappSdkReady) {
+        setConnectError(whatsappSetupReason ?? 'WhatsApp Embedded Signup لسه بيجهز.');
         return;
       }
       setConnectError(null);
       setConnectNotice(null);
-      setWhatsappOpen((open) => !open);
+      setConnectingPlatform('whatsapp');
+      try {
+        const session = await launchWhatsAppEmbeddedSignup(whatsappConfig);
+        const result = await completeWhatsAppEmbeddedSignup({
+          workspaceId: workspace.id,
+          code: session.code,
+          wabaId: session.wabaId,
+          phoneNumberId: session.phoneNumberId,
+        });
+        await Promise.all([loadAccounts(), loadIntegrationState()]);
+        setConnectNotice(
+          result.needsRegistration
+            ? 'تم اختيار حساب ورقم WhatsApp من Meta. أكمل PIN المكوّن من 6 أرقام لتفعيل الرقم.'
+            : `تم ربط WhatsApp ${result.account.handle || result.account.display_name || ''} بنجاح.`,
+        );
+      } catch (error) {
+        setConnectError(error instanceof Error ? error.message : 'تعذّر ربط WhatsApp');
+      } finally {
+        setConnectingPlatform(null);
+      }
       return;
     }
 
@@ -263,26 +310,20 @@ export function MoreScreen() {
     }
   }
 
-  async function handleConnectWhatsApp() {
-    if (!workspace || !whatsappWabaId.trim() || !whatsappPhoneNumberId.trim() || !whatsappAccessToken.trim()) return;
-    setWhatsappBusy(true);
+  async function handleRegisterWhatsAppPin() {
+    if (!workspace || !/^\d{6}$/.test(whatsappPin)) return;
+    setWhatsappPinBusy(true);
     setConnectError(null);
     setConnectNotice(null);
     try {
-      const result = await connectWhatsApp({
-        workspaceId: workspace.id,
-        wabaId: whatsappWabaId.trim(),
-        phoneNumberId: whatsappPhoneNumberId.trim(),
-        accessToken: whatsappAccessToken.trim(),
-      });
-      setWhatsappAccessToken('');
-      setWhatsappOpen(false);
-      setConnectNotice(`تم ربط واتساب ${result.account.handle || result.account.display_name || ''} وتفعيل Webhooks بنجاح.`);
+      await registerWhatsAppEmbeddedNumber(workspace.id, whatsappPin);
+      setWhatsappPin('');
       await Promise.all([loadAccounts(), loadIntegrationState()]);
+      setConnectNotice('تم تسجيل رقم WhatsApp وتفعيل القناة بالكامل.');
     } catch (error) {
-      setConnectError(error instanceof Error ? error.message : 'تعذّر ربط واتساب');
+      setConnectError(error instanceof Error ? error.message : 'تعذّر تسجيل رقم WhatsApp');
     } finally {
-      setWhatsappBusy(false);
+      setWhatsappPinBusy(false);
     }
   }
 
@@ -418,7 +459,7 @@ export function MoreScreen() {
               } else if (account?.status === 'error') {
                 stateLabel = 'خطأ';
                 stateColor = 'danger';
-              } else if ((capability.connectMode === 'oauth' || capability.connectMode === 'bot' || capability.connectMode === 'credentials') && !ready) {
+              } else if ((capability.connectMode === 'oauth' || capability.connectMode === 'bot' || capability.connectMode === 'embedded') && !ready) {
                 stateLabel = 'يحتاج إعداد';
                 stateColor = 'warning';
               } else if (capability.connectMode === 'managed') {
@@ -450,7 +491,7 @@ export function MoreScreen() {
                           variant={connected ? 'danger' : 'secondary'}
                           size="sm"
                           onClick={() => void togglePlatform(platform)}
-                          disabled={busy || (!connected && capability.connectMode === 'oauth' && !ready)}
+                          disabled={busy || (!connected && (capability.connectMode === 'oauth' || capability.connectMode === 'embedded') && !ready)}
                         >
                           {connected ? 'فصل' : busy ? 'جارٍ الربط...' : 'ربط'}
                         </Button>
@@ -483,47 +524,44 @@ export function MoreScreen() {
                       </div>
                     )}
 
-                    {platform === 'whatsapp' && !connected && ready && whatsappOpen && (
-                      <div className="mt-3 pt-3 border-t border-ink-800 space-y-3 animate-slide-up">
-                        <div className="flex items-start gap-2 text-ink-400 text-xs leading-relaxed">
-                          <Phone size={15} className="mt-0.5 shrink-0" />
-                          <span>
-                            من Meta Developer → WhatsApp → API Setup انسخ WABA ID وPhone Number ID.
-                            استخدم Permanent System User Token بصلاحيات WhatsApp Business.
-                          </span>
-                        </div>
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          <Input value={whatsappWabaId} onChange={setWhatsappWabaId} placeholder="WhatsApp Business Account ID" />
-                          <Input value={whatsappPhoneNumberId} onChange={setWhatsappPhoneNumberId} placeholder="Phone Number ID" />
-                        </div>
-                        <div className="relative">
-                          <KeyRound size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-600" />
-                          <Input
-                            type="password"
-                            value={whatsappAccessToken}
-                            onChange={setWhatsappAccessToken}
-                            placeholder="Permanent Access Token"
-                            className="pr-9"
-                          />
-                        </div>
-                        <div className="rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-[11px] text-ink-400">
-                          التوكن يُرسل مباشرة إلى Edge Function ويُحفظ server-side فقط. SocialPilot سيتحقق من أن الرقم تابع للـWABA ويشترك في Webhooks تلقائيًا.
-                        </div>
-                        <Button
-                          size="sm"
-                          onClick={() => void handleConnectWhatsApp()}
-                          disabled={whatsappBusy || !whatsappWabaId.trim() || !whatsappPhoneNumberId.trim() || !whatsappAccessToken.trim()}
-                        >
-                          {whatsappBusy ? 'جارٍ التحقق والربط...' : 'ربط WhatsApp Business'}
-                        </Button>
+                    {platform === 'whatsapp' && !connected && ready && (
+                      <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-[11px] text-brand-200 flex items-start gap-2">
+                        <Phone size={14} className="mt-0.5 shrink-0" />
+                        <span>اضغط «ربط» فقط. نافذة Meta الرسمية هتتولى اختيار Business Portfolio وحساب WhatsApp والرقم والتفويض.</span>
                       </div>
                     )}
 
                     {platform === 'whatsapp' && !connected && !ready && (
                       <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
-                        إعداد Meta App الأساسي غير مكتمل؛ App Secret مطلوب للتحقق الآمن من Webhook قبل تفعيل واتساب.
+                        {whatsappSetupReason ?? 'WhatsApp Embedded Signup يحتاج إعدادًا واحدًا من Super Admin.'}
                       </div>
                     )}
+
+                    {platform === 'whatsapp'
+                      && account?.metadata?.onboarding_state === 'needs_registration'
+                      && (
+                        <div className="mt-3 pt-3 border-t border-ink-800 space-y-2 animate-slide-up">
+                          <div className="flex items-start gap-2 text-xs text-ink-400">
+                            <KeyRound size={14} className="mt-0.5 shrink-0" />
+                            <span>Meta تحتاج PIN من 6 أرقام لتفعيل Two-Step Verification للرقم. اختر PIN واحفظه عندك.</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <Input
+                              value={whatsappPin}
+                              onChange={(value) => setWhatsappPin(value.replace(/\D/g, '').slice(0, 6))}
+                              placeholder="6-digit PIN"
+                              className="flex-1"
+                            />
+                            <Button
+                              size="sm"
+                              onClick={() => void handleRegisterWhatsAppPin()}
+                              disabled={whatsappPinBusy || !/^\d{6}$/.test(whatsappPin)}
+                            >
+                              {whatsappPinBusy ? 'جارٍ التفعيل...' : 'تفعيل الرقم'}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
 
                     {platform === 'whatsapp' && connected && (
                       <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-brand-200 text-[11px]">
