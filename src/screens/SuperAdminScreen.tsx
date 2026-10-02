@@ -15,6 +15,10 @@ const PROVIDER_KEYS: AiProviderKey[] = [
   'together', 'fireworks', 'mistral', 'anthropic', 'xai', 'cohere', 'openai',
 ];
 
+// Legacy rows can remain in the database after the provider registry upgrade.
+// WhatsApp credentials are managed exclusively by the unified provider panel.
+const LEGACY_WHATSAPP_APP_KEYS = new Set(['whatsapp_waha', 'whatsapp_wppconnect']);
+
 const POLICY_OPTIONS: { value: AiRoutingPolicyValue; label: string }[] = [
   { value: 'smart_balanced', label: 'متوازن (افتراضي)' },
   { value: 'free_first', label: 'المجاني أولًا' },
@@ -95,7 +99,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
         : [...whatsapp.providers]
             .filter((provider) => provider.enabled && provider.status === 'connected')
             .sort((a, b) => a.priority - b.priority)[0] ?? null;
-      setSocialApps(res.apps.map((app) => (
+      setSocialApps(res.apps.filter((app) => !LEGACY_WHATSAPP_APP_KEYS.has(app.platform_key)).map((app) => (
         app.platform_key === 'whatsapp'
           ? {
               ...app,
@@ -428,14 +432,14 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-ink-100 text-sm font-semibold">WhatsApp Provider Router</span>
+                          <span className="text-ink-100 text-sm font-semibold">إعدادات واتساب</span>
                           <Badge color={app.enabled ? 'brand' : app.has_secret ? 'warning' : 'neutral'}>
                             {app.enabled ? 'جاهز' : app.has_secret ? 'يحتاج مزود سليم' : 'غير مُعد'}
                           </Badge>
                           {app.active_provider && <Badge color="accent">الأساسي: {app.active_provider}</Badge>}
                         </div>
                         <p className="text-ink-500 text-[11px] mt-1 leading-relaxed">
-                          ترتيب احتياطي Controlled Failover: Evolution/Baileys → WAHA → WPPConnect. تغيير المزود لجلسة مرتبطة يحتاج QR جديد لمنع الرسائل المكررة.
+                          اضبط Evolution / Baileys وWAHA وWPPConnect من هنا، وحدّد المزوّد الأساسي وترتيب البدائل. تغيير المزوّد لرقم مرتبط يحتاج مسح QR جديد.
                         </p>
                       </div>
                       <Button
