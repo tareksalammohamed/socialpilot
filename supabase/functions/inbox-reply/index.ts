@@ -101,10 +101,26 @@ async function deliverToPlatform(
     const res = await fetch(`${GRAPH}/${phoneNumberId}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messaging_product: 'whatsapp', to: conv.external_participant_id, type: 'text', text: { body: content } }),
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: conv.external_participant_id,
+        type: 'text',
+        text: { preview_url: false, body: content },
+      }),
     });
-    if (!res.ok) throw new Error(`WhatsApp Send API: ${res.status} ${await res.text()}`);
-    return (await res.json().catch(() => ({}))).messages?.[0]?.id ?? null;
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+    if (!res.ok) {
+      const apiError = body.error as Record<string, unknown> | undefined;
+      const code = Number(apiError?.code ?? 0);
+      if (code === 131047) {
+        throw new Error('انتهت نافذة خدمة WhatsApp لمدة 24 ساعة. يلزم إرسال Template معتمد لإعادة فتح المحادثة.');
+      }
+      const detail = typeof apiError?.message === 'string' ? apiError.message : `HTTP ${res.status}`;
+      throw new Error(`WhatsApp Send API: ${detail}`);
+    }
+    const messages = body.messages as Array<Record<string, unknown>> | undefined;
+    return typeof messages?.[0]?.id === 'string' ? messages[0].id : null;
   }
 
   if (conv.platform === 'telegram') {
@@ -161,6 +177,24 @@ Deno.serve(async (req: Request) => {
   const { data: account } = await supabase.from('social_accounts').select('*').eq('id', conv.account_id).maybeSingle();
   if (!account) return jsonRes(409, { error: 'الحساب المرتبط بهذه المحادثة لم يعد موجودًا' });
 
+  if (conv.platform === 'whatsapp') {
+    const { data: latestInbound } = await supabase
+      .from('inbox_messages')
+      .select('created_at')
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'inbound')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!latestInbound?.created_at) {
+      return jsonRes(409, { error: 'لا توجد رسالة واردة من العميل لفتح نافذة WhatsApp. استخدم Template معتمد لبدء المحادثة.' });
+    }
+    const windowMs = 24 * 60 * 60 * 1000;
+    if (Date.now() - new Date(latestInbound.created_at).getTime() > windowMs) {
+      return jsonRes(409, { error: 'مر أكثر من 24 ساعة على آخر رسالة من العميل. يلزم Template معتمد قبل إرسال نص حر.' });
+    }
+  }
+
   try {
     const externalMessageId = await deliverToPlatform(conv as Conversation, account, content.trim());
 
@@ -174,7 +208,13 @@ Deno.serve(async (req: Request) => {
         is_ai: false,
         user_id: userId,
         ...(externalMessageId ? { external_id: externalMessageId } : {}),
-        metadata: { source: 'inbox_reply' },
+        metadata: {
+          source: 'inbox_reply',
+          ...(conv.platform === 'whatsapp' ? {
+            delivery_status: 'accepted',
+            delivery_status_at: new Date().toISOString(),
+          } : {}),
+        },
       })
       .select()
       .single();
