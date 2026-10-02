@@ -33,7 +33,7 @@ import {
   disconnectWhatsAppEvolution,
   type SocialIntegrationStatus,
 } from '@/lib/api';
-import { Card, Button, Badge, ErrorBanner, Input } from '@/components/ui';
+import { Card, Button, Badge, ErrorBanner, Input, Spinner } from '@/components/ui';
 import { PLATFORMS, PLATFORM_META } from '@/lib/constants';
 import {
   PLATFORM_CAPABILITIES,
