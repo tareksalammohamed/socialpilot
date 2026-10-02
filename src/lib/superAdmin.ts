@@ -101,60 +101,50 @@ export const socialAdmin = {
     callSocialAdmin<{ ok: true }>('remove_app', { platformKey }),
 };
 
-async function callWhatsAppProviderAdmin<T>(
-  action: string,
-  payload: Record<string, unknown> = {},
-): Promise<T> {
-  const { data: session } = await supabase.auth.getSession();
-  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-provider-admin`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.session?.access_token ?? ''}`,
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
-    },
-    body: JSON.stringify({ action, ...payload }),
-  });
-
-  let body: Record<string, unknown> = {};
-  try {
-    body = await res.json();
-  } catch {
-    // handled below
-  }
-  if (!res.ok) {
-    throw new Error((body.error as string | undefined) ?? `فشل WhatsApp Provider Admin (${res.status})`);
-  }
-  return body as T;
-}
-
 export const whatsappProviderAdmin = {
-  list: () => callWhatsAppProviderAdmin<{
-    providers: import('@/lib/types').WhatsAppProviderConfig[];
-  }>('list'),
+  list: async () => {
+    const result = await callSocialAdmin<{ apps: SocialPlatformApp[] }>('list_apps');
+    const whatsapp = result.apps.find((app) => app.platform_key === 'whatsapp');
+    return {
+      providers: whatsapp?.whatsapp_providers ?? [],
+      activeProvider: whatsapp?.active_provider ?? null,
+    };
+  },
   save: (
     providerKey: import('@/lib/types').WhatsAppProviderKey,
     baseUrl: string,
     secret?: string,
     priority?: number,
-  ) => callWhatsAppProviderAdmin<{
+  ) => callSocialAdmin<{
     ok: true;
+    activeProvider: import('@/lib/types').WhatsAppProviderKey | null;
+    provider: import('@/lib/types').WhatsAppProviderConfig;
+  }>('save_whatsapp_provider', {
+    providerKey,
+    baseUrl,
+    credential: secret,
+    enabled: true,
+    priority,
+  }),
+  testAll: () => callSocialAdmin<{
+    ok: true;
+    activeProvider: import('@/lib/types').WhatsAppProviderKey | null;
     providers: import('@/lib/types').WhatsAppProviderConfig[];
-  }>('save', { providerKey, baseUrl, secret, priority }),
-  test: (providerKey: import('@/lib/types').WhatsAppProviderKey) =>
-    callWhatsAppProviderAdmin<{
-      ok: true;
-      providers: import('@/lib/types').WhatsAppProviderConfig[];
-    }>('test', { providerKey }),
+  }>('test_whatsapp_providers'),
   setEnabled: (providerKey: import('@/lib/types').WhatsAppProviderKey, enabled: boolean) =>
-    callWhatsAppProviderAdmin<{
+    callSocialAdmin<{
       ok: true;
-      providers: import('@/lib/types').WhatsAppProviderConfig[];
-    }>('set_enabled', { providerKey, enabled }),
+      activeProvider: import('@/lib/types').WhatsAppProviderKey | null;
+    }>('set_whatsapp_provider_enabled', { providerKey, enabled }),
+  setActive: (providerKey: import('@/lib/types').WhatsAppProviderKey) =>
+    callSocialAdmin<{
+      ok: true;
+      activeProvider: import('@/lib/types').WhatsAppProviderKey;
+    }>('set_whatsapp_active_provider', { providerKey }),
   remove: (providerKey: import('@/lib/types').WhatsAppProviderKey) =>
-    callWhatsAppProviderAdmin<{
+    callSocialAdmin<{
       ok: true;
-      providers: import('@/lib/types').WhatsAppProviderConfig[];
-    }>('remove', { providerKey }),
+      activeProvider: import('@/lib/types').WhatsAppProviderKey | null;
+    }>('remove_whatsapp_provider', { providerKey }),
 };
+
