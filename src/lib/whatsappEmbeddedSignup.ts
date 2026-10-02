@@ -151,8 +151,11 @@ export function launchWhatsAppEmbeddedSignup(config: WhatsAppEmbeddedConfig): Pr
         // Meta returns the auth code and session info through separate channels.
         // Give the session event a short grace period, then let the backend
         // discover the WABA/phone from token scopes when possible.
-        fallbackTimer = window.setTimeout(done, 1500);
-        done();
+        if (wabaId) {
+          done();
+        } else {
+          fallbackTimer = window.setTimeout(done, 1500);
+        }
       },
       {
         config_id: config.configurationId,
