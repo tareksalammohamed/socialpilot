@@ -130,15 +130,13 @@ async function saveConnection(params: {
   const phoneId = String(params.phone.id ?? '');
   const display = String(params.phone.display_phone_number ?? phoneId);
   const name = String(params.phone.verified_name ?? display);
-  const connected = params.phone.status === 'CONNECTED';
-
   const { data: account, error } = await db.from('social_accounts').upsert({
     workspace_id: params.workspaceId,
     platform: 'whatsapp',
     external_id: phoneId,
     handle: display,
     display_name: name,
-    status: connected ? 'connected' : 'error',
+    status: 'error',
     needs_reconnect: false,
     metadata: {
       waba_id: params.wabaId,
@@ -146,13 +144,10 @@ async function saveConnection(params: {
       display_phone_number: display,
       verified_name: name,
       quality_rating: params.phone.quality_rating ?? null,
-      code_verification_status: params.phone.code_verification_status ?? null,
-      phone_status: params.phone.status ?? null,
-      platform_type: params.phone.platform_type ?? null,
       webhook_subscribed: true,
       webhook_url: params.webhook,
       connected_via: 'meta_embedded_signup',
-      onboarding_state: connected ? 'ready' : 'needs_registration',
+      onboarding_state: 'needs_registration',
       token_scopes: params.scopes,
     },
     last_sync_at: new Date().toISOString(),
@@ -176,7 +171,7 @@ async function saveConnection(params: {
     action: 'whatsapp_embedded_signup',
     entity: 'social_account',
     entity_id: account.id,
-    detail: { waba_id: params.wabaId, phone_number_id: phoneId, connected },
+    detail: { waba_id: params.wabaId, phone_number_id: phoneId, onboarding_state: 'needs_registration' },
   });
   return account;
 }
@@ -235,7 +230,7 @@ Deno.serve(async (req) => {
     await graph(`${GRAPH}/${wabaId}/subscribed_apps`, token, { method: 'POST', body: '{}' });
 
     const phoneBody = await graph(
-      `${GRAPH}/${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status,name_status,status,platform_type`,
+      `${GRAPH}/${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating`,
       token,
     );
     const phones = Array.isArray(phoneBody.data) ? phoneBody.data as Array<Record<string, unknown>> : [];
@@ -250,7 +245,7 @@ Deno.serve(async (req) => {
     });
     return out(200, {
       ok: true,
-      needsRegistration: phone.status !== 'CONNECTED',
+      needsRegistration: true,
       account: { id: account.id, display_name: account.display_name, handle: account.handle, status: account.status },
     });
   } catch (error) {
