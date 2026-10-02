@@ -1,0 +1,27 @@
+services:
+  waha:
+    image: devlikeapro/waha:latest-2026.8.2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WAHA_PORT:-3000}:3000"
+    environment:
+      WAHA_API_KEY: ${WAHA_API_KEY}
+      WAHA_BASE_URL: ${WAHA_PUBLIC_URL}
+      WAHA_PUBLIC_URL: ${WAHA_PUBLIC_URL}
+      WAHA_PRINT_QR: "false"
+      WAHA_DASHBOARD_ENABLED: "false"
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      WAHA_EVENTS_DOWNLOAD_MEDIA: "true"
+      WAHA_API_DOWNLOAD_MEDIA: "true"
+      TZ: ${TZ:-Africa/Cairo}
+    volumes:
+      - waha_sessions:/app/.sessions
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --header='X-Api-Key: ${WAHA_API_KEY}' 'http://127.0.0.1:3000/api/sessions?all=true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  waha_sessions:
