@@ -26,6 +26,15 @@ function statusBadge(status: AiProvider['status']) {
   return <Badge color="neutral">غير مُعد</Badge>;
 }
 
+function socialDeveloperPortalLabel(key: SocialPlatformAppKey): string {
+  if (key === 'linkedin') return 'LinkedIn Developer';
+  if (key === 'x') return 'X Developer Portal';
+  if (key === 'tiktok') return 'TikTok for Developers';
+  if (key === 'threads') return 'Meta / Threads App Dashboard';
+  if (key === 'telegram') return 'BotFather';
+  return 'Meta Developer';
+}
+
 export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -328,12 +337,8 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                     {app.redirect_uri && (
                       <div className="bg-ink-900 rounded-lg p-2.5">
                         <p className="text-ink-500 text-[10px] mb-1">
-                          Redirect URI — ضيفه في إعدادات تطبيق{' '}
-                          {app.platform_key === 'linkedin'
-                            ? 'LinkedIn Developer'
-                            : app.platform_key === 'x'
-                              ? 'X Developer Portal'
-                              : 'Meta Developer'}
+                          Redirect URI — ضيفه في إعدادات{' '}
+                          {socialDeveloperPortalLabel(app.platform_key)}
                         </p>
                         <p className="text-ink-300 text-xs break-all" dir="ltr">{app.redirect_uri}</p>
                       </div>
@@ -367,9 +372,11 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
             );
           })}
         </div>
-        <p className="text-ink-600 text-[11px] mt-2">
-          تطبيق Meta الواحد بيغطي فيسبوك وإنستجرام معًا (Meta for Developers). تطبيق لينكدإن منفصل وبيغطي النشر على الحساب الشخصي فقط حاليًا (LinkedIn Developer Portal). ملحوظة: توكن لينكدإن بينتهي كل ٦٠ يوم ولازم إعادة ربط. تيليجرام مختلف: اعمل بوت من BotFather@ في تيليجرام، وحط يوزره في الحقل الأول وتوكنه في التاني — نفس البوت ده هيبقى محتاج كل مساحات العمل تضيفه Admin في قنواتها.
-        </p>
+        <div className="mt-3 rounded-xl border border-ink-800 bg-ink-900/60 px-3 py-3 text-ink-500 text-[11px] leading-relaxed">
+          <p>Meta يغطي فيسبوك وإنستجرام. Threads له App ID/Secret منفصل داخل Meta ويستخدم نفس محرك الحسابات والنشر بعد الربط.</p>
+          <p className="mt-1">TikTok يمكن ربطه وتحديث توكنه تلقائيًا، لكن النشر المباشر يظل متوقفًا حتى استكمال متطلبات Content Posting API وتجربة الخصوصية والميديا.</p>
+          <p className="mt-1">Telegram يستخدم Bot Token بدل OAuth، ويجب إضافة البوت Admin للقناة/السوبرجروب.</p>
+        </div>
       </div>
 
       {/* Providers */}

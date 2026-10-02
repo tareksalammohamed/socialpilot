@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import type { AiGatewayRequest, AiGatewayResponse, InboxConversation, InboxMessage, InboxAiAnalysis, AgentContext, AgentTurnResult, AgentToolResult } from './types';
 
-export async function startSocialOAuth(workspaceId: string, platformKey: 'meta' | 'linkedin' | 'x' = 'meta'): Promise<string> {
+export async function startSocialOAuth(workspaceId: string, platformKey: 'meta' | 'linkedin' | 'x' | 'threads' | 'tiktok' = 'meta'): Promise<string> {
   const { data: session } = await supabase.auth.getSession();
   const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/social-oauth-start`;
   const res = await fetch(url, {
@@ -59,6 +59,41 @@ export function getTelegramBotInfo(): Promise<{ configured: boolean; enabled?: b
 
 export async function connectTelegramChannel(workspaceId: string, channelUsername: string) {
   return callTelegramConnect<{ ok: true; account: unknown }>({ action: 'connect', workspaceId, channelUsername });
+}
+
+export type SocialIntegrationStatus = {
+  platform_key: string;
+  display_name: string;
+  enabled: boolean;
+  configured: boolean;
+  status: 'not_configured' | 'connected' | 'error';
+  last_error: string | null;
+};
+
+export async function getSocialIntegrationStatus(workspaceId: string): Promise<{
+  apps: SocialIntegrationStatus[];
+  accounts: Array<{ id: string; platform: string; status: string; needs_reconnect: boolean; last_sync_at: string | null }>;
+}> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token;
+  if (!token) throw new Error('يجب تسجيل الدخول لعرض حالة التكاملات');
+
+  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/social-integration-status`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+    },
+    body: JSON.stringify({ workspaceId }),
+  });
+  const body = await response.json().catch(() => ({})) as {
+    error?: string;
+    apps?: SocialIntegrationStatus[];
+    accounts?: Array<{ id: string; platform: string; status: string; needs_reconnect: boolean; last_sync_at: string | null }>;
+  };
+  if (!response.ok) throw new Error(body.error ?? `فشل تحميل حالة التكاملات (${response.status})`);
+  return { apps: body.apps ?? [], accounts: body.accounts ?? [] };
 }
 
 export type PublishResult = {

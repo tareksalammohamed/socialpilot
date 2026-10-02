@@ -29,6 +29,8 @@ const PLATFORM_LABELS: Record<string, string> = {
   meta: 'فيسبوك/إنستجرام',
   linkedin: 'لينكدإن',
   x: 'إكس',
+  threads: 'ثريدز',
+  tiktok: 'تيك توك',
 };
 
 // X (Twitter) OAuth 2.0 requires PKCE on the authorization request — we
@@ -130,6 +132,26 @@ Deno.serve(async (req: Request) => {
       authUrl.searchParams.set('redirect_uri', redirectUri);
       authUrl.searchParams.set('state', state);
       authUrl.searchParams.set('scope', scope);
+      break;
+    }
+    case 'threads': {
+      const scope = app.scopes || 'threads_basic,threads_content_publish';
+      authUrl = new URL('https://threads.net/oauth/authorize');
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('client_id', app.app_id);
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('state', state);
+      authUrl.searchParams.set('scope', scope);
+      break;
+    }
+    case 'tiktok': {
+      const scope = app.scopes || 'user.info.basic,video.publish,video.upload';
+      authUrl = new URL('https://www.tiktok.com/v2/auth/authorize/');
+      authUrl.searchParams.set('client_key', app.app_id);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('scope', scope);
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('state', state);
       break;
     }
     case 'meta':

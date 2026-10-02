@@ -147,26 +147,25 @@ export function CreateScreen() {
     }
     let cancelled = false;
 
-    void supabase
-      .from('assistant_tasks')
-      .select('*')
-      .eq('workspace_id', workspace.id)
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-      .then(({ data, error: taskError }) => {
-        if (cancelled) return;
-        if (taskError) {
-          setError(taskError.message);
-          setMode('error');
-        } else if (data) {
-          applyTask(data as AssistantTask);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setRestoringTask(false);
-      });
+    void (async () => {
+      const { data, error: taskError } = await supabase
+        .from('assistant_tasks')
+        .select('*')
+        .eq('workspace_id', workspace.id)
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (cancelled) return;
+      if (taskError) {
+        setError(taskError.message);
+        setMode('error');
+      } else if (data) {
+        applyTask(data as AssistantTask);
+      }
+      setRestoringTask(false);
+    })();
 
     const channel = supabase
       .channel(`assistant-tasks:${workspace.id}:${user.id}`)

@@ -181,32 +181,31 @@ export function InboxScreen() {
     setMessagesError(null);
     setAnalysisLoaded(false);
     setAiAnalysis(null);
-    void listInboxMessages(workspace.id, selectedId)
-      .then((data) => {
+    void (async () => {
+      try {
+        const data = await listInboxMessages(workspace.id, selectedId);
         if (!cancelled) setMessages(data);
-      })
-      .catch((cause) => {
+      } catch (cause) {
         if (!cancelled) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحميل الرسائل');
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setMessagesLoading(false);
-    });
+      }
+    })();
+
     void markInboxConversationRead(selectedId).catch(() => undefined);
-    void supabase
-      .from('inbox_ai_analyses')
-      .select('*')
-      .eq('workspace_id', workspace.id)
-      .eq('conversation_id', selectedId)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (!cancelled) {
-          setAiAnalysis((data as InboxAiAnalysis | null) ?? null);
-          setAnalysisLoaded(true);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setAnalysisLoaded(true);
-      });
+
+    void (async () => {
+      const { data } = await supabase
+        .from('inbox_ai_analyses')
+        .select('*')
+        .eq('workspace_id', workspace.id)
+        .eq('conversation_id', selectedId)
+        .maybeSingle();
+      if (!cancelled) {
+        setAiAnalysis((data as InboxAiAnalysis | null) ?? null);
+        setAnalysisLoaded(true);
+      }
+    })();
     setConversations((current) => current.map((item) => (item.id === selectedId ? { ...item, unread: false } : item)));
     return () => {
       cancelled = true;
@@ -243,8 +242,26 @@ export function InboxScreen() {
   useEffect(() => {
     if (!selectedConversation || !analysisLoaded || aiAnalysis || aiLoading || !aiSettings.enabled || !aiSettings.autoAnalyze) return;
     if (autoAnalyzeKeyRef.current === selectedConversation.id) return;
-    autoAnalyzeKeyRef.current = selectedConversation.id;
-    void handleAnalyzeConversation();
+    const conversationId = selectedConversation.id;
+    autoAnalyzeKeyRef.current = conversationId;
+    let cancelled = false;
+
+    setAiLoading(true);
+    setAiError(null);
+    void (async () => {
+      try {
+        const result = await analyzeInboxConversation(conversationId);
+        if (!cancelled) setAiAnalysis(result);
+      } catch (cause) {
+        if (!cancelled) setAiError(cause instanceof Error ? cause.message : 'تعذّر تحليل المحادثة');
+      } finally {
+        if (!cancelled) setAiLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedConversation, analysisLoaded, aiAnalysis, aiLoading, aiSettings.enabled, aiSettings.autoAnalyze]);
 
   async function handleConversationStatus(status: 'open' | 'pending' | 'closed') {

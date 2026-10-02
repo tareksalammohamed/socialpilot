@@ -26,9 +26,18 @@ async function getAppUrl(): Promise<string> {
 
 async function redirectToApp(params: Record<string, string>): Promise<Response> {
   const appUrl = await getAppUrl();
-  const target = new URL(appUrl || 'https://example.com');
+  const base = (appUrl || 'https://example.com').replace(/\/$/, '');
+  const target = new URL(`${base}/app/accounts`);
   for (const [k, v] of Object.entries(params)) target.searchParams.set(k, v);
   return new Response(null, { status: 302, headers: { Location: target.toString() } });
+}
+
+async function markPlatformHealthy(platformKey: string): Promise<void> {
+  await supabase.from('social_platform_apps').update({
+    status: 'connected',
+    last_error: null,
+    last_test_at: new Date().toISOString(),
+  }).eq('platform_key', platformKey);
 }
 
 Deno.serve(async (req: Request) => {
@@ -67,8 +76,14 @@ Deno.serve(async (req: Request) => {
     .maybeSingle();
 
   if (!app?.app_id || !secretRow?.app_secret) {
-    const label = stateRow.platform_key === 'linkedin' ? 'لينكدإن' : stateRow.platform_key === 'x' ? 'إكس' : 'فيسبوك/إنستجرام';
-    return redirectToApp({ social: 'error', message: `إعدادات ربط ${label} غير مكتملة` });
+    const labels: Record<string, string> = {
+      meta: 'فيسبوك/إنستجرام',
+      linkedin: 'لينكدإن',
+      x: 'إكس',
+      threads: 'ثريدز',
+      tiktok: 'تيك توك',
+    };
+    return redirectToApp({ social: 'error', message: `إعدادات ربط ${labels[stateRow.platform_key] ?? stateRow.platform_key} غير مكتملة` });
   }
 
   const redirectUri = app.redirect_uri || `${Deno.env.get('SUPABASE_URL') ?? ''}/functions/v1/social-oauth-callback`;
@@ -78,6 +93,12 @@ Deno.serve(async (req: Request) => {
   }
   if (stateRow.platform_key === 'x') {
     return handleXCallback({ code, app, secretRow, redirectUri, stateRow });
+  }
+  if (stateRow.platform_key === 'threads') {
+    return handleThreadsCallback({ code, app, secretRow, redirectUri, stateRow });
+  }
+  if (stateRow.platform_key === 'tiktok') {
+    return handleTikTokCallback({ code, app, secretRow, redirectUri, stateRow });
   }
 
   try {
@@ -190,6 +211,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    await markPlatformHealthy('meta');
     return redirectToApp({
       social: 'connected',
       platform: 'meta',
@@ -278,6 +300,7 @@ async function handleLinkedInCallback(params: {
       updated_at: new Date().toISOString(),
     });
 
+    await markPlatformHealthy('linkedin');
     return redirectToApp({ social: 'connected', platform: 'linkedin', linkedin: '1' });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'فشل ربط حساب لينكدإن';
@@ -366,10 +389,186 @@ async function handleXCallback(params: {
       updated_at: new Date().toISOString(),
     });
 
+    await markPlatformHealthy('x');
     return redirectToApp({ social: 'connected', platform: 'x', x: '1' });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'فشل ربط حساب إكس';
     await supabase.from('social_platform_apps').update({ last_error: message, status: 'error' }).eq('platform_key', 'x');
+    return redirectToApp({ social: 'error', message });
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// Threads — canonical OAuth path. Stores the account and long-lived token in
+// social_accounts/social_account_tokens, the same model used by publishing.
+// ---------------------------------------------------------------------------
+async function handleThreadsCallback(params: {
+  code: string;
+  app: Record<string, unknown>;
+  secretRow: { app_secret: string };
+  redirectUri: string;
+  stateRow: Record<string, unknown>;
+}): Promise<Response> {
+  const { code, app, secretRow, redirectUri, stateRow } = params;
+  try {
+    const tokenBody = new URLSearchParams({
+      client_id: String(app.app_id),
+      client_secret: secretRow.app_secret,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: redirectUri,
+    });
+    const tokenRes = await fetch('https://graph.threads.net/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenBody,
+    });
+    const tokenJson = await tokenRes.json();
+    if (!tokenRes.ok || !tokenJson.access_token) {
+      throw new Error(tokenJson?.error?.message ?? tokenJson?.error_message ?? 'فشل تبادل رمز الدخول مع Threads');
+    }
+
+    const longUrl = new URL('https://graph.threads.net/access_token');
+    longUrl.searchParams.set('grant_type', 'th_exchange_token');
+    longUrl.searchParams.set('client_secret', secretRow.app_secret);
+    longUrl.searchParams.set('access_token', String(tokenJson.access_token));
+    const longRes = await fetch(longUrl.toString());
+    const longJson = await longRes.json();
+    if (!longRes.ok || !longJson.access_token) {
+      throw new Error(longJson?.error?.message ?? 'فشل الحصول على Threads long-lived token');
+    }
+
+    const profileUrl = new URL('https://graph.threads.net/v1.0/me');
+    profileUrl.searchParams.set('fields', 'id,username');
+    profileUrl.searchParams.set('access_token', String(longJson.access_token));
+    const profileRes = await fetch(profileUrl.toString());
+    const profile = await profileRes.json();
+    if (!profileRes.ok || !profile.id) {
+      throw new Error(profile?.error?.message ?? 'تعذّر جلب بيانات حساب Threads');
+    }
+
+    const expiresAt = typeof longJson.expires_in === 'number'
+      ? new Date(Date.now() + longJson.expires_in * 1000).toISOString()
+      : null;
+    const username = String(profile.username ?? profile.id);
+
+    const { data: account, error: upsertError } = await supabase
+      .from('social_accounts')
+      .upsert({
+        workspace_id: stateRow.workspace_id,
+        platform: 'threads',
+        handle: username.startsWith('@') ? username : `@${username}`,
+        display_name: username,
+        status: 'connected',
+        needs_reconnect: false,
+        external_id: String(profile.id),
+        metadata: { threads_user_id: String(profile.id) },
+        last_sync_at: new Date().toISOString(),
+      }, { onConflict: 'workspace_id,platform' })
+      .select()
+      .single();
+    if (upsertError || !account) throw new Error(upsertError?.message ?? 'تعذّر حفظ حساب Threads');
+
+    await supabase.from('social_account_tokens').upsert({
+      account_id: account.id,
+      access_token: String(longJson.access_token),
+      refresh_token: null,
+      token_type: 'threads_long_lived',
+      expires_at: expiresAt,
+      updated_at: new Date().toISOString(),
+    });
+
+    await markPlatformHealthy('threads');
+    return redirectToApp({ social: 'connected', platform: 'threads', threads: '1' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'فشل ربط حساب Threads';
+    await supabase.from('social_platform_apps').update({ last_error: message, status: 'error' }).eq('platform_key', 'threads');
+    return redirectToApp({ social: 'error', message });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TikTok — canonical web Login Kit path. This connects identity/tokens into
+// the same account model. Direct posting remains gated by TikTok creator
+// settings and Content Posting API requirements in the product UI.
+// ---------------------------------------------------------------------------
+async function handleTikTokCallback(params: {
+  code: string;
+  app: Record<string, unknown>;
+  secretRow: { app_secret: string };
+  redirectUri: string;
+  stateRow: Record<string, unknown>;
+}): Promise<Response> {
+  const { code, app, secretRow, redirectUri, stateRow } = params;
+  try {
+    const tokenRes = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_key: String(app.app_id),
+        client_secret: secretRow.app_secret,
+        code,
+        grant_type: 'authorization_code',
+        redirect_uri: redirectUri,
+      }),
+    });
+    const tokenJson = await tokenRes.json();
+    if (!tokenRes.ok || !tokenJson.access_token) {
+      throw new Error(tokenJson?.error_description ?? tokenJson?.error ?? 'فشل تبادل رمز الدخول مع TikTok');
+    }
+
+    const profileUrl = new URL('https://open.tiktokapis.com/v2/user/info/');
+    profileUrl.searchParams.set('fields', 'open_id,display_name,avatar_url');
+    const profileRes = await fetch(profileUrl.toString(), {
+      headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+    });
+    const profileJson = await profileRes.json();
+    const profile = profileJson?.data?.user;
+    if (!profileRes.ok || profileJson?.error?.code !== 'ok' || !profile?.open_id) {
+      throw new Error(profileJson?.error?.message ?? 'تعذّر جلب بيانات حساب TikTok');
+    }
+
+    const expiresAt = typeof tokenJson.expires_in === 'number'
+      ? new Date(Date.now() + tokenJson.expires_in * 1000).toISOString()
+      : null;
+    const displayName = String(profile.display_name ?? 'TikTok');
+
+    const { data: account, error: upsertError } = await supabase
+      .from('social_accounts')
+      .upsert({
+        workspace_id: stateRow.workspace_id,
+        platform: 'tiktok',
+        handle: displayName,
+        display_name: displayName,
+        status: 'connected',
+        needs_reconnect: false,
+        external_id: String(profile.open_id),
+        metadata: {
+          open_id: String(profile.open_id),
+          picture: profile.avatar_url ?? null,
+          granted_scopes: tokenJson.scope ?? null,
+        },
+        last_sync_at: new Date().toISOString(),
+      }, { onConflict: 'workspace_id,platform' })
+      .select()
+      .single();
+    if (upsertError || !account) throw new Error(upsertError?.message ?? 'تعذّر حفظ حساب TikTok');
+
+    await supabase.from('social_account_tokens').upsert({
+      account_id: account.id,
+      access_token: String(tokenJson.access_token),
+      refresh_token: tokenJson.refresh_token ? String(tokenJson.refresh_token) : null,
+      token_type: 'Bearer',
+      expires_at: expiresAt,
+      updated_at: new Date().toISOString(),
+    });
+
+    await markPlatformHealthy('tiktok');
+    return redirectToApp({ social: 'connected', platform: 'tiktok', tiktok: '1' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'فشل ربط حساب TikTok';
+    await supabase.from('social_platform_apps').update({ last_error: message, status: 'error' }).eq('platform_key', 'tiktok');
     return redirectToApp({ social: 'error', message });
   }
 }

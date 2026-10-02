@@ -445,7 +445,7 @@ export type AiRoutingPolicy = {
 
 // ---- Social Integrations (Super Admin) ----
 
-export type SocialPlatformAppKey = 'meta' | 'linkedin' | 'telegram' | 'x';
+export type SocialPlatformAppKey = 'meta' | 'linkedin' | 'telegram' | 'x' | 'threads' | 'tiktok';
 
 export type SocialPlatformApp = {
   id: string;

@@ -61,6 +61,104 @@ async function readToken(accountId: string): Promise<TokenRow | null> {
   return (data as TokenRow | null) ?? null;
 }
 
+async function saveRefreshedToken(accountId: string, payload: { access_token: string; refresh_token?: string | null; expires_in?: number }): Promise<TokenRow> {
+  const expiresAt = typeof payload.expires_in === 'number'
+    ? new Date(Date.now() + payload.expires_in * 1000).toISOString()
+    : null;
+  const current = await readToken(accountId);
+  const next: TokenRow = {
+    access_token: payload.access_token,
+    refresh_token: payload.refresh_token ?? current?.refresh_token ?? null,
+    expires_at: expiresAt,
+  };
+  await supabase.from('social_account_tokens').update({
+    access_token: next.access_token,
+    refresh_token: next.refresh_token,
+    expires_at: next.expires_at,
+    updated_at: new Date().toISOString(),
+  }).eq('account_id', accountId);
+  return next;
+}
+
+async function readPlatformCredentials(platformKey: string): Promise<{ appId: string; appSecret: string }> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps').select('app_id').eq('platform_key', platformKey).maybeSingle(),
+    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', platformKey).maybeSingle(),
+  ]);
+  if (!app?.app_id || !secret?.app_secret) throw new Error(`إعدادات ${platformKey} غير مكتملة`);
+  return { appId: String(app.app_id), appSecret: String(secret.app_secret) };
+}
+
+async function freshToken(account: AccountRow, token: TokenRow): Promise<TokenRow> {
+  const expiresAt = token.expires_at ? new Date(token.expires_at).getTime() : null;
+  const now = Date.now();
+
+  if (account.platform === 'threads') {
+    if (!expiresAt || expiresAt > now + 7 * 24 * 60 * 60 * 1000) return token;
+    if (expiresAt <= now || !token.access_token) throw new Error('انتهت صلاحية Threads — أعد ربط الحساب');
+    const url = new URL('https://graph.threads.net/refresh_access_token');
+    url.searchParams.set('grant_type', 'th_refresh_token');
+    url.searchParams.set('access_token', token.access_token);
+    const response = await fetch(url);
+    const body = await readJson(response);
+    if (!response.ok || typeof body.access_token !== 'string') throw new Error('فشل تجديد Threads — أعد ربط الحساب');
+    return saveRefreshedToken(account.id, {
+      access_token: String(body.access_token),
+      expires_in: typeof body.expires_in === 'number' ? body.expires_in : undefined,
+    });
+  }
+
+  if (account.platform === 'x' && expiresAt && expiresAt <= now + 10 * 60 * 1000) {
+    if (!token.refresh_token) throw new Error('انتهت صلاحية إكس — أعد ربط الحساب');
+    const credentials = await readPlatformCredentials('x');
+    const response = await fetch('https://api.twitter.com/2/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${btoa(`${credentials.appId}:${credentials.appSecret}`)}`,
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: token.refresh_token,
+        client_id: credentials.appId,
+      }),
+    });
+    const body = await readJson(response);
+    if (!response.ok || typeof body.access_token !== 'string') throw new Error(typeof body.error_description === 'string' ? body.error_description : 'فشل تجديد إكس');
+    return saveRefreshedToken(account.id, {
+      access_token: String(body.access_token),
+      refresh_token: typeof body.refresh_token === 'string' ? body.refresh_token : token.refresh_token,
+      expires_in: typeof body.expires_in === 'number' ? body.expires_in : undefined,
+    });
+  }
+
+  if (account.platform === 'tiktok' && expiresAt && expiresAt <= now + 30 * 60 * 1000) {
+    if (!token.refresh_token) throw new Error('انتهت صلاحية TikTok — أعد ربط الحساب');
+    const credentials = await readPlatformCredentials('tiktok');
+    const response = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cache-Control': 'no-cache' },
+      body: new URLSearchParams({
+        client_key: credentials.appId,
+        client_secret: credentials.appSecret,
+        grant_type: 'refresh_token',
+        refresh_token: token.refresh_token,
+      }),
+    });
+    const body = await readJson(response);
+    if (!response.ok || typeof body.access_token !== 'string') {
+      throw new Error(typeof body.error_description === 'string' ? body.error_description : 'فشل تجديد TikTok');
+    }
+    return saveRefreshedToken(account.id, {
+      access_token: String(body.access_token),
+      refresh_token: typeof body.refresh_token === 'string' ? body.refresh_token : token.refresh_token,
+      expires_in: typeof body.expires_in === 'number' ? body.expires_in : undefined,
+    });
+  }
+
+  return token;
+}
+
 async function readJson(response: Response): Promise<Record<string, unknown>> {
   return await response.json().catch(() => ({})) as Record<string, unknown>;
 }
@@ -207,9 +305,18 @@ async function checkWhatsApp(account: AccountRow, accessToken: string): Promise<
 }
 
 async function checkAccount(account: AccountRow): Promise<SyncOutcome> {
-  const token = await readToken(account.id);
-  if (!token?.access_token) return { ok: false, status: 'error', error: 'رمز الوصول غير موجود' };
-  if (tokenExpired(token)) return { ok: false, status: 'expired', error: 'انتهت صلاحية رمز الوصول؛ أعد ربط الحساب' };
+  const storedToken = await readToken(account.id);
+  if (!storedToken?.access_token) return { ok: false, status: 'error', error: 'رمز الوصول غير موجود' };
+
+  let token: TokenRow;
+  try {
+    token = await freshToken(account, storedToken);
+  } catch (error) {
+    return { ok: false, status: 'expired', error: error instanceof Error ? error.message : 'تعذّر تجديد رمز الوصول' };
+  }
+  if (!token.access_token || tokenExpired(token)) {
+    return { ok: false, status: 'expired', error: 'انتهت صلاحية رمز الوصول؛ أعد ربط الحساب' };
+  }
 
   switch (account.platform) {
     case 'facebook':

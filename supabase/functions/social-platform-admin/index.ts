@@ -41,13 +41,13 @@ async function requireSuperAdmin(req: Request): Promise<{ ok: true; userId: stri
   return { ok: true, userId: userData.user.id };
 }
 
-const VALID_PLATFORM_KEYS = new Set(['meta', 'linkedin', 'telegram', 'x']);
+const VALID_PLATFORM_KEYS = new Set(['meta', 'linkedin', 'telegram', 'x', 'threads', 'tiktok']);
 
 // Telegram doesn't use redirect-based OAuth (no app is "installed" on a
 // domain) — app_id holds the shared bot's @username and app_secret holds
 // its Bot Token, so there's no redirect_uri to generate or display.
 // Meta, LinkedIn, and X are all standard redirect-based OAuth apps.
-const REDIRECT_URI_PLATFORMS = new Set(['meta', 'linkedin', 'x']);
+const REDIRECT_URI_PLATFORMS = new Set(['meta', 'linkedin', 'x', 'threads', 'tiktok']);
 
 type Action =
   | { action: 'list_apps' }
