@@ -6,7 +6,7 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
 
-const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+const supabaseUrl = (Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '');
 const supabase = createClient(
   supabaseUrl,
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
@@ -14,16 +14,29 @@ const supabase = createClient(
 );
 
 type ProviderKey = 'evolution' | 'waha' | 'wppconnect';
-type Action = 'list_methods' | 'start' | 'status' | 'disconnect';
+type Action = 'list_methods' | 'start' | 'status' | 'disconnect' | 'switch';
 
 type ProviderConfig = {
-  provider_key: ProviderKey;
-  display_name: string;
-  base_url: string;
+  baseUrl: string;
+  credential: string;
   enabled: boolean;
   priority: number;
   status: 'not_configured' | 'connected' | 'error';
-  last_error: string | null;
+  lastError: string | null;
+  lastTestAt: string | null;
+};
+
+type ProviderBundle = {
+  version: 1;
+  activeProvider: ProviderKey | null;
+  providers: Partial<Record<ProviderKey, ProviderConfig>>;
+};
+
+const PROVIDERS: ProviderKey[] = ['evolution', 'waha', 'wppconnect'];
+const LABELS: Record<ProviderKey, string> = {
+  evolution: 'Evolution / Baileys',
+  waha: 'WAHA',
+  wppconnect: 'WPPConnect',
 };
 
 function json(status: number, body: unknown): Response {
@@ -33,13 +46,21 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-function randomSecret(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+function validProvider(value: unknown): value is ProviderKey {
+  return value === 'evolution' || value === 'waha' || value === 'wppconnect';
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, '');
 }
 
 function instanceName(workspaceId: string): string {
   return `socialpilot_${workspaceId.replace(/-/g, '')}`;
+}
+
+function randomSecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function normalizeState(value: unknown): string {
@@ -49,7 +70,86 @@ function normalizeState(value: unknown): string {
 function connectedState(provider: ProviderKey, state: string): boolean {
   if (provider === 'evolution') return ['open', 'connected'].includes(state);
   if (provider === 'waha') return ['working', 'connected', 'authenticated'].includes(state);
-  return ['connected', 'islogged', 'logged', 'open', 'inchat'].includes(state);
+  return ['connected', 'islogged', 'logged', 'open', 'inchat', 'ischat'].includes(state);
+}
+
+function parseBundle(secretValue: unknown, legacyBaseUrl?: unknown): ProviderBundle {
+  const raw = typeof secretValue === 'string' ? secretValue.trim() : '';
+  if (raw.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw) as ProviderBundle;
+      if (parsed?.version === 1 && parsed.providers && typeof parsed.providers === 'object') {
+        return parsed;
+      }
+    } catch {
+      // Legacy Evolution secret below.
+    }
+  }
+
+  const legacyUrl = typeof legacyBaseUrl === 'string' && /^https?:\/\//i.test(legacyBaseUrl)
+    ? normalizeBaseUrl(legacyBaseUrl)
+    : '';
+  if (raw && legacyUrl) {
+    return {
+      version: 1,
+      activeProvider: 'evolution',
+      providers: {
+        evolution: {
+          baseUrl: legacyUrl,
+          credential: raw,
+          enabled: true,
+          priority: 10,
+          status: 'connected',
+          lastError: null,
+          lastTestAt: null,
+        },
+      },
+    };
+  }
+  return { version: 1, activeProvider: null, providers: {} };
+}
+
+async function providerBundle(): Promise<ProviderBundle> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps')
+      .select('app_id,enabled,has_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
+    supabase.from('social_platform_app_secrets')
+      .select('app_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
+  ]);
+  if (!app?.has_secret || !secret?.app_secret) {
+    return { version: 1, activeProvider: null, providers: {} };
+  }
+  return parseBundle(secret.app_secret, app.app_id);
+}
+
+function healthyProviders(bundle: ProviderBundle, exclude?: ProviderKey | null): ProviderKey[] {
+  return PROVIDERS
+    .filter((provider) => provider !== exclude)
+    .filter((provider) => {
+      const config = bundle.providers[provider];
+      return Boolean(config?.enabled && config.status === 'connected' && config.baseUrl && config.credential);
+    })
+    .sort((a, b) => {
+      if (a === bundle.activeProvider) return -1;
+      if (b === bundle.activeProvider) return 1;
+      return (bundle.providers[a]?.priority ?? 999) - (bundle.providers[b]?.priority ?? 999);
+    });
+}
+
+function publicMethod(provider: ProviderKey, config: ProviderConfig | undefined, activeProvider: ProviderKey | null) {
+  return {
+    providerKey: provider,
+    displayName: LABELS[provider],
+    priority: config?.priority ?? (provider === 'evolution' ? 10 : provider === 'waha' ? 20 : 30),
+    status: config?.status ?? 'not_configured',
+    lastError: config?.lastError ?? null,
+    available: Boolean(config?.enabled && config.status === 'connected' && config.baseUrl && config.credential),
+    active: activeProvider === provider,
+  };
 }
 
 async function requireAdmin(req: Request, workspaceId: string): Promise<{ userId: string } | { response: Response }> {
@@ -57,60 +157,21 @@ async function requireAdmin(req: Request, workspaceId: string): Promise<{ userId
   if (!token) return { response: json(401, { error: 'Unauthorized' }) };
   const { data: auth } = await supabase.auth.getUser(token);
   if (!auth.user) return { response: json(401, { error: 'Unauthorized' }) };
-  const { data: member } = await supabase
-    .from('workspace_members')
+
+  const { data: member } = await supabase.from('workspace_members')
     .select('role')
     .eq('workspace_id', workspaceId)
     .eq('user_id', auth.user.id)
     .maybeSingle();
+
   if (!member || !['owner', 'admin'].includes(String(member.role))) {
     return { response: json(403, { error: 'ربط WhatsApp متاح لمالك أو Admin مساحة العمل فقط' }) };
   }
   return { userId: auth.user.id };
 }
 
-async function listMethods(): Promise<Array<ProviderConfig & { available: boolean }>> {
-  const { data } = await supabase
-    .from('whatsapp_provider_configs')
-    .select('provider_key,display_name,base_url,enabled,priority,status,last_error')
-    .order('priority')
-    .order('provider_key');
-  return (data ?? []).map((row) => ({
-    ...(row as ProviderConfig),
-    available: Boolean(row.enabled && row.status === 'connected' && row.base_url),
-  }));
-}
-
-async function providerConfig(providerKey: ProviderKey): Promise<{ config: ProviderConfig; secret: string }> {
-  const [{ data: config }, { data: secret }] = await Promise.all([
-    supabase
-      .from('whatsapp_provider_configs')
-      .select('provider_key,display_name,base_url,enabled,priority,status,last_error')
-      .eq('provider_key', providerKey)
-      .maybeSingle(),
-    supabase
-      .from('whatsapp_provider_secrets')
-      .select('primary_secret')
-      .eq('provider_key', providerKey)
-      .maybeSingle(),
-  ]);
-  if (!config || !config.enabled || config.status !== 'connected' || !config.base_url || !secret?.primary_secret) {
-    throw new Error(`مزود ${providerKey} غير جاهز`);
-  }
-  return {
-    config: config as ProviderConfig,
-    secret: String(secret.primary_secret),
-  };
-}
-
-async function firstAvailableProvider(): Promise<ProviderKey | null> {
-  const methods = await listMethods();
-  return methods.find((row) => row.available)?.provider_key ?? null;
-}
-
 async function loadAccount(workspaceId: string) {
-  const { data } = await supabase
-    .from('social_accounts')
+  const { data } = await supabase.from('social_accounts')
     .select('*')
     .eq('workspace_id', workspaceId)
     .eq('platform', 'whatsapp')
@@ -118,9 +179,9 @@ async function loadAccount(workspaceId: string) {
   return data;
 }
 
-async function loadTokens(accountId: string): Promise<{ accessToken: string | null; webhookSecret: string | null }> {
-  const { data } = await supabase
-    .from('social_account_tokens')
+async function loadTokens(accountId?: string | null): Promise<{ accessToken: string | null; webhookSecret: string | null }> {
+  if (!accountId) return { accessToken: null, webhookSecret: null };
+  const { data } = await supabase.from('social_account_tokens')
     .select('access_token,refresh_token')
     .eq('account_id', accountId)
     .maybeSingle();
@@ -128,50 +189,6 @@ async function loadTokens(accountId: string): Promise<{ accessToken: string | nu
     accessToken: typeof data?.access_token === 'string' ? data.access_token : null,
     webhookSecret: typeof data?.refresh_token === 'string' ? data.refresh_token : null,
   };
-}
-
-async function saveAccount(params: {
-  workspaceId: string;
-  provider: ProviderKey;
-  instance: string;
-  webhookSecret: string;
-  sessionToken?: string | null;
-  state: string;
-}) {
-  const connected = connectedState(params.provider, params.state);
-  const { data: account, error } = await supabase
-    .from('social_accounts')
-    .upsert({
-      workspace_id: params.workspaceId,
-      platform: 'whatsapp',
-      external_id: params.instance,
-      handle: 'WhatsApp Web',
-      display_name: 'WhatsApp',
-      status: connected ? 'connected' : 'error',
-      needs_reconnect: !connected,
-      metadata: {
-        provider: params.provider,
-        instance_name: params.instance,
-        onboarding_state: connected ? 'ready' : 'scan_qr',
-        provider_state: params.state,
-      },
-      last_sync_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'workspace_id,platform' })
-    .select()
-    .single();
-  if (error || !account) throw new Error(error?.message ?? 'تعذّر حفظ جلسة WhatsApp');
-
-  await supabase.from('social_account_tokens').upsert({
-    account_id: account.id,
-    access_token: params.sessionToken ?? `${params.provider}-provider`,
-    refresh_token: params.webhookSecret,
-    token_type: 'provider_session',
-    expires_at: null,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'account_id' });
-
-  return account;
 }
 
 async function requestJson(
@@ -186,18 +203,30 @@ async function requestJson(
   return { response, body };
 }
 
-async function evolutionState(baseUrl: string, apiKey: string, instance: string): Promise<string> {
-  let result = await requestJson(`${baseUrl}/instance/connectionState/${encodeURIComponent(instance)}`, {
-    headers: { apikey: apiKey },
-  });
+function qrFrom(body: Record<string, unknown>) {
+  const qrcode = body.qrcode as Record<string, unknown> | undefined;
+  const data = body.data as Record<string, unknown> | undefined;
+  const base64 = [qrcode?.base64, body.base64, body.qrCode, body.qrcode, data?.base64, data?.qrcode, data?.qrCode]
+    .find((value) => typeof value === 'string' && value.length > 20) as string | undefined;
+  const code = [qrcode?.code, body.code, data?.code, data?.value]
+    .find((value) => typeof value === 'string' && value.length > 3) as string | undefined;
+  const pairing = [qrcode?.pairingCode, body.pairingCode, body.pairing_code, data?.pairingCode]
+    .find((value) => typeof value === 'string' && value.length > 2) as string | undefined;
+  return { qrBase64: base64 ?? null, qrCode: code ?? null, pairingCode: pairing ?? null };
+}
+
+async function evolutionState(config: ProviderConfig, instance: string): Promise<string> {
+  let result = await requestJson(
+    `${normalizeBaseUrl(config.baseUrl)}/instance/connectionState/${encodeURIComponent(instance)}`,
+    { headers: { apikey: config.credential } },
+  );
   if (result.response.ok) {
     const nested = result.body.instance as Record<string, unknown> | undefined;
     return normalizeState(nested?.state ?? result.body.state);
   }
-
   result = await requestJson(
-    `${baseUrl}/instance/fetchInstances?instanceName=${encodeURIComponent(instance)}`,
-    { headers: { apikey: apiKey } },
+    `${normalizeBaseUrl(config.baseUrl)}/instance/fetchInstances?instanceName=${encodeURIComponent(instance)}`,
+    { headers: { apikey: config.credential } },
   );
   if (!result.response.ok) return 'missing';
   const rows = Array.isArray(result.body) ? result.body : ((result.body.instances as unknown[]) ?? []);
@@ -205,32 +234,16 @@ async function evolutionState(baseUrl: string, apiKey: string, instance: string)
   return normalizeState(row?.connectionStatus ?? row?.connectionState ?? row?.state);
 }
 
-function qrFrom(body: Record<string, unknown>): { qrBase64: string | null; qrCode: string | null; pairingCode: string | null } {
-  const qrcode = body.qrcode as Record<string, unknown> | undefined;
-  const data = body.data as Record<string, unknown> | undefined;
-  const candidates = [qrcode?.base64, body.base64, body.qrcode, data?.qrcode, data?.qrCode];
-  const base64 = candidates.find((value) => typeof value === 'string' && value.length > 50) as string | undefined;
-  const code = [qrcode?.code, body.code, data?.code].find((value) => typeof value === 'string') as string | undefined;
-  const pairing = [qrcode?.pairingCode, body.pairingCode, data?.pairingCode].find((value) => typeof value === 'string') as string | undefined;
-  return {
-    qrBase64: base64 ?? null,
-    qrCode: code ?? null,
-    pairingCode: pairing ?? null,
-  };
-}
-
-async function evolutionStart(params: {
-  baseUrl: string; apiKey: string; instance: string; webhookSecret: string;
-}) {
-  const webhookUrl = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/whatsapp-provider-webhook?provider=evolution`;
-  let state = await evolutionState(params.baseUrl, params.apiKey, params.instance);
+async function evolutionStart(config: ProviderConfig, instance: string, webhookSecret: string) {
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  let state = await evolutionState(config, instance);
 
   if (state === 'missing' || state === 'unknown') {
-    const created = await requestJson(`${params.baseUrl}/instance/create`, {
+    const created = await requestJson(`${baseUrl}/instance/create`, {
       method: 'POST',
-      headers: { apikey: params.apiKey, 'Content-Type': 'application/json' },
+      headers: { apikey: config.credential, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        instanceName: params.instance,
+        instanceName: instance,
         integration: 'WHATSAPP-BAILEYS',
         qrcode: true,
         rejectCall: true,
@@ -242,259 +255,311 @@ async function evolutionStart(params: {
       }),
     });
     if (!created.response.ok && created.response.status !== 409) {
-      throw new Error(`Evolution create HTTP ${created.response.status}`);
+      throw new Error(String(created.body.message ?? created.body.error ?? `Evolution create HTTP ${created.response.status}`));
     }
   }
 
   const webhookPayload = {
     webhook: {
       enabled: true,
-      url: webhookUrl,
+      url: `${supabaseUrl}/functions/v1/whatsapp-evolution-webhook`,
       webhookByEvents: false,
       webhookBase64: false,
-      events: [
-        'QRCODE_UPDATED',
-        'CONNECTION_UPDATE',
-        'MESSAGES_UPSERT',
-        'MESSAGES_UPDATE',
-        'SEND_MESSAGE',
-        'SEND_MESSAGE_UPDATE',
-      ],
-      headers: { 'x-socialpilot-secret': params.webhookSecret },
+      events: ['QRCODE_UPDATED', 'CONNECTION_UPDATE', 'MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'SEND_MESSAGE', 'SEND_MESSAGE_UPDATE'],
+      headers: { 'x-socialpilot-secret': webhookSecret },
     },
   };
-  let webhook = await requestJson(
-    `${params.baseUrl}/webhook/set/${encodeURIComponent(params.instance)}`,
-    {
-      method: 'POST',
-      headers: { apikey: params.apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify(webhookPayload),
-    },
-  );
-  if (webhook.response.status === 404) {
-    webhook = await requestJson(
-      `${params.baseUrl}/event/webhook/set/${encodeURIComponent(params.instance)}`,
-      {
-        method: 'POST',
-        headers: { apikey: params.apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify(webhookPayload),
-      },
-    );
-  }
-  if (!webhook.response.ok) throw new Error(`Evolution webhook HTTP ${webhook.response.status}`);
-
-  let connect = await requestJson(
-    `${params.baseUrl}/instance/connect/${encodeURIComponent(params.instance)}`,
-    { headers: { apikey: params.apiKey, Accept: 'application/json' } },
-  );
-  if (!connect.response.ok && connect.response.status !== 409) {
-    connect = await requestJson(
-      `${params.baseUrl}/instance/connect/${encodeURIComponent(params.instance)}`,
-      { method: 'POST', headers: { apikey: params.apiKey, Accept: 'application/json' } },
-    );
-  }
-  state = await evolutionState(params.baseUrl, params.apiKey, params.instance);
-  return { state, ...qrFrom(connect.body), sessionToken: null };
-}
-
-async function evolutionDisconnect(baseUrl: string, apiKey: string, instance: string): Promise<void> {
-  await fetch(`${baseUrl}/instance/logout/${encodeURIComponent(instance)}`, {
-    method: 'DELETE',
-    headers: { apikey: apiKey },
-  }).catch(() => undefined);
-  await fetch(`${baseUrl}/instance/delete/${encodeURIComponent(instance)}`, {
-    method: 'DELETE',
-    headers: { apikey: apiKey },
-  }).catch(() => undefined);
-}
-
-async function wahaState(baseUrl: string, apiKey: string, instance: string): Promise<string> {
-  const result = await requestJson(`${baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
-    headers: { 'X-Api-Key': apiKey, Accept: 'application/json' },
+  let hook = await requestJson(`${baseUrl}/webhook/set/${encodeURIComponent(instance)}`, {
+    method: 'POST',
+    headers: { apikey: config.credential, 'Content-Type': 'application/json' },
+    body: JSON.stringify(webhookPayload),
   });
+  if (hook.response.status === 404) {
+    hook = await requestJson(`${baseUrl}/event/webhook/set/${encodeURIComponent(instance)}`, {
+      method: 'POST',
+      headers: { apikey: config.credential, 'Content-Type': 'application/json' },
+      body: JSON.stringify(webhookPayload),
+    });
+  }
+  if (!hook.response.ok) throw new Error(`Evolution webhook HTTP ${hook.response.status}`);
+
+  let connect = await requestJson(`${baseUrl}/instance/connect/${encodeURIComponent(instance)}`, {
+    headers: { apikey: config.credential, Accept: 'application/json' },
+  });
+  if (!connect.response.ok && connect.response.status !== 409) {
+    connect = await requestJson(`${baseUrl}/instance/connect/${encodeURIComponent(instance)}`, {
+      method: 'POST',
+      headers: { apikey: config.credential, Accept: 'application/json' },
+    });
+  }
+  if (!connect.response.ok && connect.response.status !== 409) {
+    throw new Error(String(connect.body.message ?? connect.body.error ?? `Evolution connect HTTP ${connect.response.status}`));
+  }
+
+  state = await evolutionState(config, instance);
+  return { state, ...qrFrom(connect.body), sessionToken: null as string | null };
+}
+
+async function evolutionDisconnect(config: ProviderConfig, instance: string): Promise<void> {
+  const headers = { apikey: config.credential };
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  await fetch(`${baseUrl}/instance/logout/${encodeURIComponent(instance)}`, { method: 'DELETE', headers }).catch(() => null);
+  await fetch(`${baseUrl}/instance/delete/${encodeURIComponent(instance)}`, { method: 'DELETE', headers }).catch(() => null);
+}
+
+async function wahaState(config: ProviderConfig, instance: string): Promise<string> {
+  const result = await requestJson(
+    `${normalizeBaseUrl(config.baseUrl)}/api/sessions/${encodeURIComponent(instance)}`,
+    { headers: { 'X-Api-Key': config.credential, Accept: 'application/json' } },
+  );
   if (result.response.status === 404) return 'missing';
   if (!result.response.ok) return 'unknown';
   return normalizeState(result.body.status ?? result.body.state);
 }
 
-async function wahaStart(params: {
-  baseUrl: string; apiKey: string; instance: string; webhookSecret: string;
-}) {
-  const webhookUrl = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/whatsapp-provider-webhook?provider=waha`;
-  let state = await wahaState(params.baseUrl, params.apiKey, params.instance);
+async function wahaStart(config: ProviderConfig, instance: string, webhookSecret: string) {
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const headers = {
+    'X-Api-Key': config.credential,
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+  const sessionConfig = {
+    name: instance,
+    start: true,
+    config: {
+      client: { deviceName: 'SocialPilot', browserName: 'Chrome' },
+      ignore: { status: true, groups: true, channels: true },
+      webhooks: [{
+        url: `${supabaseUrl}/functions/v1/whatsapp-waha-webhook`,
+        events: ['message', 'message.ack', 'session.status'],
+        hmac: { key: webhookSecret },
+        customHeaders: [{ name: 'x-socialpilot-secret', value: webhookSecret }],
+        retries: { policy: 'exponential', delaySeconds: 2, attempts: 8 },
+      }],
+    },
+  };
+
+  let state = await wahaState(config, instance);
   if (state === 'missing' || state === 'unknown') {
-    const created = await requestJson(`${params.baseUrl}/api/sessions`, {
+    let created = await requestJson(`${baseUrl}/api/sessions`, {
       method: 'POST',
-      headers: { 'X-Api-Key': params.apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        name: params.instance,
-        config: {
-          webhooks: [{
-            url: webhookUrl,
-            events: ['message', 'message.ack', 'session.status'],
-            customHeaders: [{ name: 'x-socialpilot-secret', value: params.webhookSecret }],
-            hmac: { key: params.webhookSecret },
-            retries: { policy: 'linear', delaySeconds: 2, attempts: 5 },
-          }],
-        },
-      }),
+      headers,
+      body: JSON.stringify(sessionConfig),
     });
+    if (!created.response.ok && [400, 409, 422].includes(created.response.status)) {
+      created = await requestJson(`${baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(sessionConfig),
+      });
+    }
     if (!created.response.ok && created.response.status !== 409) {
-      throw new Error(`WAHA create session HTTP ${created.response.status}`);
+      throw new Error(String(created.body.message ?? created.body.error ?? `WAHA create HTTP ${created.response.status}`));
     }
   }
 
-  const started = await requestJson(
-    `${params.baseUrl}/api/sessions/${encodeURIComponent(params.instance)}/start`,
-    {
-      method: 'POST',
-      headers: { 'X-Api-Key': params.apiKey, Accept: 'application/json' },
-    },
-  );
+  const started = await requestJson(`${baseUrl}/api/sessions/${encodeURIComponent(instance)}/start`, {
+    method: 'POST',
+    headers,
+    body: '{}',
+  });
   if (!started.response.ok && ![409, 422].includes(started.response.status)) {
-    throw new Error(`WAHA start session HTTP ${started.response.status}`);
+    throw new Error(String(started.body.message ?? started.body.error ?? `WAHA start HTTP ${started.response.status}`));
   }
 
-  state = await wahaState(params.baseUrl, params.apiKey, params.instance);
-  const qr = await requestJson(
-    `${params.baseUrl}/api/${encodeURIComponent(params.instance)}/auth/qr`,
-    {
-      headers: { 'X-Api-Key': params.apiKey, Accept: 'application/json' },
-    },
-  );
-  const qrData = typeof qr.body.data === 'string' ? qr.body.data : null;
-  const qrCode = typeof qr.body.value === 'string' ? qr.body.value : null;
-  return {
-    state,
-    qrBase64: qrData,
-    qrCode,
-    pairingCode: null,
-    sessionToken: null,
-  };
+  state = await wahaState(config, instance);
+  if (connectedState('waha', state)) {
+    return { state, qrBase64: null, qrCode: null, pairingCode: null, sessionToken: null as string | null };
+  }
+
+  const qrResponse = await fetch(`${baseUrl}/api/${encodeURIComponent(instance)}/auth/qr`, {
+    headers: { 'X-Api-Key': config.credential, Accept: 'application/json' },
+    signal: AbortSignal.timeout(12000),
+  });
+
+  let qrBase64: string | null = null;
+  let qrCode: string | null = null;
+  if (qrResponse.ok) {
+    const contentType = qrResponse.headers.get('content-type') ?? '';
+    if (contentType.includes('application/json')) {
+      const body = await qrResponse.json().catch(() => ({})) as Record<string, unknown>;
+      const qr = qrFrom(body);
+      qrBase64 = qr.qrBase64;
+      qrCode = qr.qrCode;
+      if (!qrBase64 && typeof body.data === 'string') qrBase64 = body.data;
+    } else {
+      const bytes = new Uint8Array(await qrResponse.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
+      }
+      qrBase64 = `data:${contentType || 'image/png'};base64,${btoa(binary)}`;
+    }
+  }
+
+  return { state, qrBase64, qrCode, pairingCode: null, sessionToken: null as string | null };
 }
 
-async function wahaDisconnect(baseUrl: string, apiKey: string, instance: string): Promise<void> {
-  await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(instance)}/logout`, {
-    method: 'POST',
-    headers: { 'X-Api-Key': apiKey },
-  }).catch(() => undefined);
-  await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
-    method: 'DELETE',
-    headers: { 'X-Api-Key': apiKey },
-  }).catch(() => undefined);
+async function wahaDisconnect(config: ProviderConfig, instance: string): Promise<void> {
+  const headers = { 'X-Api-Key': config.credential, Accept: 'application/json' };
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(instance)}/logout`, { method: 'POST', headers }).catch(() => null);
+  await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(instance)}`, { method: 'DELETE', headers }).catch(() => null);
 }
 
-async function wppGenerateToken(baseUrl: string, secretKey: string, instance: string): Promise<{ token: string; fallback: string | null }> {
+function wppBearer(body: Record<string, unknown>): string | null {
+  if (typeof body.token === 'string') return body.token;
+  if (typeof body.full === 'string') return body.full.replace(/^wppconnect:/, '');
+  return null;
+}
+
+async function wppGenerateToken(config: ProviderConfig, instance: string): Promise<string> {
   const result = await requestJson(
-    `${baseUrl}/api/${encodeURIComponent(instance)}/${encodeURIComponent(secretKey)}/generate-token`,
+    `${normalizeBaseUrl(config.baseUrl)}/api/${encodeURIComponent(instance)}/${encodeURIComponent(config.credential)}/generate-token`,
     { method: 'POST', headers: { Accept: 'application/json' } },
   );
-  if (!result.response.ok) throw new Error(`WPPConnect generate-token HTTP ${result.response.status}`);
-  const full = typeof result.body.full === 'string' ? result.body.full : null;
-  const raw = typeof result.body.token === 'string' ? result.body.token : null;
-  const token = full || raw;
-  if (!token) throw new Error('WPPConnect لم يرجع Session Token');
-  return { token, fallback: full && raw && full !== raw ? raw : null };
+  const token = wppBearer(result.body);
+  if (!result.response.ok || !token) {
+    throw new Error(String(result.body.message ?? result.body.error ?? `WPPConnect token HTTP ${result.response.status}`));
+  }
+  return token;
 }
 
 async function wppRequest(
-  baseUrl: string,
+  config: ProviderConfig,
   instance: string,
   path: string,
   token: string,
-  fallbackToken: string | null,
   init: RequestInit = {},
-): Promise<{ response: Response; body: Record<string, unknown>; tokenUsed: string }> {
-  const call = async (bearer: string) => requestJson(`${baseUrl}/api/${encodeURIComponent(instance)}${path}`, {
+) {
+  return requestJson(`${normalizeBaseUrl(config.baseUrl)}/api/${encodeURIComponent(instance)}${path}`, {
     ...init,
     headers: {
-      Authorization: `Bearer ${bearer}`,
+      Authorization: `Bearer ${token}`,
       Accept: 'application/json',
       ...(init.body ? { 'Content-Type': 'application/json' } : {}),
       ...(init.headers ?? {}),
     },
   });
-  let result = await call(token);
-  let used = token;
-  if (result.response.status === 401 && fallbackToken) {
-    result = await call(fallbackToken);
-    used = fallbackToken;
-  }
-  return { ...result, tokenUsed: used };
 }
 
-async function wppState(baseUrl: string, instance: string, token: string): Promise<string> {
-  const result = await wppRequest(baseUrl, instance, '/check-connection-session', token, null);
+async function wppState(config: ProviderConfig, instance: string, token: string): Promise<string> {
+  const result = await wppRequest(config, instance, '/check-connection-session', token);
   if (!result.response.ok) return result.response.status === 404 ? 'missing' : 'unknown';
-  const status = result.body.status ?? result.body.message ?? result.body.state ?? result.body.response;
-  return normalizeState(status);
+  return normalizeState(result.body.status ?? result.body.message ?? result.body.state ?? result.body.response);
 }
 
-function wppQr(body: Record<string, unknown>) {
-  const data = body.data as Record<string, unknown> | undefined;
-  const base64 = [
-    body.qrcode,
-    body.qrCode,
-    body.base64,
-    data?.qrcode,
-    data?.qrCode,
-    data?.base64,
-  ].find((value) => typeof value === 'string' && value.length > 50) as string | undefined;
-  return { qrBase64: base64 ?? null, qrCode: null, pairingCode: null };
-}
-
-async function wppStart(params: {
-  baseUrl: string; secretKey: string; instance: string; webhookSecret: string;
-}) {
-  const generated = await wppGenerateToken(params.baseUrl, params.secretKey, params.instance);
-  const webhookUrl = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/whatsapp-provider-webhook?provider=wppconnect&secret=${encodeURIComponent(params.webhookSecret)}`;
-
-  let start = await wppRequest(
-    params.baseUrl,
-    params.instance,
-    '/start-session',
-    generated.token,
-    generated.fallback,
-    {
-      method: 'POST',
-      body: JSON.stringify({ webhook: webhookUrl, waitQrCode: true }),
-    },
-  );
-  if (!start.response.ok && start.response.status !== 409) {
-    throw new Error(`WPPConnect start-session HTTP ${start.response.status}`);
-  }
-
-  const tokenUsed = start.tokenUsed;
-  let state = await wppState(params.baseUrl, params.instance, tokenUsed);
-  let qr = wppQr(start.body);
-  if (!qr.qrBase64 && !connectedState('wppconnect', state)) {
-    const qrResult = await wppRequest(
-      params.baseUrl,
-      params.instance,
-      '/qrcode-session',
-      tokenUsed,
-      null,
-    );
-    if (qrResult.response.ok) qr = wppQr(qrResult.body);
-  }
-  return { state, ...qr, sessionToken: tokenUsed };
-}
-
-async function wppDisconnect(baseUrl: string, instance: string, sessionToken: string): Promise<void> {
-  await fetch(`${baseUrl}/api/${encodeURIComponent(instance)}/logout-session`, {
+async function wppStart(config: ProviderConfig, instance: string, webhookSecret: string) {
+  const token = await wppGenerateToken(config, instance);
+  const webhook = `${supabaseUrl}/functions/v1/whatsapp-wppconnect-webhook?secret=${encodeURIComponent(webhookSecret)}&session=${encodeURIComponent(instance)}`;
+  const started = await wppRequest(config, instance, '/start-session', token, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${sessionToken}`, Accept: 'application/json' },
-  }).catch(() => undefined);
+    body: JSON.stringify({ webhook, waitQrCode: true }),
+  });
+  if (!started.response.ok && started.response.status !== 409) {
+    throw new Error(String(started.body.message ?? started.body.error ?? `WPPConnect start HTTP ${started.response.status}`));
+  }
+
+  const state = await wppState(config, instance, token);
+  let qr = qrFrom(started.body);
+  if (!connectedState('wppconnect', state) && !qr.qrBase64 && !qr.qrCode) {
+    const qrResult = await wppRequest(config, instance, '/qrcode-session', token);
+    if (qrResult.response.ok) qr = qrFrom(qrResult.body);
+  }
+  return { state, ...qr, sessionToken: token };
 }
 
-async function getState(provider: ProviderKey, config: ProviderConfig, secret: string, account: Record<string, unknown>) {
-  const instance = String((account.metadata as Record<string, unknown> | null)?.instance_name ?? account.external_id ?? '');
-  if (!instance) return 'missing';
-  if (provider === 'evolution') return evolutionState(config.base_url, secret, instance);
-  if (provider === 'waha') return wahaState(config.base_url, secret, instance);
-  const tokens = await loadTokens(String(account.id));
-  if (!tokens.accessToken) return 'missing';
-  return wppState(config.base_url, instance, tokens.accessToken);
+async function wppDisconnect(config: ProviderConfig, instance: string, token?: string | null): Promise<void> {
+  const bearer = token && token !== 'provider-session' ? token : await wppGenerateToken(config, instance);
+  await fetch(`${normalizeBaseUrl(config.baseUrl)}/api/${encodeURIComponent(instance)}/logout-session`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/json' },
+  }).catch(() => null);
+}
+
+async function startProvider(
+  provider: ProviderKey,
+  config: ProviderConfig,
+  instance: string,
+  webhookSecret: string,
+) {
+  if (provider === 'evolution') return evolutionStart(config, instance, webhookSecret);
+  if (provider === 'waha') return wahaStart(config, instance, webhookSecret);
+  return wppStart(config, instance, webhookSecret);
+}
+
+async function providerState(
+  provider: ProviderKey,
+  config: ProviderConfig,
+  instance: string,
+  sessionToken?: string | null,
+): Promise<{ state: string; sessionToken?: string | null }> {
+  if (provider === 'evolution') return { state: await evolutionState(config, instance) };
+  if (provider === 'waha') return { state: await wahaState(config, instance) };
+  const token = sessionToken && sessionToken !== 'provider-session'
+    ? sessionToken
+    : await wppGenerateToken(config, instance);
+  return { state: await wppState(config, instance, token), sessionToken: token };
+}
+
+async function disconnectProvider(
+  provider: ProviderKey,
+  config: ProviderConfig,
+  instance: string,
+  sessionToken?: string | null,
+): Promise<void> {
+  if (provider === 'evolution') return evolutionDisconnect(config, instance);
+  if (provider === 'waha') return wahaDisconnect(config, instance);
+  return wppDisconnect(config, instance, sessionToken);
+}
+
+async function saveAccount(params: {
+  workspaceId: string;
+  provider: ProviderKey;
+  instance: string;
+  webhookSecret: string;
+  result: Awaited<ReturnType<typeof startProvider>>;
+  previousAccount?: Record<string, unknown> | null;
+}) {
+  const connected = connectedState(params.provider, params.result.state);
+  const previousMetadata = (params.previousAccount?.metadata ?? {}) as Record<string, unknown>;
+
+  const { data: account, error } = await supabase.from('social_accounts').upsert({
+    workspace_id: params.workspaceId,
+    platform: 'whatsapp',
+    external_id: params.instance,
+    handle: typeof params.previousAccount?.handle === 'string' ? params.previousAccount.handle : 'WhatsApp Web',
+    display_name: typeof params.previousAccount?.display_name === 'string' ? params.previousAccount.display_name : 'WhatsApp',
+    status: connected ? 'connected' : 'error',
+    needs_reconnect: !connected,
+    metadata: {
+      ...previousMetadata,
+      provider: params.provider,
+      provider_label: LABELS[params.provider],
+      instance_name: params.instance,
+      onboarding_state: connected ? 'ready' : 'scan_qr',
+      provider_state: params.result.state,
+      provider_switched_at: previousMetadata.provider && previousMetadata.provider !== params.provider
+        ? new Date().toISOString()
+        : previousMetadata.provider_switched_at ?? null,
+    },
+    last_sync_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'workspace_id,platform' }).select().single();
+
+  if (error || !account) throw new Error(error?.message ?? 'تعذّر حفظ جلسة WhatsApp');
+
+  await supabase.from('social_account_tokens').upsert({
+    account_id: account.id,
+    access_token: params.result.sessionToken ?? 'provider-session',
+    refresh_token: params.webhookSecret,
+    token_type: `whatsapp_${params.provider}`,
+    expires_at: null,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'account_id' });
+
+  return account;
 }
 
 Deno.serve(async (req: Request) => {
@@ -512,167 +577,195 @@ Deno.serve(async (req: Request) => {
   const auth = await requireAdmin(req, workspaceId);
   if ('response' in auth) return auth.response;
 
+  const bundle = await providerBundle();
+  const methods = PROVIDERS.map((provider) => publicMethod(provider, bundle.providers[provider], bundle.activeProvider));
+
   if (body.action === 'list_methods') {
-    const methods = await listMethods();
-    return json(200, {
-      methods: methods.map(({ provider_key, display_name, priority, status, last_error, available }) => ({
-        providerKey: provider_key,
-        displayName: display_name,
-        priority,
-        status,
-        lastError: last_error,
-        available,
-      })),
-    });
+    return json(200, { methods, activeProvider: bundle.activeProvider });
   }
 
   let account = await loadAccount(workspaceId);
+  const metadata = (account?.metadata ?? {}) as Record<string, unknown>;
+  const currentProvider = validProvider(metadata.provider) ? metadata.provider : null;
+  const instance = String(metadata.instance_name ?? instanceName(workspaceId));
+  const tokens = await loadTokens(account?.id);
 
   try {
     if (body.action === 'status') {
-      if (!account || !account.metadata?.provider) {
-        return json(200, { configured: true, connected: false, state: 'not_created', providerKey: null });
+      if (!account || !currentProvider) {
+        return json(200, {
+          configured: healthyProviders(bundle).length > 0,
+          connected: false,
+          state: 'not_created',
+          providerKey: null,
+          alternatives: healthyProviders(bundle),
+        });
       }
-      const provider = String(account.metadata.provider) as ProviderKey;
-      if (!VALID_PROVIDER(provider)) {
-        return json(200, { configured: false, connected: false, state: 'legacy_provider', providerKey: provider });
+      const config = bundle.providers[currentProvider];
+      if (!config?.enabled || config.status !== 'connected') {
+        return json(200, {
+          configured: healthyProviders(bundle).length > 0,
+          connected: false,
+          state: 'provider_unavailable',
+          providerKey: currentProvider,
+          providerLabel: LABELS[currentProvider],
+          alternatives: healthyProviders(bundle, currentProvider),
+        });
       }
-      const { config, secret } = await providerConfig(provider);
-      const state = await getState(provider, config, secret, account);
-      const connected = connectedState(provider, state);
-      if (connected !== (account.status === 'connected') || state !== account.metadata?.provider_state) {
-        const { data: updated } = await supabase.from('social_accounts').update({
-          status: connected ? 'connected' : 'error',
-          needs_reconnect: !connected,
-          last_sync_at: new Date().toISOString(),
-          metadata: {
-            ...(account.metadata ?? {}),
-            provider_state: state,
-            onboarding_state: connected ? 'ready' : 'scan_qr',
-          },
-        }).eq('id', account.id).select().single();
-        if (updated) account = updated;
+
+      const statusResult = await providerState(currentProvider, config, instance, tokens.accessToken);
+      if (statusResult.sessionToken && statusResult.sessionToken !== tokens.accessToken && account?.id) {
+        await supabase.from('social_account_tokens').update({
+          access_token: statusResult.sessionToken,
+          updated_at: new Date().toISOString(),
+        }).eq('account_id', account.id);
       }
+      const connected = connectedState(currentProvider, statusResult.state);
+      const { data: updated } = await supabase.from('social_accounts').update({
+        status: connected ? 'connected' : 'error',
+        needs_reconnect: !connected,
+        last_sync_at: new Date().toISOString(),
+        metadata: {
+          ...metadata,
+          provider_state: statusResult.state,
+          onboarding_state: connected ? 'ready' : 'scan_qr',
+        },
+      }).eq('id', account.id).select().single();
+      if (updated) account = updated;
+
       return json(200, {
         configured: true,
         connected,
-        state,
-        providerKey: provider,
+        state: statusResult.state,
+        providerKey: currentProvider,
+        providerLabel: LABELS[currentProvider],
         account,
+        alternatives: healthyProviders(bundle, currentProvider),
       });
     }
 
     if (body.action === 'disconnect') {
-      if (!account?.metadata?.provider) {
-        return json(200, { ok: true, connected: false, state: 'disconnected' });
+      if (account && currentProvider) {
+        const config = bundle.providers[currentProvider];
+        if (config) {
+          await disconnectProvider(currentProvider, config, instance, tokens.accessToken).catch(() => undefined);
+        }
+        await supabase.from('social_accounts').delete().eq('id', account.id).eq('workspace_id', workspaceId);
       }
-      const provider = String(account.metadata.provider) as ProviderKey;
-      if (VALID_PROVIDER(provider)) {
-        const { config, secret } = await providerConfig(provider);
-        const instance = String(account.metadata.instance_name ?? account.external_id ?? instanceName(workspaceId));
-        const tokens = await loadTokens(account.id);
-        if (provider === 'evolution') await evolutionDisconnect(config.base_url, secret, instance);
-        if (provider === 'waha') await wahaDisconnect(config.base_url, secret, instance);
-        if (provider === 'wppconnect' && tokens.accessToken) {
-          await wppDisconnect(config.base_url, instance, tokens.accessToken);
+      return json(200, {
+        ok: true,
+        configured: healthyProviders(bundle).length > 0,
+        connected: false,
+        state: 'disconnected',
+        providerKey: currentProvider,
+        alternatives: healthyProviders(bundle, currentProvider),
+      });
+    }
+
+    let candidates: ProviderKey[];
+    if (body.action === 'switch') {
+      if (account && currentProvider) {
+        const currentConfig = bundle.providers[currentProvider];
+        if (currentConfig) {
+          await disconnectProvider(currentProvider, currentConfig, instance, tokens.accessToken).catch(() => undefined);
         }
       }
-      await supabase.from('social_accounts').delete().eq('id', account.id).eq('workspace_id', workspaceId);
-      return json(200, { ok: true, connected: false, state: 'disconnected' });
-    }
-
-    const requested = body.providerKey ?? await firstAvailableProvider();
-    if (!requested || !VALID_PROVIDER(requested)) {
-      return json(409, { error: 'لا يوجد WhatsApp Provider متاح حاليًا' });
-    }
-
-    if (account?.metadata?.provider && account.metadata.provider !== requested && account.status === 'connected') {
-      return json(409, {
-        error: `WhatsApp متصل حاليًا عبر ${account.metadata.provider}. افصل الجلسة أولًا ثم اختر المزود البديل.`,
-        currentProvider: account.metadata.provider,
-      });
-    }
-
-    // A broken/non-connected old provider can be replaced safely.
-    if (account?.metadata?.provider && account.metadata.provider !== requested) {
-      const oldProvider = String(account.metadata.provider) as ProviderKey;
-      if (VALID_PROVIDER(oldProvider)) {
-        try {
-          const { config: oldConfig, secret: oldSecret } = await providerConfig(oldProvider);
-          const oldInstance = String(account.metadata.instance_name ?? account.external_id ?? instanceName(workspaceId));
-          const oldTokens = await loadTokens(account.id);
-          if (oldProvider === 'evolution') await evolutionDisconnect(oldConfig.base_url, oldSecret, oldInstance);
-          if (oldProvider === 'waha') await wahaDisconnect(oldConfig.base_url, oldSecret, oldInstance);
-          if (oldProvider === 'wppconnect' && oldTokens.accessToken) {
-            await wppDisconnect(oldConfig.base_url, oldInstance, oldTokens.accessToken);
-          }
-        } catch {
-          // Controlled migration continues even if the broken provider cannot be reached.
-        }
-      }
-    }
-
-    const { config, secret } = await providerConfig(requested);
-    const instance = instanceName(workspaceId);
-    const existingTokens = account?.id ? await loadTokens(account.id) : { webhookSecret: null, accessToken: null };
-    const webhookSecret = existingTokens.webhookSecret || randomSecret();
-
-    let result: {
-      state: string;
-      qrBase64: string | null;
-      qrCode: string | null;
-      pairingCode: string | null;
-      sessionToken: string | null;
-    };
-
-    if (requested === 'evolution') {
-      result = await evolutionStart({
-        baseUrl: config.base_url,
-        apiKey: secret,
-        instance,
-        webhookSecret,
-      });
-    } else if (requested === 'waha') {
-      result = await wahaStart({
-        baseUrl: config.base_url,
-        apiKey: secret,
-        instance,
-        webhookSecret,
-      });
+      candidates = body.providerKey && validProvider(body.providerKey)
+        ? [body.providerKey]
+        : healthyProviders(bundle, currentProvider);
     } else {
-      result = await wppStart({
-        baseUrl: config.base_url,
-        secretKey: secret,
-        instance,
-        webhookSecret,
+      if (account?.status === 'connected' && currentProvider && !body.providerKey) {
+        const config = bundle.providers[currentProvider];
+        if (config) {
+          const statusResult = await providerState(currentProvider, config, instance, tokens.accessToken);
+          if (connectedState(currentProvider, statusResult.state)) {
+            return json(200, {
+              ok: true,
+              configured: true,
+              connected: true,
+              state: statusResult.state,
+              providerKey: currentProvider,
+              providerLabel: LABELS[currentProvider],
+              accountId: account.id,
+              alternatives: healthyProviders(bundle, currentProvider),
+            });
+          }
+        }
+      }
+
+      candidates = body.providerKey && validProvider(body.providerKey)
+        ? [body.providerKey]
+        : currentProvider && bundle.providers[currentProvider]?.enabled && bundle.providers[currentProvider]?.status === 'connected'
+          ? [currentProvider, ...healthyProviders(bundle, currentProvider)]
+          : healthyProviders(bundle);
+    }
+
+    candidates = candidates.filter((provider, index) => candidates.indexOf(provider) === index);
+    if (candidates.length === 0) {
+      return json(409, { error: 'لا يوجد WhatsApp Provider سليم ومفعّل', attempts: [], methods });
+    }
+
+    if (body.providerKey && account?.status === 'connected' && currentProvider && body.providerKey !== currentProvider && body.action !== 'switch') {
+      return json(409, {
+        error: `WhatsApp متصل عبر ${LABELS[currentProvider]}. استخدم التحويل المنظم لمزود آخر بدل تشغيل جلستين لنفس الرقم.`,
+        currentProvider,
+        alternatives: healthyProviders(bundle, currentProvider),
       });
     }
 
-    account = await saveAccount({
-      workspaceId,
-      provider: requested,
-      instance,
-      webhookSecret,
-      sessionToken: result.sessionToken,
-      state: result.state,
-    });
+    const webhookSecret = body.action === 'switch' || !tokens.webhookSecret
+      ? randomSecret()
+      : tokens.webhookSecret;
+    const attempts: Array<{ provider: ProviderKey; ok: boolean; error?: string }> = [];
 
-    return json(200, {
-      ok: true,
-      configured: true,
-      connected: connectedState(requested, result.state),
-      state: result.state,
-      providerKey: requested,
-      qrBase64: result.qrBase64,
-      qrCode: result.qrCode,
-      pairingCode: result.pairingCode,
-      accountId: account.id,
+    for (const provider of candidates) {
+      const config = bundle.providers[provider];
+      if (!config?.enabled || config.status !== 'connected') {
+        attempts.push({ provider, ok: false, error: 'provider_not_healthy' });
+        continue;
+      }
+
+      try {
+        const result = await startProvider(provider, config, instance, webhookSecret);
+        account = await saveAccount({
+          workspaceId,
+          provider,
+          instance,
+          webhookSecret,
+          result,
+          previousAccount: account,
+        });
+        attempts.push({ provider, ok: true });
+
+        return json(200, {
+          ok: true,
+          configured: true,
+          connected: connectedState(provider, result.state),
+          state: result.state,
+          providerKey: provider,
+          providerLabel: LABELS[provider],
+          qrBase64: result.qrBase64,
+          qrCode: result.qrCode,
+          pairingCode: result.pairingCode,
+          accountId: account.id,
+          attempts,
+          alternatives: healthyProviders(bundle, provider),
+        });
+      } catch (error) {
+        attempts.push({
+          provider,
+          ok: false,
+          error: error instanceof Error ? error.message : 'provider_start_failed',
+        });
+      }
+    }
+
+    return json(502, {
+      error: 'فشلت كل طرق ربط WhatsApp المتاحة',
+      attempts,
+      alternatives: healthyProviders(bundle),
     });
   } catch (error) {
-    return json(502, { error: error instanceof Error ? error.message : 'تعذّر تشغيل WhatsApp' });
+    return json(502, { error: error instanceof Error ? error.message : 'تعذّر تشغيل WhatsApp Provider Router' });
   }
 });
-
-function VALID_PROVIDER(value: string): value is ProviderKey {
-  return value === 'evolution' || value === 'waha' || value === 'wppconnect';
-}
