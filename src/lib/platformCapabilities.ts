@@ -1,7 +1,7 @@
 import type { SocialPlatform, SocialPlatformAppKey } from './types';
 
 export type PlatformInboxMode = 'messages_comments' | 'messages' | 'comments' | 'none';
-export type PlatformConnectMode = 'oauth' | 'bot' | 'embedded' | 'managed' | 'unavailable';
+export type PlatformConnectMode = 'oauth' | 'bot' | 'qr' | 'managed' | 'unavailable';
 
 export type PlatformCapability = {
   appKey?: SocialPlatformAppKey;
@@ -86,14 +86,14 @@ export const PLATFORM_CAPABILITIES: Record<SocialPlatform, PlatformCapability> =
     note: 'نشر وجدولة + Inbox عبر البوت والقناة/السوبرجروب المربوط.',
   },
   whatsapp: {
-    appKey: 'meta',
-    connectMode: 'embedded',
+    appKey: 'whatsapp',
+    connectMode: 'qr',
     publish: false,
     schedule: false,
     inbox: 'messages',
     aiReply: true,
     media: ['text', 'image', 'video'],
-    note: 'ربط رسمي بزر واحد عبر Meta Embedded Signup، ثم Inbox + AI Reply + حالات التسليم والقراءة.',
+    note: 'ربط WhatsApp Web بالـQR عبر Evolution/Baileys: Inbox + AI Reply + نصوص وميديا بدون Cloud API.',
   },
 };
 

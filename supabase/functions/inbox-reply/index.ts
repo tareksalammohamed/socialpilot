@@ -43,6 +43,58 @@ type WhatsAppTemplateInput = {
   preview?: string;
 };
 
+async function evolutionConfig(): Promise<{ baseUrl: string; apiKey: string }> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps').select('app_id,enabled').eq('platform_key', 'whatsapp').maybeSingle(),
+    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', 'whatsapp').maybeSingle(),
+  ]);
+  if (!app?.enabled || !app.app_id || !secret?.app_secret) {
+    throw new Error('Evolution WhatsApp provider غير مُعد');
+  }
+  return {
+    baseUrl: String(app.app_id).trim().replace(/\/+$/, ''),
+    apiKey: String(secret.app_secret),
+  };
+}
+
+function evolutionRecipient(value: string): string {
+  if (value.endsWith('@s.whatsapp.net')) return value.replace('@s.whatsapp.net', '');
+  return value;
+}
+
+async function deliverEvolutionText(
+  conv: Conversation,
+  account: Record<string, unknown>,
+  content: string,
+): Promise<string | null> {
+  const metadata = (account.metadata ?? {}) as Record<string, unknown>;
+  const instance = typeof metadata.instance_name === 'string' ? metadata.instance_name : '';
+  if (!instance || !conv.external_participant_id) throw new Error('جلسة Evolution أو مستقبل WhatsApp غير موجود');
+  const cfg = await evolutionConfig();
+  const response = await fetch(`${cfg.baseUrl}/message/sendText/${encodeURIComponent(instance)}`, {
+    method: 'POST',
+    headers: { apikey: cfg.apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      number: evolutionRecipient(conv.external_participant_id),
+      text: content,
+      delay: 700,
+      linkPreview: true,
+    }),
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    const nested = body.response as Record<string, unknown> | undefined;
+    const message = nested?.message ?? body.message ?? body.error;
+    throw new Error(typeof message === 'string' ? message : `Evolution sendText HTTP ${response.status}`);
+  }
+  const key = body.key as Record<string, unknown> | undefined;
+  return typeof key?.id === 'string'
+    ? key.id
+    : typeof body.id === 'string'
+      ? body.id
+      : null;
+}
+
 async function getFreshAccessToken(accountId: string): Promise<string> {
   const { data: token } = await supabase
     .from('social_account_tokens')
@@ -109,6 +161,10 @@ async function deliverToPlatform(
   account: Record<string, unknown>,
   content: string,
 ): Promise<string | null> {
+  if (conv.platform === 'whatsapp' && (account.metadata as Record<string, unknown> | null)?.provider === 'evolution') {
+    return deliverEvolutionText(conv, account, content);
+  }
+
   const accessToken = await getFreshAccessToken(conv.account_id);
 
   if (conv.platform === 'facebook' || conv.platform === 'instagram') {
@@ -166,12 +222,8 @@ async function deliverToPlatform(
     const body = await res.json().catch(() => ({})) as Record<string, unknown>;
     if (!res.ok) {
       const apiError = body.error as Record<string, unknown> | undefined;
-      const code = Number(apiError?.code ?? 0);
-      if (code === 131047) {
-        throw new Error('انتهت نافذة خدمة WhatsApp لمدة 24 ساعة. يلزم إرسال Template معتمد لإعادة فتح المحادثة.');
-      }
       const detail = typeof apiError?.message === 'string' ? apiError.message : `HTTP ${res.status}`;
-      throw new Error(`WhatsApp Send API: ${detail}`);
+      throw new Error(`WhatsApp Cloud Send API: ${detail}`);
     }
     const messages = body.messages as Array<Record<string, unknown>> | undefined;
     return typeof messages?.[0]?.id === 'string' ? messages[0].id : null;
@@ -242,7 +294,11 @@ Deno.serve(async (req: Request) => {
   const { data: account } = await supabase.from('social_accounts').select('*').eq('id', conv.account_id).maybeSingle();
   if (!account) return jsonRes(409, { error: 'الحساب المرتبط بهذه المحادثة لم يعد موجودًا' });
 
-  if (conv.platform === 'whatsapp' && mode === 'text') {
+  const whatsappProvider = conv.platform === 'whatsapp'
+    ? String((account.metadata as Record<string, unknown> | null)?.provider ?? 'meta')
+    : null;
+
+  if (conv.platform === 'whatsapp' && whatsappProvider !== 'evolution' && mode === 'text') {
     const { data: latestInbound } = await supabase
       .from('inbox_messages')
       .select('created_at')
@@ -261,6 +317,9 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    if (mode === 'template' && conv.platform === 'whatsapp' && whatsappProvider === 'evolution') {
+      return jsonRes(400, { error: 'Templates خاصة بـWhatsApp Cloud API وليست مستخدمة مع Evolution/Baileys.' });
+    }
     if (mode === 'template' && conv.platform !== 'whatsapp') {
       return jsonRes(400, { error: 'إرسال Templates متاح لمحادثات WhatsApp فقط' });
     }
@@ -292,6 +351,7 @@ Deno.serve(async (req: Request) => {
             template_variables: template?.variables ?? [],
           } : {}),
           ...(conv.platform === 'whatsapp' ? {
+            provider: whatsappProvider,
             delivery_status: 'accepted',
             delivery_status_at: new Date().toISOString(),
           } : {}),

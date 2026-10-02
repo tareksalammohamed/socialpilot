@@ -131,13 +131,15 @@ function renderTemplateBody(template: WhatsAppTemplate, variables: string[]): st
 
 function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
   const mediaId = typeof message.metadata?.media_id === 'string' ? message.metadata.media_id : null;
+  const storagePath = typeof message.metadata?.storage_path === 'string' ? message.metadata.storage_path : null;
+  const hasMedia = Boolean(mediaId || storagePath);
   const type = typeof message.metadata?.message_type === 'string' ? message.metadata.message_type : null;
   const [url, setUrl] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
-  const [mediaLoading, setMediaLoading] = useState(Boolean(mediaId));
+  const [mediaLoading, setMediaLoading] = useState(hasMedia);
 
   useEffect(() => {
-    if (!mediaId) return;
+    if (!hasMedia) return;
     let disposed = false;
     let objectUrl: string | null = null;
     setMediaLoading(true);
@@ -160,9 +162,9 @@ function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
       disposed = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [message.id, mediaId]);
+  }, [message.id, mediaId, storagePath, hasMedia]);
 
-  if (!mediaId || !type) return null;
+  if (!hasMedia || !type) return null;
   if (mediaLoading) return <div className="mt-2 text-[11px] text-ink-500">جارٍ تحميل المرفق...</div>;
   if (mediaError) return <div className="mt-2 text-[11px] text-warning-400">{mediaError}</div>;
   if (!url) return null;
@@ -239,12 +241,17 @@ export function InboxScreen() {
     [conversations, selectedId],
   );
 
+  const whatsappUsesEvolution = useMemo(
+    () => selectedConversation?.platform === 'whatsapp' && selectedConversation.metadata?.provider === 'evolution',
+    [selectedConversation],
+  );
+
   const whatsappServiceWindowOpen = useMemo(() => {
-    if (selectedConversation?.platform !== 'whatsapp') return true;
+    if (selectedConversation?.platform !== 'whatsapp' || whatsappUsesEvolution) return true;
     const latestInbound = [...messages].reverse().find((message) => message.direction === 'inbound');
     if (!latestInbound) return false;
     return Date.now() - new Date(latestInbound.created_at).getTime() <= 24 * 60 * 60 * 1000;
-  }, [selectedConversation?.platform, messages]);
+  }, [selectedConversation?.platform, whatsappUsesEvolution, messages]);
 
   const selectedWhatsAppTemplate = useMemo(
     () => whatsappTemplates.find((template) => templateKey(template) === selectedTemplateKey) ?? null,
@@ -257,7 +264,7 @@ export function InboxScreen() {
   );
 
   useEffect(() => {
-    if (!selectedConversation || selectedConversation.platform !== 'whatsapp') {
+    if (!selectedConversation || selectedConversation.platform !== 'whatsapp' || selectedConversation.metadata?.provider === 'evolution') {
       setWhatsappTemplates([]);
       setSelectedTemplateKey('');
       setTemplateVariables([]);
@@ -284,7 +291,7 @@ export function InboxScreen() {
     return () => {
       cancelled = true;
     };
-  }, [selectedConversation?.id, selectedConversation?.platform]);
+  }, [selectedConversation?.id, selectedConversation?.platform, selectedConversation?.metadata?.provider]);
 
   const filteredConversations = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -1024,17 +1031,21 @@ export function InboxScreen() {
                 <div className="p-3 border-t border-ink-800">
                   {selectedConversation.platform === 'whatsapp' && (
                     <div className={`mb-2 rounded-xl border px-3 py-2 text-xs ${
-                      whatsappServiceWindowOpen
+                      whatsappUsesEvolution
                         ? 'border-brand-500/20 bg-brand-500/5 text-brand-200'
-                        : 'border-warning-500/25 bg-warning-500/10 text-warning-300'
+                        : whatsappServiceWindowOpen
+                          ? 'border-brand-500/20 bg-brand-500/5 text-brand-200'
+                          : 'border-warning-500/25 bg-warning-500/10 text-warning-300'
                     }`}>
-                      {whatsappServiceWindowOpen
-                        ? 'نافذة خدمة WhatsApp مفتوحة — يمكنك إرسال رد نصي مباشر أو استخدام Template.'
-                        : 'نافذة الـ24 ساعة مغلقة — أرسل Template معتمد من Meta لإعادة فتح المحادثة.'}
+                      {whatsappUsesEvolution
+                        ? 'WhatsApp Web متصل عبر Evolution/Baileys — إرسال النصوص والميديا متاح مباشرة بدون قواعد Cloud API أو نافذة 24 ساعة.'
+                        : whatsappServiceWindowOpen
+                          ? 'نافذة خدمة WhatsApp Cloud مفتوحة — يمكنك إرسال رد نصي مباشر أو استخدام Template.'
+                          : 'نافذة WhatsApp Cloud لمدة 24 ساعة مغلقة — أرسل Template معتمد من Meta لإعادة فتح المحادثة.'}
                     </div>
                   )}
 
-                  {selectedConversation.platform === 'whatsapp' && !whatsappServiceWindowOpen && (
+                  {selectedConversation.platform === 'whatsapp' && !whatsappUsesEvolution && !whatsappServiceWindowOpen && (
                     <div className="mb-3 rounded-xl border border-ink-800 bg-ink-950/40 p-3 space-y-3">
                       <div className="flex items-center gap-2 text-xs font-semibold text-ink-200">
                         <LayoutTemplate size={15} className="text-brand-300" />

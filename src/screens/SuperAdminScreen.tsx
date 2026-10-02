@@ -32,6 +32,7 @@ function socialDeveloperPortalLabel(key: SocialPlatformAppKey): string {
   if (key === 'tiktok') return 'TikTok for Developers';
   if (key === 'threads') return 'Meta / Threads App Dashboard';
   if (key === 'telegram') return 'BotFather';
+  if (key === 'whatsapp') return 'Evolution API';
   return 'Meta Developer';
 }
 
@@ -327,7 +328,13 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                     <Input
                       value={socialAppIdInput}
                       onChange={setSocialAppIdInput}
-                      placeholder={app.platform_key === 'telegram' ? 'يوزر البوت (من غير @)' : 'App ID'}
+                      placeholder={
+                        app.platform_key === 'telegram'
+                          ? 'يوزر البوت (من غير @)'
+                          : app.platform_key === 'whatsapp'
+                            ? 'Evolution Base URL — https://evo.example.com'
+                            : 'App ID'
+                      }
                     />
                     <Input
                       value={socialAppSecretInput}
@@ -337,24 +344,17 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                           ? app.has_secret
                             ? 'Bot Token (اتركه فاضي لو مش هتغيّره)'
                             : 'Bot Token'
-                          : app.has_secret
-                            ? 'App Secret (اتركه فاضي لو مش هتغيّره)'
-                            : 'App Secret'
+                          : app.platform_key === 'whatsapp'
+                            ? app.has_secret
+                              ? 'Evolution API Key (اتركه فاضي لو مش هتغيّره)'
+                              : 'Evolution API Key'
+                            : app.has_secret
+                              ? 'App Secret (اتركه فاضي لو مش هتغيّره)'
+                              : 'App Secret'
                       }
                       type="password"
                     />
-                    {app.platform_key === 'meta' && (
-                      <div className="space-y-1">
-                        <Input
-                          value={socialConfigurationIdInput}
-                          onChange={setSocialConfigurationIdInput}
-                          placeholder="WhatsApp Embedded Signup Configuration ID"
-                        />
-                        <p className="text-[10px] text-ink-500 leading-relaxed">
-                          إعداد واحد للنظام من Meta → Facebook Login for Business. بعد حفظه، المستخدم يربط WhatsApp بزر واحد بدون Tokens أو IDs.
-                        </p>
-                      </div>
-                    )}
+
                     {app.redirect_uri && (
                       <div className="bg-ink-900 rounded-lg p-2.5">
                         <p className="text-ink-500 text-[10px] mb-1">
@@ -395,6 +395,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
         </div>
         <div className="mt-3 rounded-xl border border-ink-800 bg-ink-900/60 px-3 py-3 text-ink-500 text-[11px] leading-relaxed">
           <p>Meta يغطي فيسبوك وإنستجرام. Threads له App ID/Secret منفصل داخل Meta ويستخدم نفس محرك الحسابات والنشر بعد الربط.</p>
+          <p className="mt-1">WhatsApp يستخدم Evolution/Baileys: أدخل Base URL وAPI Key للسيرفر الذاتي مرة واحدة، وبعدها مساحات العمل تربط أرقامها بالـQR.</p>
           <p className="mt-1">TikTok يمكن ربطه وتحديث توكنه تلقائيًا، لكن النشر المباشر يظل متوقفًا حتى استكمال متطلبات Content Posting API وتجربة الخصوصية والميديا.</p>
           <p className="mt-1">Telegram يستخدم Bot Token بدل OAuth، ويجب إضافة البوت Admin للقناة/السوبرجروب.</p>
         </div>

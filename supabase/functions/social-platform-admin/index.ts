@@ -41,13 +41,40 @@ async function requireSuperAdmin(req: Request): Promise<{ ok: true; userId: stri
   return { ok: true, userId: userData.user.id };
 }
 
-const VALID_PLATFORM_KEYS = new Set(['meta', 'linkedin', 'telegram', 'x', 'threads', 'tiktok']);
+const VALID_PLATFORM_KEYS = new Set(['meta', 'linkedin', 'telegram', 'x', 'threads', 'tiktok', 'whatsapp']);
 
 // Telegram doesn't use redirect-based OAuth (no app is "installed" on a
 // domain) — app_id holds the shared bot's @username and app_secret holds
 // its Bot Token, so there's no redirect_uri to generate or display.
 // Meta, LinkedIn, and X are all standard redirect-based OAuth apps.
 const REDIRECT_URI_PLATFORMS = new Set(['meta', 'linkedin', 'x', 'threads', 'tiktok']);
+
+async function testEvolution(baseUrl: string, apiKey: string): Promise<{ ok: boolean; error?: string }> {
+  const normalized = baseUrl.trim().replace(/\/+$/, '');
+  try {
+    const response = await fetch(`${normalized}/instance/fetchInstances`, {
+      headers: { apikey: apiKey },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      const nested = body.response as Record<string, unknown> | undefined;
+      const message = nested?.message ?? body.message ?? body.error;
+      return {
+        ok: false,
+        error: typeof message === 'string'
+          ? message
+          : `Evolution HTTP ${response.status}`,
+      };
+    }
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'تعذّر الوصول إلى Evolution API',
+    };
+  }
+}
 
 type Action =
   | { action: 'list_apps' }
@@ -86,7 +113,16 @@ Deno.serve(async (req: Request) => {
 
       case 'save_app': {
         if (!VALID_PLATFORM_KEYS.has(body.platformKey)) return jsonRes(400, { error: 'Unknown platform' });
-        if (!body.appId || body.appId.trim().length < 3) return jsonRes(400, { error: 'App ID is required' });
+        if (!body.appId || body.appId.trim().length < 3) return jsonRes(400, { error: body.platformKey === 'whatsapp' ? 'Evolution Base URL is required' : 'App ID is required' });
+
+        if (body.platformKey === 'whatsapp') {
+          try {
+            const url = new URL(body.appId.trim());
+            if (!['http:', 'https:'].includes(url.protocol)) throw new Error('bad protocol');
+          } catch {
+            return jsonRes(400, { error: 'Evolution Base URL غير صالح' });
+          }
+        }
 
         const functionsBase = `${Deno.env.get('SUPABASE_URL') ?? ''}/functions/v1`;
         const redirectUri = REDIRECT_URI_PLATFORMS.has(body.platformKey)
@@ -111,9 +147,41 @@ Deno.serve(async (req: Request) => {
 
         const { data: existingSecret } = await supabase
           .from('social_platform_app_secrets')
-          .select('platform_key')
+          .select('platform_key,app_secret')
           .eq('platform_key', body.platformKey)
           .maybeSingle();
+
+        if (body.platformKey === 'whatsapp') {
+          if (!existingSecret?.app_secret) {
+            await supabase.from('social_platform_apps').update({
+              app_id: body.appId.trim(),
+              redirect_uri: null,
+              has_secret: false,
+              status: 'not_configured',
+              enabled: false,
+              last_error: 'Evolution API Key مطلوب',
+              updated_at: new Date().toISOString(),
+            }).eq('platform_key', body.platformKey);
+            return jsonRes(400, { error: 'Evolution API Key مطلوب' });
+          }
+
+          const health = await testEvolution(body.appId.trim(), String(existingSecret.app_secret));
+          await supabase.from('social_platform_apps').update({
+            app_id: body.appId.trim().replace(/\/+$/, ''),
+            redirect_uri: null,
+            has_secret: true,
+            status: health.ok ? 'connected' : 'error',
+            enabled: health.ok,
+            last_test_at: new Date().toISOString(),
+            last_error: health.ok ? null : health.error ?? 'Evolution health check failed',
+            updated_at: new Date().toISOString(),
+          }).eq('platform_key', body.platformKey);
+
+          if (!health.ok) {
+            return jsonRes(502, { error: `تعذّر الاتصال بـ Evolution: ${health.error ?? 'unknown error'}` });
+          }
+          return jsonRes(200, { ok: true, redirectUri: null });
+        }
 
         await supabase.from('social_platform_apps').update({
           app_id: body.appId.trim(),

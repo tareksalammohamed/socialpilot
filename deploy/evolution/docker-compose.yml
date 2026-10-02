@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-evolution}
+      POSTGRES_USER: ${POSTGRES_USER:-evolution}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - evolution_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-evolution} -d ${POSTGRES_DB:-evolution}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - evolution_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  evolution:
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${EVOLUTION_PORT:-8080}:8080"
+    environment:
+      SERVER_TYPE: http
+      SERVER_PORT: 8080
+      SERVER_URL: ${EVOLUTION_PUBLIC_URL}
+      SENTRY_DSN: ""
+      CORS_ORIGIN: ${EVOLUTION_CORS_ORIGIN:-*}
+      CORS_METHODS: GET,POST,PUT,DELETE,PATCH
+      CORS_CREDENTIALS: "true"
+      LOG_LEVEL: WARN,ERROR,LOG
+      LOG_COLOR: "true"
+      DEL_INSTANCE: "false"
+
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "false"
+
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-evolution}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-evolution}
+      DATABASE_CONNECTION_CLIENT_NAME: socialpilot_evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_LABELS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "false"
+
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD}@redis:6379/6
+      CACHE_REDIS_PREFIX_KEY: socialpilot
+      CACHE_REDIS_SAVE_INSTANCES: "true"
+      CACHE_LOCAL_ENABLED: "false"
+
+      CONFIG_SESSION_PHONE_CLIENT: SocialPilot
+      CONFIG_SESSION_PHONE_NAME: Chrome
+
+      QRCODE_LIMIT: 30
+      QRCODE_COLOR: "#198754"
+
+      TYPEBOT_ENABLED: "false"
+      CHATWOOT_ENABLED: "false"
+      OPENAI_ENABLED: "false"
+      DIFY_ENABLED: "false"
+
+    volumes:
+      - evolution_instances:/evolution/instances
+
+volumes:
+  evolution_postgres:
+  evolution_redis:
+  evolution_instances:

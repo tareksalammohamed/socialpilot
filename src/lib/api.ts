@@ -150,6 +150,52 @@ export async function getSocialIntegrationStatus(workspaceId: string): Promise<{
   return { apps: body.apps ?? [], accounts: body.accounts ?? [] };
 }
 
+export type WhatsAppEvolutionStatus = {
+  ok?: true;
+  configured: boolean;
+  connected: boolean;
+  state: string;
+  qrBase64?: string | null;
+  qrCode?: string | null;
+  pairingCode?: string | null;
+  accountId?: string | null;
+  account?: unknown;
+};
+
+async function callWhatsAppEvolution(
+  workspaceId: string,
+  action: 'start' | 'status' | 'disconnect',
+): Promise<WhatsAppEvolutionStatus> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token;
+  if (!token) throw new Error('يجب تسجيل الدخول لربط واتساب');
+
+  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-evolution`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+    },
+    body: JSON.stringify({ workspaceId, action }),
+  });
+  const body = await response.json().catch(() => ({})) as WhatsAppEvolutionStatus & { error?: string };
+  if (!response.ok) throw new Error(body.error ?? `فشل تشغيل WhatsApp (${response.status})`);
+  return body;
+}
+
+export function startWhatsAppEvolution(workspaceId: string): Promise<WhatsAppEvolutionStatus> {
+  return callWhatsAppEvolution(workspaceId, 'start');
+}
+
+export function getWhatsAppEvolutionStatus(workspaceId: string): Promise<WhatsAppEvolutionStatus> {
+  return callWhatsAppEvolution(workspaceId, 'status');
+}
+
+export function disconnectWhatsAppEvolution(workspaceId: string): Promise<WhatsAppEvolutionStatus> {
+  return callWhatsAppEvolution(workspaceId, 'disconnect');
+}
+
 export type PublishResult = {
   ok: true;
   postId?: string;
