@@ -32,6 +32,14 @@ async function redirectToApp(params: Record<string, string>): Promise<Response> 
   return new Response(null, { status: 302, headers: { Location: target.toString() } });
 }
 
+async function markPlatformHealthy(platformKey: string): Promise<void> {
+  await supabase.from('social_platform_apps').update({
+    status: 'connected',
+    last_error: null,
+    last_test_at: new Date().toISOString(),
+  }).eq('platform_key', platformKey);
+}
+
 Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
   const code = url.searchParams.get('code');
@@ -203,6 +211,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    await markPlatformHealthy('meta');
     return redirectToApp({
       social: 'connected',
       platform: 'meta',
@@ -291,6 +300,7 @@ async function handleLinkedInCallback(params: {
       updated_at: new Date().toISOString(),
     });
 
+    await markPlatformHealthy('linkedin');
     return redirectToApp({ social: 'connected', platform: 'linkedin', linkedin: '1' });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'فشل ربط حساب لينكدإن';
@@ -379,6 +389,7 @@ async function handleXCallback(params: {
       updated_at: new Date().toISOString(),
     });
 
+    await markPlatformHealthy('x');
     return redirectToApp({ social: 'connected', platform: 'x', x: '1' });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'فشل ربط حساب إكس';
@@ -468,6 +479,7 @@ async function handleThreadsCallback(params: {
       updated_at: new Date().toISOString(),
     });
 
+    await markPlatformHealthy('threads');
     return redirectToApp({ social: 'connected', platform: 'threads', threads: '1' });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'فشل ربط حساب Threads';
@@ -552,6 +564,7 @@ async function handleTikTokCallback(params: {
       updated_at: new Date().toISOString(),
     });
 
+    await markPlatformHealthy('tiktok');
     return redirectToApp({ social: 'connected', platform: 'tiktok', tiktok: '1' });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'فشل ربط حساب TikTok';
