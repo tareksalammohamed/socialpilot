@@ -361,6 +361,10 @@ export function CreateScreen() {
         const userTurns = chat.filter((turn) => turn.role === 'user');
         const parsed = parseIntent(sourceMessage ?? userTurns[userTurns.length - 1]?.text ?? '');
         const scheduledDates = scheduleDates(parsed, contentToSave.variants.length);
+        const quality = contentToSave.quality;
+        const scoreValues = Object.values(quality?.scores ?? {}).filter((score): score is number => typeof score === 'number');
+        const qualityScore = scoreValues.length > 0 ? Math.round(scoreValues.reduce((sum, score) => sum + score, 0) / scoreValues.length) : null;
+        const variantQualityStatus = qualityStatusOf(quality?.verdict);
         const { data: insertedVariants, error: variantsError } = await supabase.from('content_variants').insert(
           contentToSave.variants.map((v) => ({
             content_id: inserted.id,
@@ -371,14 +375,13 @@ export function CreateScreen() {
             cta: v.cta,
             media_brief: v.media_brief,
             status: 'review',
+            quality_score: qualityScore,
+            quality_status: variantQualityStatus,
           }))
         ).select('id, platform');
         if (variantsError) throw variantsError;
 
-        const quality = contentToSave.quality;
         if (quality && insertedVariants?.length) {
-          const scoreValues = Object.values(quality.scores).filter((score): score is number => typeof score === 'number');
-          const qualityScore = scoreValues.length > 0 ? Math.round(scoreValues.reduce((sum, score) => sum + score, 0) / scoreValues.length) : null;
           await supabase.from('quality_reviews').insert(insertedVariants.map((variant) => ({
             variant_id: variant.id,
             workspace_id: workspace.id,
@@ -402,7 +405,8 @@ export function CreateScreen() {
           if (variants?.length) {
             for (const [index, variant] of variants.entries()) {
               const scheduledFor = toScheduledIso(scheduledDates[index] ?? scheduledDates[scheduledDates.length - 1]);
-              const { error: scheduleError } = await supabase.rpc('schedule_content_variant', {
+              const rpcName = quality?.verdict === 'pass' ? 'approve_content_variant' : 'schedule_content_variant';
+              const { error: scheduleError } = await supabase.rpc(rpcName, {
                 p_workspace_id: workspace.id,
                 p_variant_id: variant.id,
                 p_scheduled_for: scheduledFor,
@@ -410,7 +414,9 @@ export function CreateScreen() {
               if (scheduleError) throw scheduleError;
             }
           }
-          await supabase.from('content').update({ status: 'scheduled' }).eq('id', inserted.id).eq('workspace_id', workspace.id);
+          await supabase.from('content').update({
+            status: quality?.verdict === 'pass' ? 'scheduled' : 'review',
+          }).eq('id', inserted.id).eq('workspace_id', workspace.id);
         }
       }
       setSaved(true);
@@ -447,7 +453,7 @@ export function CreateScreen() {
             topic: planToSave.theme,
             master_text: body,
             platforms: [slot.platform],
-            status: 'scheduled',
+            status: qStatus === 'passed' ? 'scheduled' : 'review',
             scheduled_at: scheduledIso,
             quality_score: qualityScore,
             quality_status: qualityStatus,
@@ -486,12 +492,19 @@ export function CreateScreen() {
           });
         }
 
-        const { error: calendarError } = await supabase.rpc('schedule_content_variant', {
+        const rpcName = slot.quality?.verdict === 'pass' ? 'approve_content_variant' : 'schedule_content_variant';
+        const { error: calendarError } = await supabase.rpc(rpcName, {
           p_workspace_id: workspace.id,
           p_variant_id: variant.id,
           p_scheduled_for: scheduledIso,
         });
         if (calendarError) throw calendarError;
+        if (slot.quality?.verdict !== 'pass') {
+          await supabase.from('content')
+            .update({ status: 'review' })
+            .eq('id', inserted.id)
+            .eq('workspace_id', workspace.id);
+        }
       }
       setPlanSaved(true);
       return batchId;
