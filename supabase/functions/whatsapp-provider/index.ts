@@ -120,6 +120,7 @@ async function providerRuntimes(): Promise<ProviderRuntime[]> {
     priority: defaults[providerKey],
     status: 'not_configured' as ProviderRuntime['status'],
     lastError: null as string | null,
+    preferred: false,
   }));
 
   if (raw.startsWith('{')) {
