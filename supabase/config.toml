@@ -18,3 +18,6 @@ verify_jwt = false
 
 [functions.social-linkedin-webhook]
 verify_jwt = false
+
+[functions.telegram-inbox-webhook]
+verify_jwt = false
