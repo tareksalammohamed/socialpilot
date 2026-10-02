@@ -25,6 +25,7 @@ type ProviderRuntime = {
   priority: number;
   status: 'not_configured' | 'connected' | 'error';
   lastError: string | null;
+  preferred: boolean;
 };
 
 type StartResult = {
@@ -123,6 +124,7 @@ async function providerRuntimes(): Promise<ProviderRuntime[]> {
     try {
       const bundle = JSON.parse(raw) as {
         version?: number;
+        activeProvider?: ProviderKey | null;
         providers?: Partial<Record<ProviderKey, {
           baseUrl?: string;
           credential?: string;
@@ -141,8 +143,13 @@ async function providerRuntimes(): Promise<ProviderRuntime[]> {
         runtime.priority = Number(config.priority ?? runtime.priority);
         runtime.status = config.status ?? 'not_configured';
         runtime.lastError = config.lastError ?? null;
+        runtime.preferred = bundle.activeProvider === runtime.providerKey;
       }
-      return runtimes.sort((a, b) => a.priority - b.priority || a.providerKey.localeCompare(b.providerKey));
+      return runtimes.sort((a, b) =>
+        Number(b.preferred) - Number(a.preferred)
+        || a.priority - b.priority
+        || a.providerKey.localeCompare(b.providerKey)
+      );
     } catch {
       throw new Error('WhatsApp provider registry is invalid JSON');
     }
@@ -156,6 +163,7 @@ async function providerRuntimes(): Promise<ProviderRuntime[]> {
       evolution.secret = raw;
       evolution.enabled = Boolean(app.enabled);
       evolution.status = app.enabled ? 'connected' : 'error';
+      evolution.preferred = true;
     }
   }
 
@@ -166,7 +174,11 @@ function healthyProviders(runtimes: ProviderRuntime[], exclude?: ProviderKey | n
   return runtimes
     .filter((runtime) => runtime.providerKey !== exclude)
     .filter((runtime) => runtime.enabled && runtime.status === 'connected' && runtime.baseUrl && runtime.secret)
-    .sort((a, b) => a.priority - b.priority || a.providerKey.localeCompare(b.providerKey));
+    .sort((a, b) =>
+      Number(b.preferred) - Number(a.preferred)
+      || a.priority - b.priority
+      || a.providerKey.localeCompare(b.providerKey)
+    );
 }
 
 function publicMethod(runtime: ProviderRuntime, activeProvider: ProviderKey | null) {
