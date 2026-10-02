@@ -238,7 +238,7 @@ async function wahaStart(
       metadata: { socialpilot: true },
       webhooks: [{
         url: `${supabaseUrl}/functions/v1/whatsapp-waha-webhook`,
-        events: ['session.status', 'message', 'message.any', 'message.ack'],
+        events: ['session.status', 'message.any', 'message.ack'],
         hmac: { key: webhookSecret },
         retries: { policy: 'linear', delaySeconds: 2, attempts: 4 },
       }],
