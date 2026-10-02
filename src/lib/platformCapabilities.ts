@@ -93,7 +93,7 @@ export const PLATFORM_CAPABILITIES: Record<SocialPlatform, PlatformCapability> =
     inbox: 'messages',
     aiReply: true,
     media: ['text', 'image', 'video'],
-    note: 'ربط WhatsApp Web بالـQR عبر Evolution/Baileys: Inbox + AI Reply + نصوص وميديا بدون Cloud API.',
+    note: 'ربط WhatsApp Web بالـQR مع Evolution ثم WAHA ثم WPPConnect كبدائل مرتبة، بدون Cloud API في المسار الأساسي.',
   },
 };
 
