@@ -5,6 +5,7 @@ import { useAuth } from '@/lib/auth';
 import { publishVariant, callAgentTurn, callApprovedTools } from '@/lib/api';
 import { Card, ScreenLoader, EmptyState, Badge, Button, ErrorBanner, Spinner } from '@/components/ui';
 import { PLATFORM_META } from '@/lib/constants';
+import { PLATFORM_CAPABILITIES } from '@/lib/platformCapabilities';
 import { PlatformPreview } from '@/components/PlatformPreview';
 import type { Content, CalendarItem, ContentStatus, ContentVariant, SocialAccount, SocialPlatform, MediaItem } from '@/lib/types';
 
@@ -32,9 +33,6 @@ const STATUS_COLORS: Record<ContentStatus, 'neutral' | 'brand' | 'warning' | 'ac
   published: 'brand',
   rejected: 'danger',
 };
-
-// Keep this in sync with SUPPORTED_PLATFORMS in supabase/functions/social-publish.
-const PUBLISHABLE_PLATFORMS = new Set<SocialPlatform>(['telegram', 'x', 'facebook', 'instagram', 'linkedin', 'threads']);
 
 type PublishOutcome = { ok: boolean; message: string; url?: string | null };
 
@@ -530,14 +528,14 @@ export function ContentScreen() {
                           const meta = PLATFORM_META[v.platform as SocialPlatform];
                           const Icon = meta?.icon;
                           const account = accounts.find((a) => a.platform === v.platform && a.status === 'connected');
-                          const supported = PUBLISHABLE_PLATFORMS.has(v.platform as SocialPlatform);
+                          const supported = PLATFORM_CAPABILITIES[v.platform as SocialPlatform]?.publish ?? false;
                           const busy = publishingId === v.id;
                           const result = publishResults[v.id];
                           const isEditing = editingVariantId === v.id;
                           const canEdit = !['published', 'scheduled'].includes(c.status);
 
                           let disabledReason: string | null = null;
-                          if (!supported) disabledReason = 'النشر التلقائي غير مدعوم لهذه المنصة بعد';
+                          if (!supported) disabledReason = PLATFORM_CAPABILITIES[v.platform as SocialPlatform]?.note ?? 'النشر التلقائي غير مدعوم لهذه المنصة بعد';
                           else if (!account) disabledReason = `مفيش حساب ${meta?.label ?? v.platform} مربوط`;
 
                           return (
