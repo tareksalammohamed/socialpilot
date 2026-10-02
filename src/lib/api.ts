@@ -330,6 +330,83 @@ export async function markInboxConversationRead(conversationId: string): Promise
   if (error) throw error;
 }
 
+export type WhatsAppTemplate = {
+  id: string;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  body: string;
+  variableCount: number;
+  sendable: boolean;
+  unsupportedReason: string | null;
+};
+
+async function authorizedFunctionFetch(path: string, init: RequestInit): Promise<Response> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token;
+  if (!token) throw new Error('يجب تسجيل الدخول لإكمال الطلب');
+  return fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+      ...(init.headers ?? {}),
+    },
+  });
+}
+
+export async function listWhatsAppTemplates(conversationId: string): Promise<WhatsAppTemplate[]> {
+  const response = await authorizedFunctionFetch('whatsapp-templates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversationId }),
+  });
+  const body = await response.json().catch(() => ({})) as { error?: string; templates?: WhatsAppTemplate[] };
+  if (!response.ok) throw new Error(body.error ?? `تعذّر تحميل قوالب واتساب (${response.status})`);
+  return body.templates ?? [];
+}
+
+export async function sendWhatsAppTemplate(params: {
+  conversationId: string;
+  template: WhatsAppTemplate;
+  variables: string[];
+  preview: string;
+}): Promise<InboxMessage> {
+  const response = await authorizedFunctionFetch('inbox-reply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      conversationId: params.conversationId,
+      mode: 'template',
+      template: {
+        name: params.template.name,
+        language: params.template.language,
+        variables: params.variables,
+        preview: params.preview,
+      },
+    }),
+  });
+  const body = await response.json().catch(() => ({})) as { error?: string; message?: InboxMessage };
+  if (!response.ok || !body.message) {
+    throw new Error(body.error ?? `تعذّر إرسال Template (${response.status})`);
+  }
+  return body.message;
+}
+
+export async function fetchInboxMedia(messageId: string): Promise<Blob> {
+  const response = await authorizedFunctionFetch('inbox-media', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messageId }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `تعذّر تحميل ميديا الرسالة (${response.status})`);
+  }
+  return response.blob();
+}
+
 export async function sendInboxReply(conversationId: string, content: string): Promise<InboxMessage> {
   const { data: session } = await supabase.auth.getSession();
   const token = session.session?.access_token;
