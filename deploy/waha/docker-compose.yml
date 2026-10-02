@@ -1,0 +1,25 @@
+services:
+  waha:
+    image: devlikeapro/waha:gows-2026.8.2
+    restart: unless-stopped
+    ports:
+      - "${WAHA_PORT:-3000}:3000"
+    environment:
+      WAHA_API_KEY: "${WAHA_API_KEY}"
+      WAHA_DASHBOARD_ENABLED: "false"
+      WHATSAPP_SWAGGER_ENABLED: "false"
+      WHATSAPP_DEFAULT_ENGINE: "GOWS"
+      WAHA_NAMESPACE: "all"
+    volumes:
+      - waha_sessions:/app/.sessions
+      - waha_media:/app/.media
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  waha_sessions:
+  waha_media:
