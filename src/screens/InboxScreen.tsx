@@ -397,25 +397,39 @@ export function InboxScreen() {
 
   if (!workspace) return null;
 
+  const unreadCount = conversations.filter((item) => item.unread).length;
+  const openCount = conversations.filter((item) => item.status === 'open').length;
+  const aiReviewCount = conversations.filter((item) => item.needs_review).length;
+  const platformCount = new Set(conversations.map((item) => item.platform)).size;
+
   return (
-    <div className="px-5 py-6 safe-top max-w-5xl mx-auto w-full">
-      <div className="flex items-center justify-between gap-3 mb-6">
-        <div className="flex items-center gap-2">
-          <InboxIcon size={22} className="text-brand-400" />
-          <div>
-            <h1 className="text-lg font-bold text-ink-50">صندوق الرسائل الموحد</h1>
-            <p className="text-xs text-ink-500 mt-0.5">التعليقات والمحادثات من الحسابات المتصلة</p>
+    <div className="page-shell safe-top pb-28 max-w-6xl">
+      <section className="surface-hero mb-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="status-orb"><InboxIcon size={21} className="text-brand-300" /></div>
+            <div>
+              <p className="eyebrow">UNIFIED INBOX</p>
+              <h1 className="text-2xl font-bold text-ink-50 mt-1">صندوق الرسائل الموحد</h1>
+              <p className="text-ink-400 text-sm mt-2">رسائل وتعليقات المنصات، مع تحليل واقتراح رد AI ومراجعة بشرية قبل الإرسال.</p>
+            </div>
           </div>
+          <Button variant="secondary" size="sm" onClick={() => void loadConversations()} disabled={loading}>
+            {loading ? <Spinner size={16} /> : <RefreshCw size={16} />}
+            تحديث
+          </Button>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => void loadConversations()} disabled={loading}>
-          {loading ? <Spinner size={16} /> : <RefreshCw size={16} />}
-          <span className="sr-only">تحديث</span>
-        </Button>
-      </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-5">
+          <div className="metric-tile"><p className={`metric-value ${unreadCount ? 'text-accent-300' : ''}`}>{unreadCount}</p><p className="metric-label">غير مقروء</p></div>
+          <div className="metric-tile"><p className="metric-value">{openCount}</p><p className="metric-label">محادثات مفتوحة</p></div>
+          <div className="metric-tile"><p className={`metric-value ${aiReviewCount ? 'text-warning-300' : ''}`}>{aiReviewCount}</p><p className="metric-label">تحتاج مراجعة AI</p></div>
+          <div className="metric-tile"><p className="metric-value">{platformCount}</p><p className="metric-label">منصات نشطة</p></div>
+        </div>
+      </section>
 
       {error && <div className="mb-4"><ErrorBanner message={error} /></div>}
 
-      <Card className="mb-4 !p-0 overflow-hidden">
+      <Card className="surface-card mb-4 !p-0 overflow-hidden">
         <button
           type="button"
           onClick={() => setSettingsOpen((value) => !value)}
@@ -546,7 +560,7 @@ export function InboxScreen() {
       {loading ? (
         <div className="py-20 flex justify-center"><Spinner className="text-brand-400" size={28} /></div>
       ) : conversations.length === 0 ? (
-        <Card>
+        <Card className="surface-card">
           <EmptyState
             icon={<MessageSquare size={28} />}
             title="لا توجد محادثات بعد"
@@ -555,7 +569,7 @@ export function InboxScreen() {
         </Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.4fr)] gap-4">
-          <Card className="p-0 overflow-hidden">
+          <Card className="surface-card p-0 overflow-hidden">
             <div className="px-4 py-3 border-b border-ink-800 flex items-center justify-between">
               <span className="text-sm font-semibold text-ink-100">المحادثات</span>
               <Badge color="brand">{conversations.filter((item) => item.unread).length} جديدة</Badge>

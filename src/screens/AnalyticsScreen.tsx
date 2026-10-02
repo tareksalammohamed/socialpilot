@@ -264,19 +264,36 @@ export function AnalyticsScreen() {
   if (loading) return <ScreenLoader />;
 
   return (
-    <div className="px-5 py-6 safe-top">
-      <div className="flex items-center justify-between mb-5">
-        <div><p className="text-ink-500 text-xs">بيانات فعلية من المنصات</p><h1 className="text-xl font-bold text-ink-50">Analytics</h1></div>
-        <Button variant="secondary" size="sm" onClick={syncInsights} disabled={syncing}><RefreshCw size={14} className={syncing ? 'animate-spin' : ''} /> مزامنة</Button>
-      </div>
+    <div className="page-shell safe-top pb-28 max-w-6xl">
+      <section className="surface-hero mb-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="status-orb"><BarChart3 size={20} className="text-brand-300" /></div>
+            <div>
+              <p className="eyebrow">PERFORMANCE INTELLIGENCE</p>
+              <h1 className="text-2xl font-bold text-ink-50 mt-1">التحليلات والأداء</h1>
+              <p className="text-ink-400 text-sm mt-2">Metrics حقيقية من المنصات، ترتيب الأداء، واتجاهات تساعد الـAI يبني الخطة القادمة.</p>
+            </div>
+          </div>
+          <Button variant="secondary" size="sm" onClick={syncInsights} disabled={syncing}>
+            <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} /> مزامنة
+          </Button>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-5">
+          <div className="metric-tile"><p className="metric-value">{published.length}</p><p className="metric-label">منشورات منشورة</p></div>
+          <div className="metric-tile"><p className="metric-value">{insights.length}</p><p className="metric-label">قراءات Metrics</p></div>
+          <div className="metric-tile"><p className="metric-value">{formatScore(displayedMetric('reach'))}</p><p className="metric-label">إجمالي الوصول</p></div>
+          <div className="metric-tile"><p className="metric-value">{formatScore(displayedMetric('engagements'))}</p><p className="metric-label">التفاعلات</p></div>
+        </div>
+      </section>
 
-      <div className="flex flex-wrap gap-2 mb-3">
+      <div className="flex flex-wrap gap-2 mb-3 rounded-xl border border-ink-800 bg-ink-900/60 p-2">
         {([['today', 'اليوم'], ['7', '7 أيام'], ['30', '30 يومًا'], ['90', '90 يومًا'], ['custom', 'مخصص']] as Array<[Range, string]>).map(([value, label]) => (
           <button key={value} onClick={() => setRange(value)} className={`px-3 py-2 rounded-lg text-xs ${range === value ? 'bg-brand-500 text-ink-950' : 'bg-ink-900 text-ink-400'}`}>{label}</button>
         ))}
       </div>
       {range === 'custom' && (
-        <Card className="mb-4">
+        <Card className="surface-card mb-4">
           <div className="flex items-center gap-2 mb-3"><CalendarDays size={15} className="text-brand-400" /><p className="text-ink-300 text-xs">الفترة المخصصة</p></div>
           <div className="grid grid-cols-2 gap-2">
             <label className="text-ink-500 text-xs">من<input type="date" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-900 px-2 py-2 text-xs text-ink-200" /></label>
@@ -292,7 +309,7 @@ export function AnalyticsScreen() {
           ? <EmptyState icon={<BarChart3 size={28} />} title="المزامنة معلّقة" subtitle={`لديك ${published.length.toLocaleString('ar-EG')} منشور منشور في هذه الفترة بدون Metrics بعد. اضغط مزامنة لجلبها من المنصات.`} />
           : <EmptyState icon={<BarChart3 size={28} />} title="لا توجد بيانات بعد" subtitle="انشر محتوى ثم شغّل مزامنة التحليلات من الحسابات المتصلة." />
       ) : <>
-        <div className="grid grid-cols-2 gap-3 mb-5">{['reach', 'impressions', 'engagements', 'clicks'].map((metric) => { const value = displayedMetric(metric); return <Card key={metric}><p className="text-ink-500 text-xs">{METRIC_LABELS[metric]}</p><p className="text-2xl font-bold text-ink-50 mt-1">{value === null ? 'N/A' : Math.round(value).toLocaleString('ar-EG')}</p></Card>; })}</div>
+        <div className="grid grid-cols-2 gap-3 mb-5">{['reach', 'impressions', 'engagements', 'clicks'].map((metric) => { const value = displayedMetric(metric); return <Card key={metric} className="surface-card"><p className="text-ink-500 text-xs">{METRIC_LABELS[metric]}</p><p className="text-2xl font-bold text-ink-50 mt-1">{value === null ? 'N/A' : Math.round(value).toLocaleString('ar-EG')}</p></Card>; })}</div>
 
         <div className="grid grid-cols-2 gap-3 mb-5">
           <RankCard title="أفضل منشور" item={rankedPosts[0] ?? null} />
@@ -300,14 +317,14 @@ export function AnalyticsScreen() {
           <RankCard title="أفضل منصة" item={bestPlatform} />
           <RankCard title="أفضل نوع محتوى" item={bestContentType} />
           <RankCard title="أفضل وقت نشر" item={bestPostingTime} />
-          <Card><p className="text-ink-500 text-xs">منشورات منشورة</p><p className="text-xl font-bold text-ink-50 mt-1">{published.length.toLocaleString('ar-EG')}</p></Card>
+          <Card className="surface-card"><p className="text-ink-500 text-xs">منشورات منشورة</p><p className="text-xl font-bold text-ink-50 mt-1">{published.length.toLocaleString('ar-EG')}</p></Card>
         </div>
 
-        <Card className="mb-5"><div className="flex items-center gap-2 mb-3"><TrendingUp size={17} className="text-accent-400" /><p className="text-ink-200 text-sm font-medium">اتجاه التفاعلات</p></div>
+        <Card className="surface-card mb-5"><div className="flex items-center gap-2 mb-3"><TrendingUp size={17} className="text-accent-400" /><p className="text-ink-200 text-sm font-medium">اتجاه التفاعلات</p></div>
           {trend.length === 0 ? <p className="text-ink-500 text-xs">لا توجد بيانات تفاعل كافية لرسم الاتجاه.</p> : <div className="flex items-end gap-1 h-28">{trend.map(([day, score]) => <div key={day} className="flex-1 min-w-0 h-full flex flex-col justify-end items-center gap-1"><div title={`${day}: ${formatScore(score)}`} className="w-full max-w-5 rounded-t bg-brand-500/80" style={{ height: `${Math.max(6, (score / trendMax) * 100)}%` }} /><span className="text-[9px] text-ink-600 rotate-[-45deg] origin-top-left mt-2">{day.slice(5)}</span></div>)}</div>}
         </Card>
 
-        <Card><div className="flex items-center gap-2 mb-3"><Sparkles size={17} className="text-brand-400" /><p className="text-ink-200 text-sm font-medium">AI Insights والاستراتيجية القادمة</p></div>{aiInsight ? <p className="text-ink-100 text-sm leading-relaxed whitespace-pre-wrap">{aiInsight}</p> : <Button size="sm" onClick={generateAiInsight} disabled={aiLoading}>{aiLoading ? <><Spinner size={14} /> جارٍ التحليل...</> : 'حلل الأداء واقترح الخطة القادمة'}</Button>}</Card>
+        <Card className="surface-card"><div className="flex items-center gap-2 mb-3"><Sparkles size={17} className="text-brand-400" /><p className="text-ink-200 text-sm font-medium">AI Insights والاستراتيجية القادمة</p></div>{aiInsight ? <p className="text-ink-100 text-sm leading-relaxed whitespace-pre-wrap">{aiInsight}</p> : <Button size="sm" onClick={generateAiInsight} disabled={aiLoading}>{aiLoading ? <><Spinner size={14} /> جارٍ التحليل...</> : 'حلل الأداء واقترح الخطة القادمة'}</Button>}</Card>
       </>}
       <p className="text-ink-600 text-[11px] mt-5">عدد المحتوى المسجل في الفترة: {content.length}. أي Metric غير متاح من المنصة يظهر كـ N/A ولا يتم اختلاق قيم.</p>
     </div>
@@ -315,5 +332,5 @@ export function AnalyticsScreen() {
 }
 
 function RankCard({ title, item }: { title: string; item: RankedItem | null }) {
-  return <Card><p className="text-ink-500 text-xs">{title}</p><p className="text-ink-100 text-sm font-medium mt-1 truncate">{item?.label ?? 'N/A'}</p><p className="text-ink-500 text-xs mt-1">{item ? formatScore(item.score) : 'N/A'} تفاعل</p></Card>;
+  return <Card className="surface-card"><p className="text-ink-500 text-xs">{title}</p><p className="text-ink-100 text-sm font-medium mt-1 truncate">{item?.label ?? 'N/A'}</p><p className="text-ink-500 text-xs mt-1">{item ? formatScore(item.score) : 'N/A'} تفاعل</p></Card>;
 }
