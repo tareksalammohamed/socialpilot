@@ -1,7 +1,7 @@
 import type { SocialPlatform, SocialPlatformAppKey } from './types';
 
 export type PlatformInboxMode = 'messages_comments' | 'messages' | 'comments' | 'none';
-export type PlatformConnectMode = 'oauth' | 'bot' | 'credentials' | 'managed' | 'unavailable';
+export type PlatformConnectMode = 'oauth' | 'bot' | 'embedded' | 'managed' | 'unavailable';
 
 export type PlatformCapability = {
   appKey?: SocialPlatformAppKey;
@@ -87,13 +87,13 @@ export const PLATFORM_CAPABILITIES: Record<SocialPlatform, PlatformCapability> =
   },
   whatsapp: {
     appKey: 'meta',
-    connectMode: 'credentials',
+    connectMode: 'embedded',
     publish: false,
     schedule: false,
     inbox: 'messages',
     aiReply: true,
     media: ['text', 'image', 'video'],
-    note: 'WhatsApp Business Cloud API: رسائل + حالات تسليم/قراءة + AI Reply؛ لا يوجد Feed للنشر.',
+    note: 'ربط رسمي بزر واحد عبر Meta Embedded Signup، ثم Inbox + AI Reply + حالات التسليم والقراءة.',
   },
 };
 
