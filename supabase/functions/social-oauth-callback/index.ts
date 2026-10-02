@@ -26,7 +26,8 @@ async function getAppUrl(): Promise<string> {
 
 async function redirectToApp(params: Record<string, string>): Promise<Response> {
   const appUrl = await getAppUrl();
-  const target = new URL(appUrl || 'https://example.com');
+  const base = (appUrl || 'https://example.com').replace(/\/$/, '');
+  const target = new URL(`${base}/app/accounts`);
   for (const [k, v] of Object.entries(params)) target.searchParams.set(k, v);
   return new Response(null, { status: 302, headers: { Location: target.toString() } });
 }
