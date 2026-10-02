@@ -28,10 +28,14 @@ import {
   connectTelegramChannel,
   syncAccounts,
   getSocialIntegrationStatus,
-  startWhatsAppEvolution,
-  getWhatsAppEvolutionStatus,
-  disconnectWhatsAppEvolution,
+  listWhatsAppProviders,
+  startWhatsAppProvider,
+  getWhatsAppProviderStatus,
+  disconnectWhatsAppProvider,
   type SocialIntegrationStatus,
+  type WhatsAppProviderInfo,
+  type WhatsAppProviderKey,
+  type WhatsAppPairingMode,
 } from '@/lib/api';
 import { Card, Button, Badge, ErrorBanner, Input, Spinner } from '@/components/ui';
 import { PLATFORMS, PLATFORM_META } from '@/lib/constants';
@@ -77,6 +81,10 @@ export function MoreScreen() {
   const [whatsappQrBase64, setWhatsappQrBase64] = useState<string | null>(null);
   const [whatsappPairingCode, setWhatsappPairingCode] = useState<string | null>(null);
   const [whatsappProviderState, setWhatsappProviderState] = useState<string>('not_created');
+  const [whatsappProviders, setWhatsappProviders] = useState<WhatsAppProviderInfo[]>([]);
+  const [whatsappSelectedProvider, setWhatsappSelectedProvider] = useState<WhatsAppProviderKey>('evolution');
+  const [whatsappPairingMode, setWhatsappPairingMode] = useState<WhatsAppPairingMode>('qr');
+  const [whatsappPhoneNumber, setWhatsappPhoneNumber] = useState('');
   const [accountSyncBusy, setAccountSyncBusy] = useState(false);
 
   const appStatusByKey = useMemo(() => {
@@ -102,16 +110,31 @@ export function MoreScreen() {
     setIntegrationApps(result.apps);
   }, [workspace]);
 
+  const loadWhatsAppProviderState = useCallback(async () => {
+    if (!workspace) return;
+    const result = await listWhatsAppProviders(workspace.id);
+    setWhatsappProviders(result.providers);
+    if (result.activeProvider) {
+      setWhatsappSelectedProvider(result.activeProvider);
+    } else {
+      const firstConfigured = [...result.providers]
+        .sort((a, b) => a.fallbackOrder - b.fallbackOrder)
+        .find((provider) => provider.configured);
+      if (firstConfigured) setWhatsappSelectedProvider(firstConfigured.provider);
+    }
+  }, [workspace]);
+
   useEffect(() => {
     if (!workspace) return;
     void Promise.all([
       loadAccounts(),
       loadIntegrationState(),
+      loadWhatsAppProviderState(),
       supabase.from('brand_dna').select('*').eq('workspace_id', workspace.id).maybeSingle(),
     ])
-      .then(([, , dna]) => setBrandDna(dna.data as BrandDna | null))
+      .then(([, , , dna]) => setBrandDna(dna.data as BrandDna | null))
       .catch((error) => setConnectError(error instanceof Error ? error.message : 'تعذّر تحميل إعدادات التكاملات'));
-  }, [workspace, loadAccounts, loadIntegrationState]);
+  }, [workspace, loadAccounts, loadIntegrationState, loadWhatsAppProviderState]);
 
   useEffect(() => {
     void checkIsSuperAdmin().then(setIsSuperAdmin);
@@ -132,7 +155,7 @@ export function MoreScreen() {
       if (checking || cancelled) return;
       checking = true;
       try {
-        const status = await getWhatsAppEvolutionStatus(workspace.id);
+        const status = await getWhatsAppProviderStatus(workspace.id);
         if (cancelled) return;
         setWhatsappProviderState(status.state);
         if (status.connected) {
@@ -140,7 +163,7 @@ export function MoreScreen() {
           setWhatsappQrBase64(null);
           setWhatsappPairingCode(null);
           setConnectNotice('تم ربط WhatsApp بالـQR وأصبح جاهزًا في Unified Inbox.');
-          await Promise.all([loadAccounts(), loadIntegrationState()]);
+          await Promise.all([loadAccounts(), loadIntegrationState(), loadWhatsAppProviderState()]);
         }
       } catch (error) {
         if (!cancelled) setConnectError(error instanceof Error ? error.message : 'تعذّر فحص حالة WhatsApp');
@@ -155,7 +178,7 @@ export function MoreScreen() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [workspace?.id, whatsappQrOpen, loadAccounts, loadIntegrationState]);
+  }, [workspace?.id, whatsappQrOpen, loadAccounts, loadIntegrationState, loadWhatsAppProviderState]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -175,7 +198,7 @@ export function MoreScreen() {
       };
       setConnectNotice(`تم الربط بنجاح${platform ? ` — ${labels[platform] ?? platform}` : ''}`);
       setShowAccounts(true);
-      void Promise.all([loadAccounts(), loadIntegrationState()]);
+      void Promise.all([loadAccounts(), loadIntegrationState(), loadWhatsAppProviderState()]);
     } else if (social === 'error') {
       setConnectError(params.get('message') ?? 'فشل ربط الحساب');
       setShowAccounts(true);
@@ -200,8 +223,7 @@ export function MoreScreen() {
     const capability = PLATFORM_CAPABILITIES[platform];
     if (capability.connectMode === 'bot') return Boolean(telegramBotUsername);
     if (capability.connectMode === 'qr') {
-      const provider = appStatusByKey.get('whatsapp');
-      return platform === 'whatsapp' && Boolean(provider?.enabled && provider?.configured);
+      return platform === 'whatsapp' && whatsappProviders.some((provider) => provider.configured);
     }
     if (capability.connectMode !== 'oauth' || !capability.appKey) return false;
     const app = appStatusByKey.get(capability.appKey);
@@ -218,7 +240,7 @@ export function MoreScreen() {
       setConnectError(null);
       try {
         if (platform === 'whatsapp') {
-          await disconnectWhatsAppEvolution(workspace.id);
+          await disconnectWhatsAppProvider(workspace.id);
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
           setWhatsappPairingCode(null);
@@ -228,7 +250,7 @@ export function MoreScreen() {
           if (error) throw error;
         }
         setConnectNotice(`تم فصل ${PLATFORM_META[platform].label} من مساحة العمل`);
-        await Promise.all([loadAccounts(), loadIntegrationState()]);
+        await Promise.all([loadAccounts(), loadIntegrationState(), loadWhatsAppProviderState()]);
       } catch (error) {
         setConnectError(error instanceof Error ? error.message : 'تعذّر فصل الحساب');
       } finally {
@@ -246,26 +268,41 @@ export function MoreScreen() {
 
     if (capability.connectMode === 'qr' && platform === 'whatsapp') {
       if (!integrationReady(platform)) {
-        setConnectError('مزود WhatsApp غير مُعد. Super Admin لازم يضيف Evolution Base URL وAPI Key أولًا.');
+        setConnectError('لا يوجد مزود WhatsApp جاهز. Super Admin لازم يجهّز Evolution أو WAHA أو WPPConnect أولًا.');
         return;
       }
       setConnectError(null);
       setConnectNotice(null);
       setConnectingPlatform('whatsapp');
       try {
-        const result = await startWhatsAppEvolution(workspace.id);
+        const selected = whatsappProviders.find((provider) => provider.provider === whatsappSelectedProvider);
+        if (!selected?.configured) {
+          throw new Error('المزود المختار غير مُعد في Super Admin. اختر مزودًا جاهزًا آخر.');
+        }
+        if (whatsappPairingMode === 'code' && whatsappSelectedProvider !== 'waha') {
+          throw new Error('Pairing Code متاح مع WAHA فقط. اختر QR أو بدّل إلى WAHA.');
+        }
+        if (whatsappPairingMode === 'code' && !whatsappPhoneNumber.replace(/\D/g, '')) {
+          throw new Error('اكتب رقم WhatsApp بكود الدولة لاستخدام Pairing Code.');
+        }
+
+        const result = await startWhatsAppProvider(workspace.id, whatsappSelectedProvider, {
+          pairingMode: whatsappPairingMode,
+          phoneNumber: whatsappPhoneNumber,
+        });
         setWhatsappProviderState(result.state);
+        if (result.provider) setWhatsappSelectedProvider(result.provider);
         if (result.connected) {
           setWhatsappQrOpen(false);
           setWhatsappQrBase64(null);
           setWhatsappPairingCode(null);
           setConnectNotice('WhatsApp متصل بالفعل وجاهز.');
-          await loadAccounts();
+          await Promise.all([loadAccounts(), loadWhatsAppProviderState()]);
         } else {
           setWhatsappQrBase64(result.qrBase64 ?? null);
           setWhatsappPairingCode(result.pairingCode ?? null);
           setWhatsappQrOpen(true);
-          await loadAccounts();
+          await Promise.all([loadAccounts(), loadWhatsAppProviderState()]);
         }
       } catch (error) {
         setConnectError(error instanceof Error ? error.message : 'تعذّر إنشاء QR لواتساب');
@@ -301,7 +338,7 @@ export function MoreScreen() {
     try {
       const url = await startSocialOAuth(
         workspace.id,
-        capability.appKey as Exclude<SocialPlatformAppKey, 'telegram' | 'whatsapp'>,
+        capability.appKey as Exclude<SocialPlatformAppKey, 'telegram' | 'whatsapp' | 'whatsapp_waha' | 'whatsapp_wppconnect'>,
       );
       window.location.href = url;
     } catch (error) {
@@ -340,7 +377,7 @@ export function MoreScreen() {
       setTelegramInput('');
       setTelegramOpen(false);
       setConnectNotice('تم ربط تيليجرام وتفعيل مسار الـInbox.');
-      await Promise.all([loadAccounts(), loadIntegrationState()]);
+      await Promise.all([loadAccounts(), loadIntegrationState(), loadWhatsAppProviderState()]);
     } catch (error) {
       setConnectError(error instanceof Error ? error.message : 'تعذّر ربط تيليجرام');
     } finally {
