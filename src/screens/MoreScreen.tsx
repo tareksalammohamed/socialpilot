@@ -15,7 +15,9 @@ import {
   Bot,
   Gauge,
   Phone,
-  KeyRound,
+  QrCode,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -26,11 +28,10 @@ import {
   connectTelegramChannel,
   syncAccounts,
   getSocialIntegrationStatus,
-  getWhatsAppEmbeddedConfig,
-  completeWhatsAppEmbeddedSignup,
-  registerWhatsAppEmbeddedNumber,
+  startWhatsAppEvolution,
+  getWhatsAppEvolutionStatus,
+  disconnectWhatsAppEvolution,
   type SocialIntegrationStatus,
-  type WhatsAppEmbeddedConfig,
 } from '@/lib/api';
 import { Card, Button, Badge, ErrorBanner, Input } from '@/components/ui';
 import { PLATFORMS, PLATFORM_META } from '@/lib/constants';
@@ -42,7 +43,6 @@ import {
 import { SuperAdminScreen } from '@/screens/SuperAdminScreen';
 import { AiUsageScreen } from '@/screens/AiUsageScreen';
 import { SettingsScreen } from '@/screens/SettingsScreen';
-import { launchWhatsAppEmbeddedSignup, prepareWhatsAppEmbeddedSignup } from '@/lib/whatsappEmbeddedSignup';
 import type { SocialAccount, SocialPlatform, BrandDna, SocialPlatformAppKey } from '@/lib/types';
 
 function formatSyncDate(value: string | null | undefined): string {
@@ -73,11 +73,10 @@ export function MoreScreen() {
   const [telegramOpen, setTelegramOpen] = useState(false);
   const [telegramInput, setTelegramInput] = useState('');
   const [telegramBusy, setTelegramBusy] = useState(false);
-  const [whatsappConfig, setWhatsappConfig] = useState<WhatsAppEmbeddedConfig | null>(null);
-  const [whatsappSdkReady, setWhatsappSdkReady] = useState(false);
-  const [whatsappSetupReason, setWhatsappSetupReason] = useState<string | null>(null);
-  const [whatsappPin, setWhatsappPin] = useState('');
-  const [whatsappPinBusy, setWhatsappPinBusy] = useState(false);
+  const [whatsappQrOpen, setWhatsappQrOpen] = useState(false);
+  const [whatsappQrBase64, setWhatsappQrBase64] = useState<string | null>(null);
+  const [whatsappPairingCode, setWhatsappPairingCode] = useState<string | null>(null);
+  const [whatsappProviderState, setWhatsappProviderState] = useState<string>('not_created');
   const [accountSyncBusy, setAccountSyncBusy] = useState(false);
 
   const appStatusByKey = useMemo(() => {
@@ -125,29 +124,38 @@ export function MoreScreen() {
   }, []);
 
   useEffect(() => {
-    if (!workspace?.id) return;
+    if (!workspace?.id || !whatsappQrOpen) return;
     let cancelled = false;
-    setWhatsappSdkReady(false);
-    setWhatsappSetupReason(null);
+    let checking = false;
 
-    void getWhatsAppEmbeddedConfig(workspace.id)
-      .then(async (config) => {
+    const check = async () => {
+      if (checking || cancelled) return;
+      checking = true;
+      try {
+        const status = await getWhatsAppEvolutionStatus(workspace.id);
         if (cancelled) return;
-        setWhatsappConfig(config);
-        await prepareWhatsAppEmbeddedSignup(config);
-        if (!cancelled) setWhatsappSdkReady(true);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setWhatsappConfig(null);
-        setWhatsappSdkReady(false);
-        setWhatsappSetupReason(error instanceof Error ? error.message : 'WhatsApp Embedded Signup غير جاهز');
-      });
+        setWhatsappProviderState(status.state);
+        if (status.connected) {
+          setWhatsappQrOpen(false);
+          setWhatsappQrBase64(null);
+          setWhatsappPairingCode(null);
+          setConnectNotice('تم ربط WhatsApp بالـQR وأصبح جاهزًا في Unified Inbox.');
+          await Promise.all([loadAccounts(), loadIntegrationState()]);
+        }
+      } catch (error) {
+        if (!cancelled) setConnectError(error instanceof Error ? error.message : 'تعذّر فحص حالة WhatsApp');
+      } finally {
+        checking = false;
+      }
+    };
 
+    void check();
+    const timer = window.setInterval(() => void check(), 3000);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
-  }, [workspace?.id]);
+  }, [workspace?.id, whatsappQrOpen, loadAccounts, loadIntegrationState]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -191,8 +199,9 @@ export function MoreScreen() {
   function integrationReady(platform: SocialPlatform): boolean {
     const capability = PLATFORM_CAPABILITIES[platform];
     if (capability.connectMode === 'bot') return Boolean(telegramBotUsername);
-    if (capability.connectMode === 'embedded') {
-      return platform === 'whatsapp' && Boolean(whatsappConfig && whatsappSdkReady);
+    if (capability.connectMode === 'qr') {
+      const provider = appStatusByKey.get('whatsapp');
+      return platform === 'whatsapp' && Boolean(provider?.enabled && provider?.configured);
     }
     if (capability.connectMode !== 'oauth' || !capability.appKey) return false;
     const app = appStatusByKey.get(capability.appKey);
@@ -204,20 +213,22 @@ export function MoreScreen() {
     const existing = accounts.find((account) => account.platform === platform);
     const capability = PLATFORM_CAPABILITIES[platform];
 
-    if (platform === 'whatsapp' && existing?.metadata?.onboarding_state === 'needs_registration') {
-      setConnectError(null);
-      setConnectNotice('أكمل PIN المكوّن من 6 أرقام أسفل بطاقة WhatsApp لتفعيل الرقم.');
-      return;
-    }
-
     if (existing?.status === 'connected') {
       setConnectingPlatform(platform);
       setConnectError(null);
       try {
-        const { error } = await supabase.from('social_accounts').delete().eq('id', existing.id).eq('workspace_id', workspace.id);
-        if (error) throw error;
+        if (platform === 'whatsapp') {
+          await disconnectWhatsAppEvolution(workspace.id);
+          setWhatsappQrOpen(false);
+          setWhatsappQrBase64(null);
+          setWhatsappPairingCode(null);
+          setWhatsappProviderState('disconnected');
+        } else {
+          const { error } = await supabase.from('social_accounts').delete().eq('id', existing.id).eq('workspace_id', workspace.id);
+          if (error) throw error;
+        }
         setConnectNotice(`تم فصل ${PLATFORM_META[platform].label} من مساحة العمل`);
-        await loadAccounts();
+        await Promise.all([loadAccounts(), loadIntegrationState()]);
       } catch (error) {
         setConnectError(error instanceof Error ? error.message : 'تعذّر فصل الحساب');
       } finally {
@@ -233,30 +244,31 @@ export function MoreScreen() {
       return;
     }
 
-    if (capability.connectMode === 'embedded' && platform === 'whatsapp') {
-      if (!whatsappConfig || !whatsappSdkReady) {
-        setConnectError(whatsappSetupReason ?? 'WhatsApp Embedded Signup لسه بيجهز.');
+    if (capability.connectMode === 'qr' && platform === 'whatsapp') {
+      if (!integrationReady(platform)) {
+        setConnectError('مزود WhatsApp غير مُعد. Super Admin لازم يضيف Evolution Base URL وAPI Key أولًا.');
         return;
       }
       setConnectError(null);
       setConnectNotice(null);
       setConnectingPlatform('whatsapp');
       try {
-        const session = await launchWhatsAppEmbeddedSignup(whatsappConfig);
-        const result = await completeWhatsAppEmbeddedSignup({
-          workspaceId: workspace.id,
-          code: session.code,
-          wabaId: session.wabaId,
-          phoneNumberId: session.phoneNumberId,
-        });
-        await Promise.all([loadAccounts(), loadIntegrationState()]);
-        setConnectNotice(
-          result.needsRegistration
-            ? 'تم اختيار حساب ورقم WhatsApp من Meta. أكمل PIN المكوّن من 6 أرقام لتفعيل الرقم.'
-            : `تم ربط WhatsApp ${result.account.handle || result.account.display_name || ''} بنجاح.`,
-        );
+        const result = await startWhatsAppEvolution(workspace.id);
+        setWhatsappProviderState(result.state);
+        if (result.connected) {
+          setWhatsappQrOpen(false);
+          setWhatsappQrBase64(null);
+          setWhatsappPairingCode(null);
+          setConnectNotice('WhatsApp متصل بالفعل وجاهز.');
+          await loadAccounts();
+        } else {
+          setWhatsappQrBase64(result.qrBase64 ?? null);
+          setWhatsappPairingCode(result.pairingCode ?? null);
+          setWhatsappQrOpen(true);
+          await loadAccounts();
+        }
       } catch (error) {
-        setConnectError(error instanceof Error ? error.message : 'تعذّر ربط WhatsApp');
+        setConnectError(error instanceof Error ? error.message : 'تعذّر إنشاء QR لواتساب');
       } finally {
         setConnectingPlatform(null);
       }
@@ -313,23 +325,6 @@ export function MoreScreen() {
       setConnectError(error instanceof Error ? error.message : 'فشلت مزامنة الحسابات');
     } finally {
       setAccountSyncBusy(false);
-    }
-  }
-
-  async function handleRegisterWhatsAppPin() {
-    if (!workspace || !/^\d{6}$/.test(whatsappPin)) return;
-    setWhatsappPinBusy(true);
-    setConnectError(null);
-    setConnectNotice(null);
-    try {
-      await registerWhatsAppEmbeddedNumber(workspace.id, whatsappPin);
-      setWhatsappPin('');
-      await Promise.all([loadAccounts(), loadIntegrationState()]);
-      setConnectNotice('تم تسجيل رقم WhatsApp وتفعيل القناة بالكامل.');
-    } catch (error) {
-      setConnectError(error instanceof Error ? error.message : 'تعذّر تسجيل رقم WhatsApp');
-    } finally {
-      setWhatsappPinBusy(false);
     }
   }
 
@@ -459,8 +454,8 @@ export function MoreScreen() {
               if (connected) {
                 stateLabel = 'متصل';
                 stateColor = 'brand';
-              } else if (platform === 'whatsapp' && account?.metadata?.onboarding_state === 'needs_registration') {
-                stateLabel = 'بانتظار PIN';
+              } else if (platform === 'whatsapp' && account?.metadata?.onboarding_state === 'scan_qr') {
+                stateLabel = 'بانتظار QR';
                 stateColor = 'warning';
               } else if (account?.status === 'expired') {
                 stateLabel = 'انتهت الصلاحية';
@@ -468,7 +463,7 @@ export function MoreScreen() {
               } else if (account?.status === 'error') {
                 stateLabel = 'خطأ';
                 stateColor = 'danger';
-              } else if ((capability.connectMode === 'oauth' || capability.connectMode === 'bot' || capability.connectMode === 'embedded') && !ready) {
+              } else if ((capability.connectMode === 'oauth' || capability.connectMode === 'bot' || capability.connectMode === 'qr') && !ready) {
                 stateLabel = 'يحتاج إعداد';
                 stateColor = 'warning';
               } else if (capability.connectMode === 'managed') {
@@ -500,12 +495,12 @@ export function MoreScreen() {
                           variant={connected ? 'danger' : 'secondary'}
                           size="sm"
                           onClick={() => void togglePlatform(platform)}
-                          disabled={busy || (!connected && (capability.connectMode === 'oauth' || capability.connectMode === 'embedded') && !ready)}
+                          disabled={busy || (!connected && (capability.connectMode === 'oauth' || capability.connectMode === 'qr') && !ready)}
                         >
                           {connected
                             ? 'فصل'
-                            : platform === 'whatsapp' && account?.metadata?.onboarding_state === 'needs_registration'
-                              ? 'إكمال'
+                            : platform === 'whatsapp' && account?.metadata?.onboarding_state === 'scan_qr'
+                              ? 'عرض QR'
                               : busy
                                 ? 'جارٍ الربط...'
                                 : 'ربط'}
@@ -539,48 +534,72 @@ export function MoreScreen() {
                       </div>
                     )}
 
-                    {platform === 'whatsapp' && !connected && ready && (
+                    {platform === 'whatsapp' && !connected && ready && !whatsappQrOpen && (
                       <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-[11px] text-brand-200 flex items-start gap-2">
-                        <Phone size={14} className="mt-0.5 shrink-0" />
-                        <span>اضغط «ربط» فقط. نافذة Meta الرسمية هتتولى اختيار Business Portfolio وحساب WhatsApp والرقم والتفويض.</span>
+                        <QrCode size={14} className="mt-0.5 shrink-0" />
+                        <span>اضغط «ربط». SocialPilot هيولّد QR؛ افتح WhatsApp → الأجهزة المرتبطة → ربط جهاز وامسح الكود.</span>
                       </div>
                     )}
 
                     {platform === 'whatsapp' && !connected && !ready && (
                       <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
-                        {whatsappSetupReason ?? 'WhatsApp Embedded Signup يحتاج إعدادًا واحدًا من Super Admin.'}
+                        Evolution/Baileys غير مُعد على النظام. يحتاج Base URL وAPI Key من Super Admin مرة واحدة.
                       </div>
                     )}
 
-                    {platform === 'whatsapp'
-                      && account?.metadata?.onboarding_state === 'needs_registration'
-                      && (
-                        <div className="mt-3 pt-3 border-t border-ink-800 space-y-2 animate-slide-up">
-                          <div className="flex items-start gap-2 text-xs text-ink-400">
-                            <KeyRound size={14} className="mt-0.5 shrink-0" />
-                            <span>Meta تحتاج PIN من 6 أرقام لتفعيل Two-Step Verification للرقم. اختر PIN واحفظه عندك.</span>
+                    {platform === 'whatsapp' && !connected && whatsappQrOpen && (
+                      <div className="mt-3 rounded-2xl border border-brand-500/20 bg-ink-950/55 p-4 animate-slide-up">
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                          <div className="flex items-center gap-2">
+                            <QrCode size={17} className="text-brand-300" />
+                            <div>
+                              <p className="text-ink-100 text-xs font-semibold">امسح QR من WhatsApp</p>
+                              <p className="text-ink-500 text-[10px] mt-0.5">الحالة: {whatsappProviderState}</p>
+                            </div>
                           </div>
-                          <div className="flex gap-2">
-                            <Input
-                              value={whatsappPin}
-                              onChange={(value) => setWhatsappPin(value.replace(/\D/g, '').slice(0, 6))}
-                              placeholder="6-digit PIN"
-                              className="flex-1"
-                            />
-                            <Button
-                              size="sm"
-                              onClick={() => void handleRegisterWhatsAppPin()}
-                              disabled={whatsappPinBusy || !/^\d{6}$/.test(whatsappPin)}
-                            >
-                              {whatsappPinBusy ? 'جارٍ التفعيل...' : 'تفعيل الرقم'}
-                            </Button>
-                          </div>
+                          <Button variant="ghost" size="sm" onClick={() => void togglePlatform('whatsapp')} disabled={busy}>
+                            <RefreshCw size={14} className={busy ? 'animate-spin' : ''} />
+                            تحديث QR
+                          </Button>
                         </div>
-                      )}
+
+                        {whatsappQrBase64 ? (
+                          <div className="mx-auto w-fit rounded-2xl bg-white p-3">
+                            <img
+                              src={whatsappQrBase64.startsWith('data:') ? whatsappQrBase64 : `data:image/png;base64,${whatsappQrBase64}`}
+                              alt="WhatsApp QR"
+                              className="w-56 h-56 sm:w-64 sm:h-64"
+                            />
+                          </div>
+                        ) : whatsappPairingCode ? (
+                          <div className="rounded-xl bg-ink-900 border border-ink-800 p-4 text-center">
+                            <p className="text-ink-500 text-xs">Pairing code</p>
+                            <p className="text-2xl tracking-[0.25em] font-bold text-brand-300 mt-2" dir="ltr">{whatsappPairingCode}</p>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center gap-2 py-8 text-ink-500 text-xs">
+                            <Spinner size={16} /> جارٍ تجهيز QR...
+                          </div>
+                        )}
+
+                        <div className="mt-3 flex items-start gap-2 text-[11px] text-ink-500 leading-relaxed">
+                          <Phone size={14} className="mt-0.5 shrink-0" />
+                          <span>من الهاتف: WhatsApp → الإعدادات → الأجهزة المرتبطة → ربط جهاز. الاتصال يُحدّث تلقائيًا بدون Refresh للصفحة.</span>
+                        </div>
+                      </div>
+                    )}
 
                     {platform === 'whatsapp' && connected && (
-                      <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-brand-200 text-[11px]">
-                        WhatsApp Cloud API متصل. الرسائل الواردة والـAI Reply وحالات sent/delivered/read/failed تعمل عبر Unified Inbox.
+                      <div className="mt-3 rounded-xl bg-brand-500/5 border border-brand-500/20 px-3 py-2 text-brand-200 text-[11px] flex items-center gap-2">
+                        <Wifi size={14} />
+                        WhatsApp Web متصل عبر Evolution/Baileys. الرسائل والميديا والـAI Reply تعمل من Unified Inbox.
+                      </div>
+                    )}
+
+                    {platform === 'whatsapp' && !connected && account?.metadata?.provider === 'evolution' && account?.status === 'error' && (
+                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px] flex items-center gap-2">
+                        <WifiOff size={14} />
+                        الجلسة غير متصلة حاليًا. اضغط «عرض QR» لإعادة الربط.
                       </div>
                     )}
 
