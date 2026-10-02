@@ -481,7 +481,7 @@ async function syncOne(account: AccountRow): Promise<SyncOutcome> {
 
   await supabase.from('social_accounts').update({
     status: outcome.status,
-    needs_reconnect: outcome.status === 'expired',
+    needs_reconnect: outcome.status === 'expired' || (account.platform === 'whatsapp' && account.metadata?.provider === 'evolution' && !outcome.ok),
     ...(outcome.handle ? { handle: outcome.handle } : {}),
     ...(outcome.display_name ? { display_name: outcome.display_name } : {}),
     metadata,
