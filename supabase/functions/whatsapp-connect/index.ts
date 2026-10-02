@@ -22,6 +22,39 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+async function inspectWhatsAppToken(accessToken: string): Promise<{ expiresAt: string | null; scopes: string[] }> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps').select('app_id').eq('platform_key', 'meta').maybeSingle(),
+    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', 'meta').maybeSingle(),
+  ]);
+  if (!app?.app_id || !secret?.app_secret) {
+    throw new Error('إعداد Meta App غير مكتمل');
+  }
+
+  const debugUrl = new URL(`${GRAPH}/debug_token`);
+  debugUrl.searchParams.set('input_token', accessToken);
+  debugUrl.searchParams.set('access_token', `${app.app_id}|${secret.app_secret}`);
+  const response = await fetch(debugUrl);
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const data = body.data as Record<string, unknown> | undefined;
+  if (!response.ok || data?.is_valid !== true) {
+    throw new Error('Access Token غير صالح أو لا يخص تطبيق Meta الحالي');
+  }
+
+  const scopes = Array.isArray(data.scopes) ? data.scopes.filter((scope): scope is string => typeof scope === 'string') : [];
+  const required = ['whatsapp_business_management', 'whatsapp_business_messaging'];
+  const missing = required.filter((scope) => !scopes.includes(scope));
+  if (missing.length > 0) {
+    throw new Error(`Access Token ناقص صلاحيات: ${missing.join(', ')}`);
+  }
+
+  const expiresAtUnix = typeof data.expires_at === 'number' ? data.expires_at : 0;
+  return {
+    scopes,
+    expiresAt: expiresAtUnix > 0 ? new Date(expiresAtUnix * 1000).toISOString() : null,
+  };
+}
+
 async function ensureMetaWhatsAppWebhook(): Promise<string> {
   const [{ data: app }, { data: secret }] = await Promise.all([
     supabase.from('social_platform_apps').select('app_id').eq('platform_key', 'meta').maybeSingle(),
@@ -123,6 +156,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    const tokenInfo = await inspectWhatsAppToken(accessToken);
     const webhookUrl = await ensureMetaWhatsAppWebhook();
 
     const phonesBody = await graphJson(
@@ -177,6 +211,7 @@ Deno.serve(async (req: Request) => {
           webhook_subscribed: true,
           webhook_url: webhookUrl,
           connected_via: 'whatsapp-connect',
+          token_scopes: tokenInfo.scopes,
         },
         last_sync_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -195,7 +230,7 @@ Deno.serve(async (req: Request) => {
         access_token: accessToken,
         refresh_token: null,
         token_type: 'whatsapp_system_user',
-        expires_at: null,
+        expires_at: tokenInfo.expiresAt,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'account_id' });
 
