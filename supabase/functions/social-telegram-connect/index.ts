@@ -45,6 +45,23 @@ async function callTelegramApi<T>(botToken: string, method: string, params: Reco
   return (await res.json()) as TelegramApiResult<T>;
 }
 
+async function telegramWebhookSecret(botToken: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(botToken));
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function ensureInboxWebhook(botToken: string): Promise<void> {
+  const supabaseUrl = (Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '');
+  if (!supabaseUrl) throw new Error('SUPABASE_URL is missing');
+  const secretToken = await telegramWebhookSecret(botToken);
+  const result = await callTelegramApi<true>(botToken, 'setWebhook', {
+    url: `${supabaseUrl}/functions/v1/telegram-inbox-webhook`,
+    secret_token: secretToken,
+    allowed_updates: JSON.stringify(['message', 'edited_message', 'business_message']),
+  });
+  if (!result.ok) throw new Error(result.description ?? 'تعذّر تفعيل Telegram Inbox webhook');
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
   if (req.method !== 'POST') return jsonRes(405, { error: 'Method not allowed' });
@@ -160,7 +177,9 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
 
     if (upsertError) return jsonRes(500, { error: upsertError.message });
-    return jsonRes(200, { ok: true, account });
+
+    await ensureInboxWebhook(botToken);
+    return jsonRes(200, { ok: true, account, inboxWebhook: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Internal error';
     return jsonRes(500, { error: message });

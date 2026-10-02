@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Home, Plus, FileText, MessageSquare, MoreHorizontal, BarChart3 } from 'lucide-react';
+import { Home, Plus, FileText, MessageSquare, MoreHorizontal, BarChart3, Loader2, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 import { HomeScreen } from '@/screens/HomeScreen';
 import { CreateScreen } from '@/screens/CreateScreen';
 import { ContentScreen } from '@/screens/ContentScreen';
@@ -48,8 +49,46 @@ export type AppShellProps = {
 };
 
 export function AppShell() {
-  const { workspace } = useAuth();
+  const { workspace, user } = useAuth();
   const [tab, setTab] = useState<Tab>(() => tabFromPath(window.location.pathname));
+  const [assistantTaskStatus, setAssistantTaskStatus] = useState<'running' | 'completed' | 'failed' | null>(null);
+
+  useEffect(() => {
+    if (!workspace?.id || !user?.id) {
+      setAssistantTaskStatus(null);
+      return;
+    }
+
+    let cancelled = false;
+    void supabase
+      .from('assistant_tasks')
+      .select('status')
+      .eq('workspace_id', workspace.id)
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!cancelled) setAssistantTaskStatus((data?.status as 'running' | 'completed' | 'failed' | undefined) ?? null);
+      });
+
+    const channel = supabase
+      .channel(`app-assistant-status:${workspace.id}:${user.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'assistant_tasks', filter: `user_id=eq.${user.id}` },
+        (payload) => {
+          const row = payload.new as { workspace_id?: string; status?: 'running' | 'completed' | 'failed' };
+          if (row.workspace_id === workspace.id && row.status) setAssistantTaskStatus(row.status);
+        },
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      void supabase.removeChannel(channel);
+    };
+  }, [workspace?.id, user?.id]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -102,7 +141,13 @@ export function AppShell() {
                         : 'bg-ink-800 text-ink-300'
                     }`}
                   >
-                    <Icon size={22} />
+                    {assistantTaskStatus === 'running' ? (
+                      <Loader2 size={22} className="animate-spin" />
+                    ) : assistantTaskStatus === 'completed' && !active ? (
+                      <CheckCircle2 size={22} />
+                    ) : (
+                      <Icon size={22} />
+                    )}
                   </div>
                 ) : (
                   <Icon

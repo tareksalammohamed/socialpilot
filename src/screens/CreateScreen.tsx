@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -11,6 +11,21 @@ import type { GeneratedContent, ContentPlan } from '@/lib/types';
 type Mode = 'idle' | 'thinking' | 'content' | 'plan' | 'advice' | 'error';
 
 type ChatTurn = { role: 'user' | 'ai'; text: string };
+
+type AssistantTask = {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  request_text: string;
+  status: 'running' | 'completed' | 'failed';
+  result_type: 'content' | 'plan' | 'advice' | 'clarification' | null;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  content_id: string | null;
+  batch_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
 
 function toScheduledIso(date: string): string {
   return `${date}T${String(DEFAULT_SCHEDULE_HOUR).padStart(2, '0')}:00:00.000Z`;
@@ -36,7 +51,7 @@ const SUGGESTIONS = [
 ];
 
 export function CreateScreen() {
-  const { workspace } = useAuth();
+  const { workspace, user } = useAuth();
   const [input, setInput] = useState('');
   const [mode, setMode] = useState<Mode>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -49,15 +64,137 @@ export function CreateScreen() {
   const [saved, setSaved] = useState(false);
   const [savingPlan, setSavingPlan] = useState(false);
   const [planSaved, setPlanSaved] = useState(false);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [restoringTask, setRestoringTask] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [chat, mode]);
 
+  const applyTask = useCallback((task: AssistantTask) => {
+    setActiveTaskId(task.id);
+    setError(null);
+    setContent(null);
+    setPlan(null);
+    setAdvice(null);
+    setSaved(Boolean(task.content_id));
+    setPlanSaved(Boolean(task.batch_id));
+
+    if (task.status === 'running') {
+      setChat([{ role: 'user', text: task.request_text }]);
+      setMode('thinking');
+      return;
+    }
+
+    if (task.status === 'failed') {
+      const message = task.error || 'فشل تنفيذ الطلب';
+      setChat([
+        { role: 'user', text: task.request_text },
+        { role: 'ai', text: `خطأ: ${message}` },
+      ]);
+      setError(message);
+      setMode('error');
+      return;
+    }
+
+    const payload = task.result ?? {};
+    if (task.result_type === 'clarification') {
+      const question = typeof payload.text === 'string' ? payload.text : 'محتاج تفاصيل إضافية قبل التنفيذ.';
+      setChat([
+        { role: 'user', text: task.request_text },
+        { role: 'ai', text: question },
+      ]);
+      setMode('idle');
+      return;
+    }
+
+    if (task.result_type === 'content') {
+      const generated = payload as unknown as GeneratedContent;
+      setContent(generated);
+      setChat([
+        { role: 'user', text: task.request_text },
+        { role: 'ai', text: summarizeResult(payload, 'create_content') },
+      ]);
+      setMode('content');
+      return;
+    }
+
+    if (task.result_type === 'plan') {
+      const generatedPlan = payload as unknown as ContentPlan;
+      setPlan(generatedPlan);
+      setChat([
+        { role: 'user', text: task.request_text },
+        { role: 'ai', text: summarizeResult(payload, 'create_content_plan') },
+      ]);
+      setMode('plan');
+      return;
+    }
+
+    const answer = typeof payload.advice === 'string' ? payload.advice : 'تم';
+    setAdvice(answer);
+    setChat([
+      { role: 'user', text: task.request_text },
+      { role: 'ai', text: answer },
+    ]);
+    setMode('advice');
+  }, []);
+
+  useEffect(() => {
+    if (!workspace?.id || !user?.id) {
+      setRestoringTask(false);
+      return;
+    }
+    let cancelled = false;
+
+    void supabase
+      .from('assistant_tasks')
+      .select('*')
+      .eq('workspace_id', workspace.id)
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data, error: taskError }) => {
+        if (cancelled) return;
+        if (taskError) {
+          setError(taskError.message);
+          setMode('error');
+        } else if (data) {
+          applyTask(data as AssistantTask);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRestoringTask(false);
+      });
+
+    const channel = supabase
+      .channel(`assistant-tasks:${workspace.id}:${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'assistant_tasks',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          const task = payload.new as AssistantTask;
+          if (task.workspace_id !== workspace.id) return;
+          if (!activeTaskId || task.id === activeTaskId) applyTask(task);
+        },
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      void supabase.removeChannel(channel);
+    };
+  }, [workspace?.id, user?.id, activeTaskId, applyTask]);
+
   async function handleSubmit(text?: string) {
     const message = text ?? input;
-    if (!message.trim() || !workspace) return;
+    if (!message.trim() || !workspace || !user) return;
 
     setInput('');
     setError(null);
@@ -74,8 +211,33 @@ export function CreateScreen() {
     // but this data still drives create_content_plan's exact slot count
     // (see the note in agent/types.ts on `legacyContext`).
     const parsed = parseIntent(message);
+    let taskId: string | null = null;
 
     try {
+      const { data: task, error: taskError } = await supabase
+        .from('assistant_tasks')
+        .insert({
+          workspace_id: workspace.id,
+          user_id: user.id,
+          request_text: message.trim(),
+          status: 'running',
+          legacy_context: {
+            post_count: parsed.postCount,
+            start_date: parsed.startDate,
+            end_date: parsed.endDate,
+            frequency: parsed.frequency,
+            schedule: parsed.schedule,
+            content_goal: parsed.contentGoal,
+            content_type: parsed.contentType,
+            platforms: parsed.platforms,
+          },
+        })
+        .select('*')
+        .single();
+      if (taskError || !task) throw taskError ?? new Error('تعذّر إنشاء مهمة AI');
+      taskId = task.id;
+      setActiveTaskId(task.id);
+
       const { data: recentInsights } = await supabase
         .from('post_insights')
         .select('metric,value,platform,timestamp')
@@ -106,7 +268,13 @@ export function CreateScreen() {
       });
 
       if (turn.clarifyingQuestion) {
-        setChat((prev) => [...prev, { role: 'ai', text: turn.clarifyingQuestion as string }]);
+        const question = turn.clarifyingQuestion as string;
+        await supabase
+          .from('assistant_tasks')
+          .update({ status: 'completed', result_type: 'clarification', result: { text: question }, error: null })
+          .eq('id', taskId)
+          .eq('user_id', user.id);
+        setChat((prev) => [...prev, { role: 'ai', text: question }]);
         setMode('idle');
         return;
       }
@@ -122,49 +290,83 @@ export function CreateScreen() {
       setChat((prev) => [...prev, { role: 'ai', text: summarizeResult(result, toolName) }]);
 
       if (toolName === 'create_content') {
-        setContent(result as GeneratedContent);
+        const generated = result as GeneratedContent;
+        const contentId = await saveContent(generated, message);
+        await supabase
+          .from('assistant_tasks')
+          .update({ status: 'completed', result_type: 'content', result, content_id: contentId, error: null })
+          .eq('id', taskId)
+          .eq('user_id', user.id);
+        setContent(generated);
+        setSaved(Boolean(contentId));
         setMode('content');
       } else if (toolName === 'create_content_plan') {
-        setPlan(result as ContentPlan);
+        const generatedPlan = result as ContentPlan;
+        const batchId = await savePlan(generatedPlan);
+        await supabase
+          .from('assistant_tasks')
+          .update({ status: 'completed', result_type: 'plan', result, batch_id: batchId, error: null })
+          .eq('id', taskId)
+          .eq('user_id', user.id);
+        setPlan(generatedPlan);
+        setPlanSaved(Boolean(batchId));
         setMode('plan');
       } else {
         const r = result as { advice?: string };
+        await supabase
+          .from('assistant_tasks')
+          .update({ status: 'completed', result_type: 'advice', result: r, error: null })
+          .eq('id', taskId)
+          .eq('user_id', user.id);
         setAdvice(r.advice ?? 'تم');
         setMode('advice');
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'فشل تنفيذ الطلب';
+      if (taskId) {
+        await supabase
+          .from('assistant_tasks')
+          .update({ status: 'failed', error: msg })
+          .eq('id', taskId)
+          .eq('user_id', user.id);
+      }
       setError(msg);
       setMode('error');
       setChat((prev) => [...prev, { role: 'ai', text: `خطأ: ${msg}` }]);
     }
   }
 
-  async function saveContent() {
-    if (!content || !workspace) return;
+  async function saveContent(targetContent?: GeneratedContent, sourceMessage?: string): Promise<string | null> {
+    const contentToSave = targetContent ?? content;
+    if (!contentToSave || !workspace) return null;
     setSaving(true);
     try {
-      const { data: inserted } = await supabase
+      const { data: inserted, error: contentError } = await supabase
         .from('content')
         .insert({
           workspace_id: workspace.id,
-          title: content.title,
-          goal: content.goal,
-          topic: content.topic,
-          audience: content.audience,
-          master_text: content.master_text,
-          platforms: content.platforms,
+          title: contentToSave.title,
+          goal: contentToSave.goal,
+          topic: contentToSave.topic,
+          audience: contentToSave.audience,
+          master_text: contentToSave.master_text,
+          platforms: contentToSave.platforms,
           status: 'draft',
         })
         .select()
         .single();
+      if (contentError || !inserted) throw contentError ?? new Error('فشل حفظ المحتوى');
 
-      if (inserted && content.variants.length > 0) {
+      if (contentToSave.variants.length > 0) {
         const userTurns = chat.filter((turn) => turn.role === 'user');
-        const parsed = parseIntent(userTurns[userTurns.length - 1]?.text ?? '');
-        const scheduledDates = scheduleDates(parsed, content.variants.length);
+        const parsed = parseIntent(sourceMessage ?? userTurns[userTurns.length - 1]?.text ?? '');
+        const scheduledDates = scheduleDates(parsed, contentToSave.variants.length);
+        const quality = contentToSave.quality;
+        const scoreValues = Object.values(quality?.scores ?? {}).filter((score): score is number => typeof score === 'number');
+        const qualityScore = scoreValues.length > 0 ? Math.round(scoreValues.reduce((sum, score) => sum + score, 0) / scoreValues.length) : null;
+        const variantQualityStatus = qualityStatusOf(quality?.verdict);
         const { data: insertedVariants, error: variantsError } = await supabase.from('content_variants').insert(
-          content.variants.map((v) => ({
+          contentToSave.variants.map((v) => ({
             content_id: inserted.id,
             workspace_id: workspace.id,
             platform: v.platform,
@@ -173,14 +375,13 @@ export function CreateScreen() {
             cta: v.cta,
             media_brief: v.media_brief,
             status: 'review',
+            quality_score: qualityScore,
+            quality_status: variantQualityStatus,
           }))
         ).select('id, platform');
         if (variantsError) throw variantsError;
 
-        const quality = content.quality;
         if (quality && insertedVariants?.length) {
-          const scoreValues = Object.values(quality.scores).filter((score): score is number => typeof score === 'number');
-          const qualityScore = scoreValues.length > 0 ? Math.round(scoreValues.reduce((sum, score) => sum + score, 0) / scoreValues.length) : null;
           await supabase.from('quality_reviews').insert(insertedVariants.map((variant) => ({
             variant_id: variant.id,
             workspace_id: workspace.id,
@@ -204,7 +405,8 @@ export function CreateScreen() {
           if (variants?.length) {
             for (const [index, variant] of variants.entries()) {
               const scheduledFor = toScheduledIso(scheduledDates[index] ?? scheduledDates[scheduledDates.length - 1]);
-              const { error: scheduleError } = await supabase.rpc('schedule_content_variant', {
+              const rpcName = quality?.verdict === 'pass' ? 'approve_content_variant' : 'schedule_content_variant';
+              const { error: scheduleError } = await supabase.rpc(rpcName, {
                 p_workspace_id: workspace.id,
                 p_variant_id: variant.id,
                 p_scheduled_for: scheduledFor,
@@ -212,25 +414,30 @@ export function CreateScreen() {
               if (scheduleError) throw scheduleError;
             }
           }
-          await supabase.from('content').update({ status: 'scheduled' }).eq('id', inserted.id).eq('workspace_id', workspace.id);
+          await supabase.from('content').update({
+            status: quality?.verdict === 'pass' ? 'scheduled' : 'review',
+          }).eq('id', inserted.id).eq('workspace_id', workspace.id);
         }
       }
       setSaved(true);
+      return inserted.id as string;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'فشل حفظ المحتوى');
-      setMode('error');
+      const message = err instanceof Error ? err.message : 'فشل حفظ المحتوى';
+      setError(message);
+      throw err;
     } finally {
       setSaving(false);
     }
   }
 
-  async function savePlan() {
-    if (!plan || !workspace || plan.slots.length === 0) return;
+  async function savePlan(targetPlan?: ContentPlan): Promise<string | null> {
+    const planToSave = targetPlan ?? plan;
+    if (!planToSave || !workspace || planToSave.slots.length === 0) return null;
     setSavingPlan(true);
     setError(null);
     try {
       const batchId = crypto.randomUUID();
-      for (const slot of plan.slots) {
+      for (const slot of planToSave.slots) {
         const body = slot.content?.trim() || slot.title;
         const scheduledIso = toScheduledIso(slot.date);
         const qualityStatus = qualityStatusOf(slot.quality?.verdict);
@@ -242,11 +449,11 @@ export function CreateScreen() {
             workspace_id: workspace.id,
             batch_id: batchId,
             title: slot.title,
-            goal: slot.goal || plan.theme,
-            topic: plan.theme,
+            goal: slot.goal || planToSave.theme,
+            topic: planToSave.theme,
             master_text: body,
             platforms: [slot.platform],
-            status: 'scheduled',
+            status: qualityStatus === 'passed' ? 'scheduled' : 'review',
             scheduled_at: scheduledIso,
             quality_score: qualityScore,
             quality_status: qualityStatus,
@@ -285,17 +492,26 @@ export function CreateScreen() {
           });
         }
 
-        const { error: calendarError } = await supabase.rpc('schedule_content_variant', {
+        const rpcName = slot.quality?.verdict === 'pass' ? 'approve_content_variant' : 'schedule_content_variant';
+        const { error: calendarError } = await supabase.rpc(rpcName, {
           p_workspace_id: workspace.id,
           p_variant_id: variant.id,
           p_scheduled_for: scheduledIso,
         });
         if (calendarError) throw calendarError;
+        if (slot.quality?.verdict !== 'pass') {
+          await supabase.from('content')
+            .update({ status: 'review' })
+            .eq('id', inserted.id)
+            .eq('workspace_id', workspace.id);
+        }
       }
       setPlanSaved(true);
+      return batchId;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'فشل حفظ خطة المحتوى');
-      setMode('error');
+      const message = err instanceof Error ? err.message : 'فشل حفظ خطة المحتوى';
+      setError(message);
+      throw err;
     } finally {
       setSavingPlan(false);
     }
@@ -322,7 +538,12 @@ export function CreateScreen() {
 
       {/* Chat + results */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar px-5 py-4">
-        {chat.length === 0 && (
+        {restoringTask ? (
+          <div className="py-16 flex items-center justify-center gap-2 text-ink-500 text-sm">
+            <Spinner size={18} className="text-brand-400" />
+            استرجاع آخر عملية...
+          </div>
+        ) : chat.length === 0 && (
           <div className="flex flex-col items-center justify-center py-12 animate-fade-in">
             <div className="w-16 h-16 rounded-2xl bg-brand-500/15 border border-brand-500/30 flex items-center justify-center mb-4">
               <Sparkles className="text-brand-400" size={32} />
@@ -424,7 +645,7 @@ export function CreateScreen() {
                 <Check size={18} /> <span className="text-sm">تم حفظ المحتوى</span>
               </div>
             ) : (
-              <Button onClick={saveContent} disabled={saving} size="lg">
+              <Button onClick={() => void saveContent().catch(() => setMode('error'))} disabled={saving} size="lg">
                 {saving ? 'جارٍ الحفظ...' : 'حفظ في المحتوى'}
               </Button>
             )}
@@ -468,7 +689,7 @@ export function CreateScreen() {
                 <Check size={18} /> <span className="text-sm">تم حفظ الخطة وربطها بالتقويم</span>
               </div>
             ) : (
-              <Button onClick={savePlan} disabled={savingPlan} size="lg">
+              <Button onClick={() => void savePlan().catch(() => setMode('error'))} disabled={savingPlan} size="lg">
                 {savingPlan ? 'جارٍ حفظ الخطة...' : 'حفظ الخطة في المحتوى والتقويم'}
               </Button>
             )}
