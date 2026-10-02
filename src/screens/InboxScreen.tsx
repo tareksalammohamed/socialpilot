@@ -304,7 +304,7 @@ export function InboxScreen() {
     return () => {
       cancelled = true;
     };
-  }, [selectedConversation?.id, selectedConversation?.platform, selectedConversation?.metadata?.provider]);
+  }, [selectedConversation]);
 
   const filteredConversations = useMemo(() => {
     const needle = search.trim().toLowerCase();
