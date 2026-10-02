@@ -447,6 +447,21 @@ export type AiRoutingPolicy = {
 
 export type SocialPlatformAppKey = 'meta' | 'linkedin' | 'telegram' | 'x' | 'threads' | 'tiktok' | 'whatsapp';
 
+export type WhatsAppProviderKey = 'evolution' | 'waha' | 'wppconnect';
+
+export type WhatsAppProviderConfig = {
+  provider_key: WhatsAppProviderKey;
+  display_name: string;
+  base_url: string | null;
+  enabled: boolean;
+  priority: number;
+  configured: boolean;
+  has_secret: boolean;
+  status: 'not_configured' | 'connected' | 'error';
+  last_error: string | null;
+  last_test_at: string | null;
+};
+
 export type SocialPlatformApp = {
   id: string;
   platform_key: SocialPlatformAppKey;
@@ -455,6 +470,8 @@ export type SocialPlatformApp = {
   has_secret: boolean;
   app_id: string | null;
   configuration_id?: string | null;
+  active_provider?: WhatsAppProviderKey | null;
+  whatsapp_providers?: WhatsAppProviderConfig[];
   redirect_uri: string | null;
   status: 'not_configured' | 'connected' | 'error';
   last_test_at: string | null;
