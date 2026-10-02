@@ -62,8 +62,8 @@ export const PLATFORM_CAPABILITIES: Record<SocialPlatform, PlatformCapability> =
     schedule: true,
     inbox: 'none',
     aiReply: false,
-    media: ['text', 'image', 'video'],
-    note: 'ربط موحّد ونشر Threads؛ استقبال الردود سيضاف عبر webhook منفصل.',
+    media: ['text', 'image'],
+    note: 'ربط موحّد ونشر نص/صورة؛ استقبال الردود سيضاف عبر webhook منفصل.',
   },
   tiktok: {
     appKey: 'tiktok',
