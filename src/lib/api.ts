@@ -150,50 +150,109 @@ export async function getSocialIntegrationStatus(workspaceId: string): Promise<{
   return { apps: body.apps ?? [], accounts: body.accounts ?? [] };
 }
 
-export type WhatsAppEvolutionStatus = {
-  ok?: true;
+export type WhatsAppProviderKey = 'evolution' | 'waha' | 'wppconnect';
+export type WhatsAppPairingMode = 'qr' | 'code';
+
+export type WhatsAppProviderInfo = {
+  provider: WhatsAppProviderKey;
+  key: string;
+  displayName: string;
   configured: boolean;
+  enabled: boolean;
+  status: 'not_configured' | 'connected' | 'error';
+  lastError: string | null;
+  lastTestAt: string | null;
+  methods: WhatsAppPairingMode[];
+  recommended: boolean;
+  fallbackOrder: number;
+};
+
+export type WhatsAppProviderStatus = {
+  ok?: true;
+  configured?: boolean;
+  provider?: WhatsAppProviderKey | null;
   connected: boolean;
   state: string;
   qrBase64?: string | null;
   qrCode?: string | null;
   pairingCode?: string | null;
   accountId?: string | null;
+  methods?: WhatsAppPairingMode[];
   account?: unknown;
 };
 
-async function callWhatsAppEvolution(
+async function callWhatsAppProvider(
   workspaceId: string,
-  action: 'start' | 'status' | 'disconnect',
-): Promise<WhatsAppEvolutionStatus> {
+  action: 'providers' | 'start' | 'status' | 'disconnect',
+  options?: {
+    provider?: WhatsAppProviderKey;
+    pairingMode?: WhatsAppPairingMode;
+    phoneNumber?: string;
+  },
+): Promise<Record<string, unknown>> {
   const { data: session } = await supabase.auth.getSession();
   const token = session.session?.access_token;
   if (!token) throw new Error('يجب تسجيل الدخول لربط واتساب');
 
-  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-evolution`, {
+  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-provider`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
       apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
     },
-    body: JSON.stringify({ workspaceId, action }),
+    body: JSON.stringify({ workspaceId, action, ...options }),
   });
-  const body = await response.json().catch(() => ({})) as WhatsAppEvolutionStatus & { error?: string };
+  const body = await response.json().catch(() => ({})) as Record<string, unknown> & { error?: string };
   if (!response.ok) throw new Error(body.error ?? `فشل تشغيل WhatsApp (${response.status})`);
   return body;
 }
 
-export function startWhatsAppEvolution(workspaceId: string): Promise<WhatsAppEvolutionStatus> {
-  return callWhatsAppEvolution(workspaceId, 'start');
+export async function listWhatsAppProviders(workspaceId: string): Promise<{
+  providers: WhatsAppProviderInfo[];
+  activeProvider: WhatsAppProviderKey | null;
+  accountStatus: string | null;
+}> {
+  const body = await callWhatsAppProvider(workspaceId, 'providers');
+  return {
+    providers: Array.isArray(body.providers) ? body.providers as WhatsAppProviderInfo[] : [],
+    activeProvider: (body.activeProvider as WhatsAppProviderKey | null | undefined) ?? null,
+    accountStatus: typeof body.accountStatus === 'string' ? body.accountStatus : null,
+  };
 }
 
-export function getWhatsAppEvolutionStatus(workspaceId: string): Promise<WhatsAppEvolutionStatus> {
-  return callWhatsAppEvolution(workspaceId, 'status');
+export async function startWhatsAppProvider(
+  workspaceId: string,
+  provider: WhatsAppProviderKey,
+  options?: { pairingMode?: WhatsAppPairingMode; phoneNumber?: string },
+): Promise<WhatsAppProviderStatus> {
+  return await callWhatsAppProvider(workspaceId, 'start', {
+    provider,
+    pairingMode: options?.pairingMode,
+    phoneNumber: options?.phoneNumber,
+  }) as WhatsAppProviderStatus;
 }
 
-export function disconnectWhatsAppEvolution(workspaceId: string): Promise<WhatsAppEvolutionStatus> {
-  return callWhatsAppEvolution(workspaceId, 'disconnect');
+export async function getWhatsAppProviderStatus(workspaceId: string): Promise<WhatsAppProviderStatus> {
+  return await callWhatsAppProvider(workspaceId, 'status') as WhatsAppProviderStatus;
+}
+
+export async function disconnectWhatsAppProvider(workspaceId: string): Promise<WhatsAppProviderStatus> {
+  return await callWhatsAppProvider(workspaceId, 'disconnect') as WhatsAppProviderStatus;
+}
+
+// Backward-compatible aliases for any older callers while the UI migrates to
+// the provider controller. New code should use the generic provider functions.
+export function startWhatsAppEvolution(workspaceId: string): Promise<WhatsAppProviderStatus> {
+  return startWhatsAppProvider(workspaceId, 'evolution');
+}
+
+export function getWhatsAppEvolutionStatus(workspaceId: string): Promise<WhatsAppProviderStatus> {
+  return getWhatsAppProviderStatus(workspaceId);
+}
+
+export function disconnectWhatsAppEvolution(workspaceId: string): Promise<WhatsAppProviderStatus> {
+  return disconnectWhatsAppProvider(workspaceId);
 }
 
 export type PublishResult = {
