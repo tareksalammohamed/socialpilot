@@ -645,7 +645,7 @@ export function CreateScreen() {
                 <Check size={18} /> <span className="text-sm">تم حفظ المحتوى</span>
               </div>
             ) : (
-              <Button onClick={() => void saveContent()} disabled={saving} size="lg">
+              <Button onClick={() => void saveContent().catch(() => setMode('error'))} disabled={saving} size="lg">
                 {saving ? 'جارٍ الحفظ...' : 'حفظ في المحتوى'}
               </Button>
             )}
@@ -689,7 +689,7 @@ export function CreateScreen() {
                 <Check size={18} /> <span className="text-sm">تم حفظ الخطة وربطها بالتقويم</span>
               </div>
             ) : (
-              <Button onClick={() => void savePlan()} disabled={savingPlan} size="lg">
+              <Button onClick={() => void savePlan().catch(() => setMode('error'))} disabled={savingPlan} size="lg">
                 {savingPlan ? 'جارٍ حفظ الخطة...' : 'حفظ الخطة في المحتوى والتقويم'}
               </Button>
             )}
