@@ -407,6 +407,27 @@ export async function fetchInboxMedia(messageId: string): Promise<Blob> {
   return response.blob();
 }
 
+export async function sendInboxMedia(params: {
+  conversationId: string;
+  file: File;
+  caption?: string;
+}): Promise<InboxMessage> {
+  const form = new FormData();
+  form.append('conversationId', params.conversationId);
+  form.append('file', params.file, params.file.name);
+  if (params.caption?.trim()) form.append('caption', params.caption.trim());
+
+  const response = await authorizedFunctionFetch('inbox-media-send', {
+    method: 'POST',
+    body: form,
+  });
+  const body = await response.json().catch(() => ({})) as { error?: string; message?: InboxMessage };
+  if (!response.ok || !body.message) {
+    throw new Error(body.error ?? `تعذّر إرسال المرفق (${response.status})`);
+  }
+  return body.message;
+}
+
 export async function sendInboxReply(conversationId: string, content: string): Promise<InboxMessage> {
   const { data: session } = await supabase.auth.getSession();
   const token = session.session?.access_token;
