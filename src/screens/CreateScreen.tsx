@@ -453,7 +453,7 @@ export function CreateScreen() {
             topic: planToSave.theme,
             master_text: body,
             platforms: [slot.platform],
-            status: qStatus === 'passed' ? 'scheduled' : 'review',
+            status: qualityStatus === 'passed' ? 'scheduled' : 'review',
             scheduled_at: scheduledIso,
             quality_score: qualityScore,
             quality_status: qualityStatus,
