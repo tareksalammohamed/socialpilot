@@ -51,7 +51,7 @@ export type AppShellProps = {
 export function AppShell() {
   const { workspace, user } = useAuth();
   const [tab, setTab] = useState<Tab>(() => tabFromPath(window.location.pathname));
-  const [assistantTaskStatus, setAssistantTaskStatus] = useState<'running' | 'completed' | 'failed' | null>(null);
+  const [assistantTaskStatus, setAssistantTaskStatus] = useState<'queued' | 'running' | 'completed' | 'failed' | null>(null);
   const [unreadInboxCount, setUnreadInboxCount] = useState(0);
 
   useEffect(() => {
@@ -70,7 +70,7 @@ export function AppShell() {
       .limit(1)
       .maybeSingle()
       .then(({ data }) => {
-        if (!cancelled) setAssistantTaskStatus((data?.status as 'running' | 'completed' | 'failed' | undefined) ?? null);
+        if (!cancelled) setAssistantTaskStatus((data?.status as 'queued' | 'running' | 'completed' | 'failed' | undefined) ?? null);
       });
 
     const channel = supabase
@@ -79,7 +79,7 @@ export function AppShell() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'assistant_tasks', filter: `user_id=eq.${user.id}` },
         (payload) => {
-          const row = payload.new as { workspace_id?: string; status?: 'running' | 'completed' | 'failed' };
+          const row = payload.new as { workspace_id?: string; status?: 'queued' | 'running' | 'completed' | 'failed' };
           if (row.workspace_id === workspace.id && row.status) setAssistantTaskStatus(row.status);
         },
       )
@@ -178,7 +178,7 @@ export function AppShell() {
                         : 'bg-ink-800 text-ink-200 border-ink-700'
                     }`}
                   >
-                    {assistantTaskStatus === 'running' ? (
+                    {(assistantTaskStatus === 'queued' || assistantTaskStatus === 'running') ? (
                       <Loader2 size={22} className="animate-spin" />
                     ) : assistantTaskStatus === 'completed' && !active ? (
                       <CheckCircle2 size={22} />
