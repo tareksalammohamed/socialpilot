@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -72,7 +72,7 @@ export function CreateScreen() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [chat, mode]);
 
-  function applyTask(task: AssistantTask) {
+  const applyTask = useCallback((task: AssistantTask) => {
     setActiveTaskId(task.id);
     setError(null);
     setContent(null);
@@ -138,7 +138,7 @@ export function CreateScreen() {
       { role: 'ai', text: answer },
     ]);
     setMode('advice');
-  }
+  }, []);
 
   useEffect(() => {
     if (!workspace?.id || !user?.id) {
@@ -190,7 +190,7 @@ export function CreateScreen() {
       cancelled = true;
       void supabase.removeChannel(channel);
     };
-  }, [workspace?.id, user?.id, activeTaskId]);
+  }, [workspace?.id, user?.id, activeTaskId, applyTask]);
 
   async function handleSubmit(text?: string) {
     const message = text ?? input;
