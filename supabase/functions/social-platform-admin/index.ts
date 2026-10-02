@@ -51,7 +51,7 @@ const REDIRECT_URI_PLATFORMS = new Set(['meta', 'linkedin', 'x', 'threads', 'tik
 
 type Action =
   | { action: 'list_apps' }
-  | { action: 'save_app'; platformKey: string; appId: string; appSecret?: string; redirectUri?: string }
+  | { action: 'save_app'; platformKey: string; appId: string; appSecret?: string; redirectUri?: string; configurationId?: string }
   | { action: 'set_enabled'; platformKey: string; enabled: boolean }
   | { action: 'remove_app'; platformKey: string };
 
@@ -72,9 +72,16 @@ Deno.serve(async (req: Request) => {
   try {
     switch (body.action) {
       case 'list_apps': {
-        const { data, error } = await supabase.from('social_platform_apps').select('*').order('platform_key');
+        const [{ data, error }, { data: embeddedSetting }] = await Promise.all([
+          supabase.from('social_platform_apps').select('*').order('platform_key'),
+          supabase.from('system_settings').select('value').eq('key', 'social.meta.whatsapp_embedded_signup').maybeSingle(),
+        ]);
         if (error) return jsonRes(500, { error: error.message });
-        return jsonRes(200, { apps: data ?? [] });
+        const embedded = (embeddedSetting?.value ?? {}) as Record<string, unknown>;
+        const apps = (data ?? []).map((app) => app.platform_key === 'meta'
+          ? { ...app, configuration_id: typeof embedded.configuration_id === 'string' ? embedded.configuration_id : null }
+          : app);
+        return jsonRes(200, { apps });
       }
 
       case 'save_app': {
@@ -92,6 +99,14 @@ Deno.serve(async (req: Request) => {
             app_secret: body.appSecret.trim(),
             updated_at: new Date().toISOString(),
           });
+        }
+
+        if (body.platformKey === 'meta' && body.configurationId?.trim()) {
+          await supabase.from('system_settings').upsert({
+            key: 'social.meta.whatsapp_embedded_signup',
+            value: { configuration_id: body.configurationId.trim() },
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'key' });
         }
 
         const { data: existingSecret } = await supabase
@@ -120,6 +135,9 @@ Deno.serve(async (req: Request) => {
 
       case 'remove_app': {
         await supabase.from('social_platform_app_secrets').delete().eq('platform_key', body.platformKey);
+        if (body.platformKey === 'meta') {
+          await supabase.from('system_settings').delete().eq('key', 'social.meta.whatsapp_embedded_signup');
+        }
         await supabase.from('social_platform_apps').update({
           app_id: null,
           has_secret: false,
