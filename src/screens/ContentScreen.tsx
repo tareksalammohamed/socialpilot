@@ -34,7 +34,7 @@ const STATUS_COLORS: Record<ContentStatus, 'neutral' | 'brand' | 'warning' | 'ac
 };
 
 // Keep this in sync with SUPPORTED_PLATFORMS in supabase/functions/social-publish.
-const PUBLISHABLE_PLATFORMS = new Set<SocialPlatform>(['telegram', 'x', 'facebook', 'instagram', 'linkedin']);
+const PUBLISHABLE_PLATFORMS = new Set<SocialPlatform>(['telegram', 'x', 'facebook', 'instagram', 'linkedin', 'threads']);
 
 type PublishOutcome = { ok: boolean; message: string; url?: string | null };
 
