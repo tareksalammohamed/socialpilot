@@ -241,17 +241,18 @@ export function InboxScreen() {
     [conversations, selectedId],
   );
 
-  const whatsappUsesEvolution = useMemo(
-    () => selectedConversation?.platform === 'whatsapp' && selectedConversation.metadata?.provider === 'evolution',
+  const whatsappUsesWebProvider = useMemo(
+    () => selectedConversation?.platform === 'whatsapp'
+      && ['evolution', 'waha', 'wppconnect'].includes(String(selectedConversation.metadata?.provider ?? '')),
     [selectedConversation],
   );
 
   const whatsappServiceWindowOpen = useMemo(() => {
-    if (selectedConversation?.platform !== 'whatsapp' || whatsappUsesEvolution) return true;
+    if (selectedConversation?.platform !== 'whatsapp' || whatsappUsesWebProvider) return true;
     const latestInbound = [...messages].reverse().find((message) => message.direction === 'inbound');
     if (!latestInbound) return false;
     return Date.now() - new Date(latestInbound.created_at).getTime() <= 24 * 60 * 60 * 1000;
-  }, [selectedConversation?.platform, whatsappUsesEvolution, messages]);
+  }, [selectedConversation?.platform, whatsappUsesWebProvider, messages]);
 
   const selectedWhatsAppTemplate = useMemo(
     () => whatsappTemplates.find((template) => templateKey(template) === selectedTemplateKey) ?? null,
@@ -264,7 +265,7 @@ export function InboxScreen() {
   );
 
   useEffect(() => {
-    if (!selectedConversation || selectedConversation.platform !== 'whatsapp' || selectedConversation.metadata?.provider === 'evolution') {
+    if (!selectedConversation || selectedConversation.platform !== 'whatsapp' || ['evolution', 'waha', 'wppconnect'].includes(String(selectedConversation.metadata?.provider ?? ''))) {
       setWhatsappTemplates([]);
       setSelectedTemplateKey('');
       setTemplateVariables([]);
@@ -1031,21 +1032,21 @@ export function InboxScreen() {
                 <div className="p-3 border-t border-ink-800">
                   {selectedConversation.platform === 'whatsapp' && (
                     <div className={`mb-2 rounded-xl border px-3 py-2 text-xs ${
-                      whatsappUsesEvolution
+                      whatsappUsesWebProvider
                         ? 'border-brand-500/20 bg-brand-500/5 text-brand-200'
                         : whatsappServiceWindowOpen
                           ? 'border-brand-500/20 bg-brand-500/5 text-brand-200'
                           : 'border-warning-500/25 bg-warning-500/10 text-warning-300'
                     }`}>
-                      {whatsappUsesEvolution
-                        ? 'WhatsApp Web متصل عبر Evolution/Baileys — إرسال النصوص والميديا متاح مباشرة بدون قواعد Cloud API أو نافذة 24 ساعة.'
+                      {whatsappUsesWebProvider
+                        ? 'WhatsApp Web متصل عبر مزود QR — إرسال النصوص والميديا متاح مباشرة بدون قواعد Cloud API أو نافذة 24 ساعة.'
                         : whatsappServiceWindowOpen
                           ? 'نافذة خدمة WhatsApp Cloud مفتوحة — يمكنك إرسال رد نصي مباشر أو استخدام Template.'
                           : 'نافذة WhatsApp Cloud لمدة 24 ساعة مغلقة — أرسل Template معتمد من Meta لإعادة فتح المحادثة.'}
                     </div>
                   )}
 
-                  {selectedConversation.platform === 'whatsapp' && !whatsappUsesEvolution && !whatsappServiceWindowOpen && (
+                  {selectedConversation.platform === 'whatsapp' && !whatsappUsesWebProvider && !whatsappServiceWindowOpen && (
                     <div className="mb-3 rounded-xl border border-ink-800 bg-ink-950/40 p-3 space-y-3">
                       <div className="flex items-center gap-2 text-xs font-semibold text-ink-200">
                         <LayoutTemplate size={15} className="text-brand-300" />
