@@ -61,44 +61,58 @@ export async function connectTelegramChannel(workspaceId: string, channelUsernam
   return callTelegramConnect<{ ok: true; account: unknown }>({ action: 'connect', workspaceId, channelUsername });
 }
 
-export type WhatsAppConnectionResult = {
+export type WhatsAppEmbeddedConfig = {
+  configured: true;
+  appId: string;
+  configurationId: string;
+  graphVersion: string;
+};
+
+export type WhatsAppEmbeddedResult = {
   ok: true;
-  webhookSubscribed: boolean;
+  needsRegistration: boolean;
   account: {
     id: string;
-    platform: 'whatsapp';
     display_name: string | null;
     handle: string | null;
     status: string;
-    metadata: Record<string, unknown>;
   };
 };
 
-export async function connectWhatsApp(params: {
-  workspaceId: string;
-  wabaId: string;
-  phoneNumberId: string;
-  accessToken: string;
-}): Promise<WhatsAppConnectionResult> {
+async function callWhatsAppEmbedded<T>(payload: Record<string, unknown>): Promise<T> {
   const { data: session } = await supabase.auth.getSession();
   const token = session.session?.access_token;
   if (!token) throw new Error('يجب تسجيل الدخول لربط واتساب');
 
-  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-connect`, {
+  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/whatsapp-embedded-signup`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
       apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
     },
-    body: JSON.stringify(params),
+    body: JSON.stringify(payload),
   });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) throw new Error((body.error as string | undefined) ?? `فشل ربط واتساب (${response.status})`);
+  return body as T;
+}
 
-  const body = await response.json().catch(() => ({})) as Partial<WhatsAppConnectionResult> & { error?: string };
-  if (!response.ok || !body.ok || !body.account) {
-    throw new Error(body.error ?? `فشل ربط واتساب (${response.status})`);
-  }
-  return body as WhatsAppConnectionResult;
+export function getWhatsAppEmbeddedConfig(workspaceId: string): Promise<WhatsAppEmbeddedConfig> {
+  return callWhatsAppEmbedded<WhatsAppEmbeddedConfig>({ action: 'get_config', workspaceId });
+}
+
+export function completeWhatsAppEmbeddedSignup(params: {
+  workspaceId: string;
+  code: string;
+  wabaId?: string;
+  phoneNumberId?: string;
+}): Promise<WhatsAppEmbeddedResult> {
+  return callWhatsAppEmbedded<WhatsAppEmbeddedResult>({ action: 'complete', ...params });
+}
+
+export function registerWhatsAppEmbeddedNumber(workspaceId: string, pin: string): Promise<{ ok: true }> {
+  return callWhatsAppEmbedded<{ ok: true }>({ action: 'register', workspaceId, pin });
 }
 
 export type SocialIntegrationStatus = {

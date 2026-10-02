@@ -454,6 +454,7 @@ export type SocialPlatformApp = {
   enabled: boolean;
   has_secret: boolean;
   app_id: string | null;
+  configuration_id?: string | null;
   redirect_uri: string | null;
   status: 'not_configured' | 'connected' | 'error';
   last_test_at: string | null;

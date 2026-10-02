@@ -53,6 +53,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
   const [socialEditingKey, setSocialEditingKey] = useState<SocialPlatformAppKey | null>(null);
   const [socialAppIdInput, setSocialAppIdInput] = useState('');
   const [socialAppSecretInput, setSocialAppSecretInput] = useState('');
+  const [socialConfigurationIdInput, setSocialConfigurationIdInput] = useState('');
 
   async function loadAll() {
     setLoading(true);
@@ -92,6 +93,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     setSocialEditingKey(app.platform_key);
     setSocialAppIdInput(app.app_id ?? '');
     setSocialAppSecretInput('');
+    setSocialConfigurationIdInput(app.platform_key === 'meta' ? app.configuration_id ?? '' : '');
   }
 
   async function handleSaveSocialApp(platformKey: SocialPlatformAppKey) {
@@ -99,10 +101,17 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     setSocialBusyKey(platformKey);
     setSocialError(null);
     try {
-      await socialAdmin.saveApp(platformKey, socialAppIdInput.trim(), socialAppSecretInput.trim() || undefined);
+      await socialAdmin.saveApp(
+        platformKey,
+        socialAppIdInput.trim(),
+        socialAppSecretInput.trim() || undefined,
+        undefined,
+        platformKey === 'meta' ? socialConfigurationIdInput.trim() || undefined : undefined,
+      );
       setSocialEditingKey(null);
       setSocialAppIdInput('');
       setSocialAppSecretInput('');
+      setSocialConfigurationIdInput('');
       await loadSocialApps();
     } catch (e) {
       setSocialError(e instanceof Error ? e.message : 'فشل حفظ إعدادات الربط');
@@ -334,6 +343,18 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                       }
                       type="password"
                     />
+                    {app.platform_key === 'meta' && (
+                      <div className="space-y-1">
+                        <Input
+                          value={socialConfigurationIdInput}
+                          onChange={setSocialConfigurationIdInput}
+                          placeholder="WhatsApp Embedded Signup Configuration ID"
+                        />
+                        <p className="text-[10px] text-ink-500 leading-relaxed">
+                          إعداد واحد للنظام من Meta → Facebook Login for Business. بعد حفظه، المستخدم يربط WhatsApp بزر واحد بدون Tokens أو IDs.
+                        </p>
+                      </div>
+                    )}
                     {app.redirect_uri && (
                       <div className="bg-ink-900 rounded-lg p-2.5">
                         <p className="text-ink-500 text-[10px] mb-1">
@@ -362,7 +383,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                           إزالة
                         </Button>
                       )}
-                      <Button size="sm" variant="ghost" onClick={() => { setSocialEditingKey(null); setSocialAppIdInput(''); setSocialAppSecretInput(''); }}>
+                      <Button size="sm" variant="ghost" onClick={() => { setSocialEditingKey(null); setSocialAppIdInput(''); setSocialAppSecretInput(''); setSocialConfigurationIdInput(''); }}>
                         إلغاء
                       </Button>
                     </div>

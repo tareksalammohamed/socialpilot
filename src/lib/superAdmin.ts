@@ -93,8 +93,8 @@ async function callSocialAdmin<T>(action: string, payload: Record<string, unknow
 
 export const socialAdmin = {
   listApps: () => callSocialAdmin<{ apps: SocialPlatformApp[] }>('list_apps'),
-  saveApp: (platformKey: SocialPlatformAppKey, appId: string, appSecret?: string, redirectUri?: string) =>
-    callSocialAdmin<{ ok: true; redirectUri: string }>('save_app', { platformKey, appId, appSecret, redirectUri }),
+  saveApp: (platformKey: SocialPlatformAppKey, appId: string, appSecret?: string, redirectUri?: string, configurationId?: string) =>
+    callSocialAdmin<{ ok: true; redirectUri: string }>('save_app', { platformKey, appId, appSecret, redirectUri, configurationId }),
   setEnabled: (platformKey: SocialPlatformAppKey, enabled: boolean) =>
     callSocialAdmin<{ ok: true }>('set_enabled', { platformKey, enabled }),
   removeApp: (platformKey: SocialPlatformAppKey) =>
