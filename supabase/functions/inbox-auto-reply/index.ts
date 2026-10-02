@@ -154,11 +154,13 @@ Deno.serve(async (req: Request) => {
       return skip(run.id, 'auto_safe_disabled');
     }
 
+    const whatsappProvider = String(conversation.metadata?.provider ?? '');
+    const supportedWebProvider = ['evolution', 'waha', 'wppconnect'].includes(whatsappProvider);
     if (
       conversation.platform !== 'whatsapp'
       || conversation.type !== 'dm'
       || conversation.status !== 'open'
-      || conversation.metadata?.provider !== 'evolution'
+      || !supportedWebProvider
       || conversation.metadata?.is_group === true
     ) {
       return skip(run.id, 'unsupported_conversation_for_auto_safe', conversation.id);
