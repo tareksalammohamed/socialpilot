@@ -4,7 +4,7 @@ import {
   CircleDashed, ChevronDown, Sparkles,
 } from 'lucide-react';
 import { Card, Button, Badge, Input, Select, ScreenLoader, ErrorBanner } from '@/components/ui';
-import { aiAdmin, socialAdmin } from '@/lib/superAdmin';
+import { aiAdmin, socialAdmin, whatsappProviderAdmin } from '@/lib/superAdmin';
 import type {
   AiProvider, AiProviderKey, AiModel, AiRoutingPolicyValue, AiUsageSummary,
   SocialPlatformApp, SocialPlatformAppKey, WhatsAppProviderConfig, WhatsAppProviderKey,
@@ -86,8 +86,29 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
   async function loadSocialApps() {
     setSocialError(null);
     try {
-      const res = await socialAdmin.listApps();
-      setSocialApps(res.apps);
+      const [res, whatsapp] = await Promise.all([
+        socialAdmin.listApps(),
+        whatsappProviderAdmin.list(),
+      ]);
+      const preferred = [...whatsapp.providers]
+        .filter((provider) => provider.enabled && provider.status === 'connected')
+        .sort((a, b) => a.priority - b.priority)[0] ?? null;
+      setSocialApps(res.apps.map((app) => (
+        app.platform_key === 'whatsapp'
+          ? {
+              ...app,
+              whatsapp_providers: whatsapp.providers,
+              active_provider: preferred?.provider_key ?? null,
+              enabled: Boolean(preferred),
+              has_secret: whatsapp.providers.some((provider) => provider.configured),
+              status: preferred
+                ? 'connected'
+                : whatsapp.providers.some((provider) => provider.status === 'error')
+                  ? 'error'
+                  : 'not_configured',
+            }
+          : app
+      )));
     } catch (e) {
       setSocialError(e instanceof Error ? e.message : 'تعذّر تحميل تكاملات التواصل الاجتماعي');
     }
@@ -141,11 +162,10 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     setWaProviderBusy(provider.provider_key);
     setSocialError(null);
     try {
-      await socialAdmin.saveWhatsAppProvider(
+      await whatsappProviderAdmin.save(
         provider.provider_key,
         waBaseUrl.trim(),
         waCredential.trim() || undefined,
-        true,
         Number(waPriority) || provider.priority,
       );
       setWaEditingProvider(null);
@@ -164,8 +184,18 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     setWaProviderBusy('test-all');
     setSocialError(null);
     try {
-      await socialAdmin.testWhatsAppProviders();
+      const configured = socialApps
+        .find((app) => app.platform_key === 'whatsapp')
+        ?.whatsapp_providers
+        ?.filter((provider) => provider.configured) ?? [];
+      const results = await Promise.allSettled(
+        configured.map((provider) => whatsappProviderAdmin.test(provider.provider_key)),
+      );
+      const failed = results.filter((result) => result.status === 'rejected');
       await loadSocialApps();
+      if (failed.length > 0) {
+        setSocialError(`فشل فحص ${failed.length} مزود WhatsApp. راجع حالة كل مزود أدناه.`);
+      }
     } catch (error) {
       setSocialError(error instanceof Error ? error.message : 'فشل فحص WhatsApp Providers');
     } finally {
@@ -177,23 +207,10 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     setWaProviderBusy(provider.provider_key);
     setSocialError(null);
     try {
-      await socialAdmin.setWhatsAppProviderEnabled(provider.provider_key, !provider.enabled);
+      await whatsappProviderAdmin.setEnabled(provider.provider_key, !provider.enabled);
       await loadSocialApps();
     } catch (error) {
       setSocialError(error instanceof Error ? error.message : 'تعذّر تغيير حالة المزود');
-    } finally {
-      setWaProviderBusy(null);
-    }
-  }
-
-  async function handleWhatsAppActiveProvider(provider: WhatsAppProviderConfig) {
-    setWaProviderBusy(provider.provider_key);
-    setSocialError(null);
-    try {
-      await socialAdmin.setWhatsAppActiveProvider(provider.provider_key);
-      await loadSocialApps();
-    } catch (error) {
-      setSocialError(error instanceof Error ? error.message : 'تعذّر تغيير المزود الأساسي');
     } finally {
       setWaProviderBusy(null);
     }
@@ -203,7 +220,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     setWaProviderBusy(provider.provider_key);
     setSocialError(null);
     try {
-      await socialAdmin.removeWhatsAppProvider(provider.provider_key);
+      await whatsappProviderAdmin.remove(provider.provider_key);
       if (waEditingProvider === provider.provider_key) setWaEditingProvider(null);
       await loadSocialApps();
     } catch (error) {
@@ -447,7 +464,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                                   }>
                                     {provider.status === 'connected' ? 'سليم' : provider.status === 'error' ? 'خطأ' : 'غير مُعد'}
                                   </Badge>
-                                  {isActive && <Badge color="accent">Primary</Badge>}
+                                  {isActive && <Badge color="accent">Default by priority</Badge>}
                                   {provider.configured && (
                                     <Badge color={provider.enabled ? 'brand' : 'neutral'}>
                                       {provider.enabled ? 'مفعّل' : 'معطّل'}
@@ -517,16 +534,6 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                                       disabled={providerBusy}
                                     >
                                       {provider.enabled ? 'تعطيل' : 'تفعيل'}
-                                    </Button>
-                                  )}
-                                  {provider.configured && provider.enabled && provider.status === 'connected' && !isActive && (
-                                    <Button
-                                      size="sm"
-                                      variant="secondary"
-                                      onClick={() => void handleWhatsAppActiveProvider(provider)}
-                                      disabled={providerBusy}
-                                    >
-                                      جعله Primary
                                     </Button>
                                   )}
                                   {provider.configured && (
