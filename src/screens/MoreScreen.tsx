@@ -362,7 +362,7 @@ export function MoreScreen() {
               const app = capability.appKey ? appStatusByKey.get(capability.appKey) : undefined;
 
               let stateLabel = 'غير متصل';
-              let stateColor: 'neutral' | 'brand' | 'warning' | 'danger' = 'neutral';
+              let stateColor: 'neutral' | 'brand' | 'warning' | 'danger' | 'accent' = 'neutral';
               if (connected) {
                 stateLabel = 'متصل';
                 stateColor = 'brand';
