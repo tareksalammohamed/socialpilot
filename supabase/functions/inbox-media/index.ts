@@ -59,8 +59,34 @@ Deno.serve(async (req) => {
   }
 
   const metadata = (message.metadata ?? {}) as Record<string, unknown>;
+
+  const storagePath = typeof metadata.storage_path === 'string' ? metadata.storage_path : '';
+  if (storagePath) {
+    const { data: stored, error: storageError } = await supabase.storage.from('inbox-media').download(storagePath);
+    if (storageError || !stored) {
+      return json(404, { error: storageError?.message ?? 'تعذّر تحميل المرفق المخزن' });
+    }
+    const contentType = typeof metadata.mime_type === 'string' && metadata.mime_type
+      ? metadata.mime_type
+      : stored.type || 'application/octet-stream';
+    const filename = typeof metadata.filename === 'string' && metadata.filename
+      ? metadata.filename.replace(/[\r\n"]/g, '_')
+      : 'whatsapp-attachment';
+
+    return new Response(stored.stream(), {
+      status: 200,
+      headers: {
+        ...CORS,
+        'Content-Type': contentType,
+        'Content-Length': String(stored.size),
+        'Content-Disposition': `inline; filename="${filename}"`,
+        'Cache-Control': 'private, max-age=60',
+      },
+    });
+  }
+
   const mediaId = typeof metadata.media_id === 'string' ? metadata.media_id : '';
-  if (!mediaId) return json(404, { error: 'لا يوجد Media ID لهذه الرسالة' });
+  if (!mediaId) return json(404, { error: 'لا يوجد ملف محفوظ لهذه الرسالة' });
 
   const { data: tokenRow } = await supabase
     .from('social_account_tokens')
