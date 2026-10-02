@@ -91,7 +91,7 @@ Deno.serve(async (req: Request) => {
   } else {
     const { data: userData, error: userError } = await supabase.auth.getUser(userToken);
     if (userError || !userData.user) return jsonResponse({ error: 'Invalid or expired token' }, 401);
-    userId = userId;
+    userId = userData.user.id;
   }
 
   const { data: conversation, error: conversationError } = await supabase
