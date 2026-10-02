@@ -14,10 +14,7 @@ import {
   UserCheck,
   CircleCheckBig,
   Clock3,
-  Image as ImageIcon,
   FileText,
-  Volume2,
-  Video,
   LayoutTemplate,
   Download,
 } from 'lucide-react';
