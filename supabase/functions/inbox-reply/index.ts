@@ -44,56 +44,171 @@ type WhatsAppTemplateInput = {
   preview?: string;
 };
 
-async function evolutionConfig(): Promise<{ baseUrl: string; apiKey: string }> {
-  const [{ data: app }, { data: secret }] = await Promise.all([
-    supabase.from('social_platform_apps').select('app_id,enabled').eq('platform_key', 'whatsapp').maybeSingle(),
-    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', 'whatsapp').maybeSingle(),
+type WhatsAppWebProvider = 'evolution' | 'waha' | 'wppconnect';
+
+function whatsappRecipient(value: string): string {
+  return value.replace('@s.whatsapp.net', '').replace('@c.us', '').replace('@lid', '');
+}
+
+function wahaChatId(value: string): string {
+  if (value.endsWith('@c.us') || value.endsWith('@g.us') || value.endsWith('@lid')) return value;
+  if (value.endsWith('@s.whatsapp.net')) return value.replace('@s.whatsapp.net', '@c.us');
+  return `${value}@c.us`;
+}
+
+function extractProviderMessageId(body: Record<string, unknown>): string | null {
+  if (typeof body.id === 'string') return body.id;
+  const key = body.key as Record<string, unknown> | undefined;
+  if (typeof key?.id === 'string') return key.id;
+  const data = body.data as Record<string, unknown> | undefined;
+  if (typeof data?.id === 'string') return data.id;
+  const dataId = data?.id as Record<string, unknown> | undefined;
+  if (typeof dataId?._serialized === 'string') return dataId._serialized;
+  const response = body.response as Record<string, unknown> | undefined;
+  if (typeof response?.id === 'string') return response.id;
+  return null;
+}
+
+async function whatsappProviderRuntime(accountId: string, provider: WhatsAppWebProvider): Promise<{
+  baseUrl: string;
+  secret: string;
+  sessionToken: string | null;
+}> {
+  const [{ data: app }, { data: providerSecret }, { data: tokenRow }] = await Promise.all([
+    supabase.from('social_platform_apps')
+      .select('app_id,enabled,has_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
+    supabase.from('social_platform_app_secrets')
+      .select('app_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
+    supabase.from('social_account_tokens')
+      .select('access_token')
+      .eq('account_id', accountId)
+      .maybeSingle(),
   ]);
-  if (!app?.enabled || !app.app_id || !secret?.app_secret) {
-    throw new Error('Evolution WhatsApp provider غير مُعد');
+
+  const raw = typeof providerSecret?.app_secret === 'string' ? providerSecret.app_secret.trim() : '';
+  let config: {
+    baseUrl: string;
+    credential: string;
+    enabled: boolean;
+    status: string;
+  } | null = null;
+
+  if (raw.startsWith('{')) {
+    try {
+      const bundle = JSON.parse(raw) as {
+        version?: number;
+        providers?: Partial<Record<WhatsAppWebProvider, {
+          baseUrl?: string;
+          credential?: string;
+          enabled?: boolean;
+          status?: string;
+        }>>;
+      };
+      const selected = bundle.providers?.[provider];
+      if (selected?.baseUrl && selected.credential) {
+        config = {
+          baseUrl: selected.baseUrl,
+          credential: selected.credential,
+          enabled: selected.enabled === true,
+          status: selected.status ?? 'not_configured',
+        };
+      }
+    } catch {
+      config = null;
+    }
+  } else if (provider === 'evolution' && raw && typeof app?.app_id === 'string' && /^https?:\/\//i.test(app.app_id)) {
+    config = {
+      baseUrl: app.app_id,
+      credential: raw,
+      enabled: Boolean(app.enabled),
+      status: app.enabled ? 'connected' : 'error',
+    };
   }
+
+  if (!app?.has_secret || !config?.enabled || config.status !== 'connected') {
+    throw new Error(`WhatsApp provider ${provider} غير جاهز`);
+  }
+
   return {
-    baseUrl: String(app.app_id).trim().replace(/\/+$/, ''),
-    apiKey: String(secret.app_secret),
+    baseUrl: config.baseUrl.trim().replace(/\/+$/, ''),
+    secret: config.credential,
+    sessionToken: typeof tokenRow?.access_token === 'string' ? tokenRow.access_token : null,
   };
 }
 
-function evolutionRecipient(value: string): string {
-  if (value.endsWith('@s.whatsapp.net')) return value.replace('@s.whatsapp.net', '');
-  return value;
-}
-
-async function deliverEvolutionText(
+async function deliverWhatsAppWebText(
   conv: Conversation,
   account: Record<string, unknown>,
   content: string,
+  provider: WhatsAppWebProvider,
 ): Promise<string | null> {
   const metadata = (account.metadata ?? {}) as Record<string, unknown>;
   const instance = typeof metadata.instance_name === 'string' ? metadata.instance_name : '';
-  if (!instance || !conv.external_participant_id) throw new Error('جلسة Evolution أو مستقبل WhatsApp غير موجود');
-  const cfg = await evolutionConfig();
-  const response = await fetch(`${cfg.baseUrl}/message/sendText/${encodeURIComponent(instance)}`, {
-    method: 'POST',
-    headers: { apikey: cfg.apiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      number: evolutionRecipient(conv.external_participant_id),
-      text: content,
-      delay: 700,
-      linkPreview: true,
-    }),
-  });
+  if (!instance || !conv.external_participant_id) {
+    throw new Error('جلسة WhatsApp أو المستقبل غير موجود');
+  }
+  const runtime = await whatsappProviderRuntime(conv.account_id, provider);
+
+  let response: Response;
+  if (provider === 'evolution') {
+    response = await fetch(`${runtime.baseUrl}/message/sendText/${encodeURIComponent(instance)}`, {
+      method: 'POST',
+      headers: { apikey: runtime.secret, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        number: whatsappRecipient(conv.external_participant_id),
+        text: content,
+        delay: 700,
+        linkPreview: true,
+      }),
+    });
+  } else if (provider === 'waha') {
+    response = await fetch(`${runtime.baseUrl}/api/sendText`, {
+      method: 'POST',
+      headers: {
+        'X-Api-Key': runtime.secret,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        session: instance,
+        chatId: wahaChatId(conv.external_participant_id),
+        text: content,
+        linkPreview: true,
+      }),
+    });
+  } else {
+    if (!runtime.sessionToken || runtime.sessionToken.endsWith('-provider')) {
+      throw new Error('WPPConnect session token غير موجود — أعد ربط الجلسة');
+    }
+    const isLid = conv.external_participant_id.endsWith('@lid');
+    response = await fetch(`${runtime.baseUrl}/api/${encodeURIComponent(instance)}/send-message`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${runtime.sessionToken}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        phone: whatsappRecipient(conv.external_participant_id),
+        isGroup: conv.external_participant_id.endsWith('@g.us'),
+        isNewsletter: false,
+        isLid,
+        message: content,
+      }),
+    });
+  }
+
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
     const nested = body.response as Record<string, unknown> | undefined;
     const message = nested?.message ?? body.message ?? body.error;
-    throw new Error(typeof message === 'string' ? message : `Evolution sendText HTTP ${response.status}`);
+    throw new Error(typeof message === 'string' ? message : `${provider} send text HTTP ${response.status}`);
   }
-  const key = body.key as Record<string, unknown> | undefined;
-  return typeof key?.id === 'string'
-    ? key.id
-    : typeof body.id === 'string'
-      ? body.id
-      : null;
+  return extractProviderMessageId(body);
 }
 
 async function getFreshAccessToken(accountId: string): Promise<string> {
@@ -162,8 +277,11 @@ async function deliverToPlatform(
   account: Record<string, unknown>,
   content: string,
 ): Promise<string | null> {
-  if (conv.platform === 'whatsapp' && (account.metadata as Record<string, unknown> | null)?.provider === 'evolution') {
-    return deliverEvolutionText(conv, account, content);
+  if (conv.platform === 'whatsapp') {
+    const provider = String((account.metadata as Record<string, unknown> | null)?.provider ?? '');
+    if (provider === 'evolution' || provider === 'waha' || provider === 'wppconnect') {
+      return deliverWhatsAppWebText(conv, account, content, provider);
+    }
   }
 
   const accessToken = await getFreshAccessToken(conv.account_id);
@@ -310,8 +428,9 @@ Deno.serve(async (req: Request) => {
   const whatsappProvider = conv.platform === 'whatsapp'
     ? String((account.metadata as Record<string, unknown> | null)?.provider ?? 'meta')
     : null;
+  const whatsappWebProvider = whatsappProvider === 'evolution' || whatsappProvider === 'waha' || whatsappProvider === 'wppconnect';
 
-  if (conv.platform === 'whatsapp' && whatsappProvider !== 'evolution' && mode === 'text') {
+  if (conv.platform === 'whatsapp' && !whatsappWebProvider && mode === 'text') {
     const { data: latestInbound } = await supabase
       .from('inbox_messages')
       .select('created_at')
@@ -330,8 +449,8 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    if (mode === 'template' && conv.platform === 'whatsapp' && whatsappProvider === 'evolution') {
-      return jsonRes(400, { error: 'Templates خاصة بـWhatsApp Cloud API وليست مستخدمة مع Evolution/Baileys.' });
+    if (mode === 'template' && conv.platform === 'whatsapp' && whatsappWebProvider) {
+      return jsonRes(400, { error: 'Templates خاصة بـWhatsApp Cloud API وليست مستخدمة مع WhatsApp Web Providers.' });
     }
     if (mode === 'template' && conv.platform !== 'whatsapp') {
       return jsonRes(400, { error: 'إرسال Templates متاح لمحادثات WhatsApp فقط' });

@@ -283,50 +283,73 @@ async function checkTelegram(accessToken: string): Promise<SyncOutcome> {
   };
 }
 
-async function evolutionProviderConfig(): Promise<{ baseUrl: string; apiKey: string }> {
-  const [{ data: app }, { data: secret }] = await Promise.all([
-    supabase.from('social_platform_apps').select('app_id,enabled').eq('platform_key', 'whatsapp').maybeSingle(),
-    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', 'whatsapp').maybeSingle(),
+type WhatsAppWebProvider = 'evolution' | 'waha' | 'wppconnect';
+
+async function whatsappProviderRuntime(account: AccountRow, provider: WhatsAppWebProvider): Promise<{
+  baseUrl: string;
+  secret: string;
+  sessionToken: string | null;
+}> {
+  const [{ data: app }, { data: secretRow }, { data: tokenRow }] = await Promise.all([
+    supabase.from('social_platform_apps')
+      .select('app_id,enabled,has_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
+    supabase.from('social_platform_app_secrets')
+      .select('app_secret')
+      .eq('platform_key', 'whatsapp')
+      .maybeSingle(),
+    supabase.from('social_account_tokens')
+      .select('access_token')
+      .eq('account_id', account.id)
+      .maybeSingle(),
   ]);
-  if (!app?.enabled || !app.app_id || !secret?.app_secret) throw new Error('Evolution WhatsApp provider غير مُعد');
-  return { baseUrl: String(app.app_id).trim().replace(/\/+$/, ''), apiKey: String(secret.app_secret) };
-}
 
-async function evolutionRequest(
-  cfg: { baseUrl: string; apiKey: string },
-  path: string,
-  init: RequestInit = {},
-): Promise<{ response: Response; body: Record<string, unknown> }> {
-  const response = await fetch(`${cfg.baseUrl}${path}`, {
-    ...init,
-    headers: {
-      apikey: cfg.apiKey,
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init.headers ?? {}),
-    },
-  });
-  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-  return { response, body };
-}
+  const raw = typeof secretRow?.app_secret === 'string' ? secretRow.app_secret.trim() : '';
+  let selected: { baseUrl?: string; credential?: string; enabled?: boolean; status?: string } | undefined;
 
-async function evolutionConnectionState(
-  cfg: { baseUrl: string; apiKey: string },
-  instance: string,
-): Promise<string> {
-  const direct = await evolutionRequest(cfg, `/instance/connectionState/${encodeURIComponent(instance)}`);
-  if (direct.response.ok) {
-    const nested = direct.body.instance as Record<string, unknown> | undefined;
-    return String(nested?.state ?? direct.body.state ?? 'unknown').toLowerCase();
+  if (raw.startsWith('{')) {
+    try {
+      const bundle = JSON.parse(raw) as {
+        providers?: Partial<Record<WhatsAppWebProvider, {
+          baseUrl?: string;
+          credential?: string;
+          enabled?: boolean;
+          status?: string;
+        }>>;
+      };
+      selected = bundle.providers?.[provider];
+    } catch {
+      selected = undefined;
+    }
+  } else if (provider === 'evolution' && raw && typeof app?.app_id === 'string' && /^https?:\/\//i.test(app.app_id)) {
+    selected = {
+      baseUrl: app.app_id,
+      credential: raw,
+      enabled: Boolean(app.enabled),
+      status: app.enabled ? 'connected' : 'error',
+    };
   }
-  const fallback = await evolutionRequest(cfg, `/instance/fetchInstances?instanceName=${encodeURIComponent(instance)}`);
-  if (!fallback.response.ok) return 'missing';
-  const rows = Array.isArray(fallback.body) ? fallback.body : ((fallback.body.instances as unknown[]) ?? []);
-  const row = Array.isArray(rows) ? rows[0] as Record<string, unknown> | undefined : undefined;
-  return String(row?.connectionStatus ?? row?.connectionState ?? row?.state ?? 'unknown').toLowerCase();
+
+  if (
+    !app?.has_secret
+    || !selected?.baseUrl
+    || !selected.credential
+    || selected.enabled !== true
+    || selected.status !== 'connected'
+  ) {
+    throw new Error(`WhatsApp provider ${provider} غير جاهز`);
+  }
+
+  return {
+    baseUrl: selected.baseUrl.trim().replace(/\/+$/, ''),
+    secret: selected.credential,
+    sessionToken: typeof tokenRow?.access_token === 'string' ? tokenRow.access_token : null,
+  };
 }
 
 async function ensureEvolutionWebhook(
-  cfg: { baseUrl: string; apiKey: string },
+  runtime: { baseUrl: string; secret: string },
   account: AccountRow,
   instance: string,
 ): Promise<void> {
@@ -337,11 +360,11 @@ async function ensureEvolutionWebhook(
   const secret = typeof tokenRow?.refresh_token === 'string' ? tokenRow.refresh_token : '';
   if (!secret) throw new Error('Webhook secret غير موجود لجلسة WhatsApp');
 
-  const supabaseUrl = (Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '');
+  const webhookUrl = `${(Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '')}/functions/v1/whatsapp-evolution-webhook`;
   const payload = {
     webhook: {
       enabled: true,
-      url: `${supabaseUrl}/functions/v1/whatsapp-evolution-webhook`,
+      url: webhookUrl,
       webhookByEvents: false,
       webhookBase64: false,
       events: [
@@ -355,41 +378,129 @@ async function ensureEvolutionWebhook(
       headers: { 'x-socialpilot-secret': secret },
     },
   };
-
-  let result = await evolutionRequest(cfg, `/webhook/set/${encodeURIComponent(instance)}`, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  if (result.response.status === 404) {
-    result = await evolutionRequest(cfg, `/event/webhook/set/${encodeURIComponent(instance)}`, {
+  const call = async (path: string) => {
+    const response = await fetch(`${runtime.baseUrl}${path}`, {
       method: 'POST',
+      headers: { apikey: runtime.secret, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-  }
-  if (!result.response.ok) throw new Error(`Webhook watchdog failed (${result.response.status})`);
+    return response;
+  };
+  let response = await call(`/webhook/set/${encodeURIComponent(instance)}`);
+  if (response.status === 404) response = await call(`/event/webhook/set/${encodeURIComponent(instance)}`);
+  if (!response.ok) throw new Error(`Evolution webhook watchdog HTTP ${response.status}`);
 }
 
-async function checkEvolutionWhatsApp(account: AccountRow): Promise<SyncOutcome> {
+async function ensureWahaWebhook(
+  runtime: { baseUrl: string; secret: string },
+  account: AccountRow,
+  instance: string,
+): Promise<void> {
+  const { data: tokenRow } = await supabase.from('social_account_tokens')
+    .select('refresh_token')
+    .eq('account_id', account.id)
+    .maybeSingle();
+  const secret = typeof tokenRow?.refresh_token === 'string' ? tokenRow.refresh_token : '';
+  if (!secret) throw new Error('Webhook secret غير موجود لجلسة WhatsApp');
+
+  const webhookUrl = `${(Deno.env.get('SUPABASE_URL') ?? '').replace(/\/$/, '')}/functions/v1/whatsapp-waha-webhook`;
+  const response = await fetch(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
+    method: 'PUT',
+    headers: {
+      'X-Api-Key': runtime.secret,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      config: {
+        webhooks: [{
+          url: webhookUrl,
+          events: ['message', 'message.ack', 'session.status'],
+          customHeaders: [{ name: 'x-socialpilot-secret', value: secret }],
+          hmac: { key: secret },
+          retries: { policy: 'linear', delaySeconds: 2, attempts: 5 },
+        }],
+      },
+    }),
+  });
+  if (!response.ok) throw new Error(`WAHA webhook watchdog HTTP ${response.status}`);
+}
+
+async function evolutionState(runtime: { baseUrl: string; secret: string }, instance: string): Promise<string> {
+  let response = await fetch(`${runtime.baseUrl}/instance/connectionState/${encodeURIComponent(instance)}`, {
+    headers: { apikey: runtime.secret },
+  });
+  let body = await readJson(response);
+  if (response.ok) {
+    const nested = body.instance as Record<string, unknown> | undefined;
+    return String(nested?.state ?? body.state ?? 'unknown').toLowerCase();
+  }
+  response = await fetch(
+    `${runtime.baseUrl}/instance/fetchInstances?instanceName=${encodeURIComponent(instance)}`,
+    { headers: { apikey: runtime.secret } },
+  );
+  body = await readJson(response);
+  if (!response.ok) return 'missing';
+  const rows = Array.isArray(body) ? body : ((body.instances as unknown[]) ?? []);
+  const row = Array.isArray(rows) ? rows[0] as Record<string, unknown> | undefined : undefined;
+  return String(row?.connectionStatus ?? row?.connectionState ?? row?.state ?? 'unknown').toLowerCase();
+}
+
+async function wahaState(runtime: { baseUrl: string; secret: string }, instance: string): Promise<string> {
+  const response = await fetch(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
+    headers: { 'X-Api-Key': runtime.secret, Accept: 'application/json' },
+  });
+  const body = await readJson(response);
+  if (response.status === 404) return 'missing';
+  if (!response.ok) return 'unknown';
+  return String(body.status ?? body.state ?? 'unknown').toLowerCase();
+}
+
+async function wppState(runtime: { baseUrl: string; sessionToken: string | null }, instance: string): Promise<string> {
+  if (!runtime.sessionToken || runtime.sessionToken.endsWith('-provider')) return 'missing';
+  const response = await fetch(`${runtime.baseUrl}/api/${encodeURIComponent(instance)}/check-connection-session`, {
+    headers: { Authorization: `Bearer ${runtime.sessionToken}`, Accept: 'application/json' },
+  });
+  const body = await readJson(response);
+  if (response.status === 404) return 'missing';
+  if (!response.ok) return 'unknown';
+  return String(body.status ?? body.message ?? body.state ?? body.response ?? 'unknown').toLowerCase();
+}
+
+function providerConnected(provider: WhatsAppWebProvider, state: string): boolean {
+  if (provider === 'evolution') return ['open', 'connected'].includes(state);
+  if (provider === 'waha') return ['working', 'connected', 'authenticated'].includes(state);
+  return ['connected', 'islogged', 'logged', 'open', 'inchat', 'ischat'].includes(state.replace(/\s+/g, ''));
+}
+
+async function checkWhatsAppWeb(account: AccountRow, provider: WhatsAppWebProvider): Promise<SyncOutcome> {
   const metadata = account.metadata ?? {};
   const instance = typeof metadata.instance_name === 'string' ? metadata.instance_name : '';
-  if (!instance) return { ok: false, status: 'error', error: 'Evolution instance name غير موجود' };
-  const cfg = await evolutionProviderConfig();
-  const state = await evolutionConnectionState(cfg, instance);
+  if (!instance) return { ok: false, status: 'error', error: `${provider} instance name غير موجود` };
 
-  // Re-apply the expected webhook on each health check to protect against
-  // provider restarts/config drift observed in some Evolution releases.
-  try {
-    await ensureEvolutionWebhook(cfg, account, instance);
-  } catch (error) {
-    return {
-      ok: false,
-      status: 'error',
-      error: error instanceof Error ? error.message : 'تعذّر تثبيت Webhook',
-    };
+  const runtime = await whatsappProviderRuntime(account, provider);
+  let state = 'unknown';
+  if (provider === 'evolution') state = await evolutionState(runtime, instance);
+  else if (provider === 'waha') state = await wahaState(runtime, instance);
+  else state = await wppState(runtime, instance);
+
+  if (provider === 'evolution') {
+    try {
+      await ensureEvolutionWebhook(runtime, account, instance);
+    } catch (error) {
+      return { ok: false, status: 'error', error: error instanceof Error ? error.message : 'Evolution webhook watchdog failed' };
+    }
+  }
+  if (provider === 'waha') {
+    try {
+      await ensureWahaWebhook(runtime, account, instance);
+    } catch (error) {
+      return { ok: false, status: 'error', error: error instanceof Error ? error.message : 'WAHA webhook watchdog failed' };
+    }
   }
 
-  if (!['open', 'connected'].includes(state)) {
-    return { ok: false, status: 'error', error: `WhatsApp session state: ${state}` };
+  if (!providerConnected(provider, state)) {
+    return { ok: false, status: 'error', error: `WhatsApp ${provider} session state: ${state}` };
   }
   return {
     ok: true,
@@ -421,8 +532,11 @@ async function checkWhatsApp(account: AccountRow, accessToken: string): Promise<
 }
 
 async function checkAccount(account: AccountRow): Promise<SyncOutcome> {
-  if (account.platform === 'whatsapp' && account.metadata?.provider === 'evolution') {
-    return checkEvolutionWhatsApp(account);
+  if (account.platform === 'whatsapp') {
+    const provider = account.metadata?.provider;
+    if (provider === 'evolution' || provider === 'waha' || provider === 'wppconnect') {
+      return checkWhatsAppWeb(account, provider);
+    }
   }
 
   const storedToken = await readToken(account.id);
@@ -481,7 +595,11 @@ async function syncOne(account: AccountRow): Promise<SyncOutcome> {
 
   await supabase.from('social_accounts').update({
     status: outcome.status,
-    needs_reconnect: outcome.status === 'expired' || (account.platform === 'whatsapp' && account.metadata?.provider === 'evolution' && !outcome.ok),
+    needs_reconnect: outcome.status === 'expired' || (
+      account.platform === 'whatsapp'
+      && ['evolution', 'waha', 'wppconnect'].includes(String(account.metadata?.provider ?? ''))
+      && !outcome.ok
+    ),
     ...(outcome.handle ? { handle: outcome.handle } : {}),
     ...(outcome.display_name ? { display_name: outcome.display_name } : {}),
     metadata,
