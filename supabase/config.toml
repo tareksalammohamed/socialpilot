@@ -21,3 +21,9 @@ verify_jwt = false
 
 [functions.telegram-inbox-webhook]
 verify_jwt = false
+
+
+# Evolution sends provider webhooks without a Supabase user JWT.
+# The function validates a unique per-instance x-socialpilot-secret header.
+[functions.whatsapp-evolution-webhook]
+verify_jwt = false
