@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { callAgentTurn } from '@/lib/api';
+import { dispatchAssistantTask } from '@/lib/api';
 import { Button, Card, ErrorBanner, Spinner, Badge } from '@/components/ui';
 import { PLATFORM_META } from '@/lib/constants';
 import { parseIntent, scheduleDates, DEFAULT_SCHEDULE_HOUR } from '@/lib/intent';
@@ -17,7 +17,7 @@ type AssistantTask = {
   workspace_id: string;
   user_id: string;
   request_text: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'queued' | 'running' | 'completed' | 'failed';
   result_type: 'content' | 'plan' | 'advice' | 'clarification' | null;
   result: Record<string, unknown> | null;
   error: string | null;
@@ -81,7 +81,7 @@ export function CreateScreen() {
     setSaved(Boolean(task.content_id));
     setPlanSaved(Boolean(task.batch_id));
 
-    if (task.status === 'running') {
+    if (task.status === 'queued' || task.status === 'running') {
       setChat([{ role: 'user', text: task.request_text }]);
       setMode('thinking');
       return;
@@ -202,15 +202,14 @@ export function CreateScreen() {
     setAdvice(null);
     setSaved(false);
     setPlanSaved(false);
-    setChat((prev) => [...prev, { role: 'user', text: message }]);
+    setChat([{ role: 'user', text: message.trim() }]);
     setMode('thinking');
 
-    // parseIntent stays as the deterministic, non-AI source for post
-    // count/dates/platforms — the Universal Agent decides WHICH tool to run,
-    // but this data still drives create_content_plan's exact slot count
-    // (see the note in agent/types.ts on `legacyContext`).
+    // Keep deterministic scheduling/count extraction in the browser because it
+    // is fast and local, but the expensive AI execution itself is queued and
+    // runs server-side. Route changes, reloads, app suspension, or a dropped
+    // mobile connection therefore cannot cancel the generation.
     const parsed = parseIntent(message);
-    let taskId: string | null = null;
 
     try {
       const { data: task, error: taskError } = await supabase
@@ -219,7 +218,7 @@ export function CreateScreen() {
           workspace_id: workspace.id,
           user_id: user.id,
           request_text: message.trim(),
-          status: 'running',
+          status: 'queued',
           legacy_context: {
             post_count: parsed.postCount,
             start_date: parsed.startDate,
@@ -233,102 +232,20 @@ export function CreateScreen() {
         })
         .select('*')
         .single();
+
       if (taskError || !task) throw taskError ?? new Error('تعذّر إنشاء مهمة AI');
-      taskId = task.id;
+
       setActiveTaskId(task.id);
+      applyTask(task as AssistantTask);
 
-      const { data: recentInsights } = await supabase
-        .from('post_insights')
-        .select('metric,value,platform,timestamp')
-        .eq('workspace_id', workspace.id)
-        .order('timestamp', { ascending: false })
-        .limit(200);
-      const performance = (recentInsights ?? []).reduce<Record<string, number>>((summary, row) => {
-        const key = `${row.platform}:${row.metric}`;
-        summary[key] = (summary[key] ?? 0) + Number(row.value ?? 0);
-        return summary;
-      }, {});
-
-      const turn = await callAgentTurn({
-        workspaceId: workspace.id,
-        message,
-        platforms: parsed.platforms.length > 0 ? parsed.platforms : undefined,
-        agentContext: { currentRoute: 'create' },
-        legacyContext: {
-          post_count: parsed.postCount,
-          start_date: parsed.startDate,
-          end_date: parsed.endDate,
-          frequency: parsed.frequency,
-          schedule: parsed.schedule,
-          performance,
-          content_goal: parsed.contentGoal,
-          content_type: parsed.contentType,
-        },
+      // Fast path: wake the worker immediately. This is intentionally not the
+      // only execution path — scheduler-tick wakes the same durable queue every
+      // minute, so a failed/aborted dispatch still recovers automatically.
+      void dispatchAssistantTask(task.id).catch((dispatchError) => {
+        console.warn('assistant task immediate dispatch failed; scheduler will recover it', dispatchError);
       });
-
-      if (turn.clarifyingQuestion) {
-        const question = turn.clarifyingQuestion as string;
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'clarification', result: { text: question }, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setChat((prev) => [...prev, { role: 'ai', text: question }]);
-        setMode('idle');
-        return;
-      }
-
-      const succeeded = turn.toolResults.find((r) => r.ok && r.output);
-      if (!succeeded) {
-        const failed = turn.toolResults.find((r) => r.error);
-        throw new Error(failed?.error ?? 'الـAI مقدرش ينفذ الطلب ده دلوقتي.');
-      }
-
-      const toolName = succeeded.name;
-      const result = succeeded.output as Record<string, unknown>;
-      setChat((prev) => [...prev, { role: 'ai', text: summarizeResult(result, toolName) }]);
-
-      if (toolName === 'create_content') {
-        const generated = result as GeneratedContent;
-        const contentId = await saveContent(generated, message);
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'content', result, content_id: contentId, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setContent(generated);
-        setSaved(Boolean(contentId));
-        setMode('content');
-      } else if (toolName === 'create_content_plan') {
-        const generatedPlan = result as ContentPlan;
-        const batchId = await savePlan(generatedPlan);
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'plan', result, batch_id: batchId, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setPlan(generatedPlan);
-        setPlanSaved(Boolean(batchId));
-        setMode('plan');
-      } else {
-        const r = result as { advice?: string };
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'advice', result: r, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setAdvice(r.advice ?? 'تم');
-        setMode('advice');
-      }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'فشل تنفيذ الطلب';
-      if (taskId) {
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'failed', error: msg })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-      }
+      const msg = err instanceof Error ? err.message : 'فشل إنشاء مهمة الـAI';
       setError(msg);
       setMode('error');
       setChat((prev) => [...prev, { role: 'ai', text: `خطأ: ${msg}` }]);
