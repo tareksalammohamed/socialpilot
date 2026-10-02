@@ -27,3 +27,13 @@ verify_jwt = false
 # The function validates a unique per-instance x-socialpilot-secret header.
 [functions.whatsapp-evolution-webhook]
 verify_jwt = false
+
+
+# WAHA and WPPConnect send provider webhooks without a Supabase user JWT.
+# WAHA validates HMAC SHA-512 + a per-session secret header.
+# WPPConnect validates a per-session secret in the webhook callback URL.
+[functions.whatsapp-waha-webhook]
+verify_jwt = false
+
+[functions.whatsapp-wppconnect-webhook]
+verify_jwt = false
