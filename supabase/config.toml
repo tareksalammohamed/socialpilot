@@ -37,3 +37,9 @@ verify_jwt = false
 
 [functions.whatsapp-wppconnect-webhook]
 verify_jwt = false
+
+
+# WhatsApp provider webhooks are authenticated inside the function with
+# a unique per-workspace ingress secret.
+[functions.whatsapp-provider-webhook]
+verify_jwt = false
