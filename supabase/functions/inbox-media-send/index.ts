@@ -47,6 +47,80 @@ function displayContent(kind: string, filename: string, caption: string): string
   return `[${labels[kind] ?? 'مرفق'}: ${filename}]`;
 }
 
+async function evolutionConfig(): Promise<{ baseUrl: string; apiKey: string }> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps').select('app_id,enabled').eq('platform_key', 'whatsapp').maybeSingle(),
+    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', 'whatsapp').maybeSingle(),
+  ]);
+  if (!app?.enabled || !app.app_id || !secret?.app_secret) throw new Error('Evolution WhatsApp provider غير مُعد');
+  return { baseUrl: String(app.app_id).trim().replace(/\/+$/, ''), apiKey: String(secret.app_secret) };
+}
+
+function recipient(value: string): string {
+  return value.endsWith('@s.whatsapp.net') ? value.replace('@s.whatsapp.net', '') : value;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+function safeName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'attachment';
+}
+
+async function sendEvolutionMedia(params: {
+  account: Record<string, unknown>;
+  to: string;
+  file: File;
+  kind: 'image' | 'video' | 'audio' | 'document';
+  caption: string;
+}): Promise<{ externalId: string | null; storagePath: string | null }> {
+  const metadata = (params.account.metadata ?? {}) as Record<string, unknown>;
+  const instance = typeof metadata.instance_name === 'string' ? metadata.instance_name : '';
+  if (!instance) throw new Error('جلسة Evolution غير موجودة');
+  const cfg = await evolutionConfig();
+
+  const bytes = new Uint8Array(await params.file.arrayBuffer());
+  const base64 = bytesToBase64(bytes);
+  const response = await fetch(`${cfg.baseUrl}/message/sendMedia/${encodeURIComponent(instance)}`, {
+    method: 'POST',
+    headers: { apikey: cfg.apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      number: recipient(params.to),
+      mediatype: params.kind,
+      mimetype: params.file.type || 'application/octet-stream',
+      media: base64,
+      caption: params.caption || undefined,
+      fileName: params.file.name || 'attachment',
+      filename: params.file.name || 'attachment',
+      delay: 700,
+    }),
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    const nested = body.response as Record<string, unknown> | undefined;
+    const message = nested?.message ?? body.message ?? body.error;
+    throw new Error(typeof message === 'string' ? message : `Evolution sendMedia HTTP ${response.status}`);
+  }
+
+  const key = body.key as Record<string, unknown> | undefined;
+  const externalId = typeof key?.id === 'string' ? key.id : typeof body.id === 'string' ? body.id : null;
+  const accountId = String(params.account.id ?? 'unknown');
+  const messageKey = externalId || crypto.randomUUID();
+  const path = `${params.account.workspace_id}/${accountId}/outbound-${messageKey}/${safeName(params.file.name || 'attachment')}`;
+  const { error: storageError } = await supabase.storage.from('inbox-media').upload(path, bytes, {
+    contentType: params.file.type || 'application/octet-stream',
+    upsert: true,
+  });
+
+  return { externalId, storagePath: storageError ? null : path };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
   if (req.method !== 'POST') return json(405, { error: 'Method not allowed' });
@@ -97,6 +171,61 @@ Deno.serve(async (req) => {
     .maybeSingle();
   if (!membership) return json(403, { error: 'Forbidden' });
 
+  const { data: account } = await supabase
+    .from('social_accounts')
+    .select('id,workspace_id,external_id,metadata')
+    .eq('id', conversation.account_id)
+    .maybeSingle();
+  if (!account) return json(409, { error: 'حساب WhatsApp لم يعد موجودًا' });
+
+  const provider = String((account.metadata as Record<string, unknown> | null)?.provider ?? 'meta');
+  if (provider === 'evolution') {
+    try {
+      const sent = await sendEvolutionMedia({
+        account,
+        to: conversation.external_participant_id,
+        file,
+        kind,
+        caption,
+      });
+      const content = displayContent(kind, file.name || 'attachment', caption);
+      const { data: message, error: messageError } = await supabase
+        .from('inbox_messages')
+        .insert({
+          workspace_id: conversation.workspace_id,
+          conversation_id: conversationId,
+          direction: 'outbound',
+          content,
+          is_ai: false,
+          user_id: auth.user.id,
+          ...(sent.externalId ? { external_id: sent.externalId } : {}),
+          metadata: {
+            source: 'inbox_media_send',
+            provider: 'evolution',
+            message_type: kind,
+            storage_path: sent.storagePath,
+            mime_type: file.type || 'application/octet-stream',
+            filename: file.name || null,
+            file_size: file.size,
+            caption: caption || null,
+            delivery_status: 'accepted',
+            delivery_status_at: new Date().toISOString(),
+          },
+        })
+        .select()
+        .single();
+      if (messageError || !message) return json(500, { error: messageError?.message ?? 'تم الإرسال لكن تعذّر حفظ الرسالة' });
+      await supabase.from('inbox_conversations').update({
+        snippet: content,
+        unread: false,
+        updated_at: new Date().toISOString(),
+      }).eq('id', conversationId);
+      return json(200, { ok: true, message });
+    } catch (error) {
+      return json(502, { error: error instanceof Error ? error.message : 'تعذّر إرسال المرفق عبر Evolution' });
+    }
+  }
+
   const { data: latestInbound } = await supabase
     .from('inbox_messages')
     .select('created_at')
@@ -109,11 +238,11 @@ Deno.serve(async (req) => {
     return json(409, { error: 'نافذة WhatsApp لمدة 24 ساعة مغلقة. استخدم Template معتمد بدل المرفق الحر.' });
   }
 
-  const [{ data: account }, { data: tokenRow }] = await Promise.all([
-    supabase.from('social_accounts').select('external_id').eq('id', conversation.account_id).maybeSingle(),
-    supabase.from('social_account_tokens').select('access_token,expires_at').eq('account_id', conversation.account_id).maybeSingle(),
-  ]);
-  const phoneNumberId = account?.external_id as string | undefined;
+  const { data: tokenRow } = await supabase.from('social_account_tokens')
+    .select('access_token,expires_at')
+    .eq('account_id', conversation.account_id)
+    .maybeSingle();
+  const phoneNumberId = account.external_id as string | undefined;
   const accessToken = tokenRow?.access_token as string | undefined;
   if (!phoneNumberId || !accessToken) return json(409, { error: 'حساب WhatsApp يحتاج إعادة ربط' });
   if (tokenRow?.expires_at && new Date(tokenRow.expires_at).getTime() < Date.now() + 60_000) {
