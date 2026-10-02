@@ -90,9 +90,11 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
         socialAdmin.listApps(),
         whatsappProviderAdmin.list(),
       ]);
-      const preferred = [...whatsapp.providers]
-        .filter((provider) => provider.enabled && provider.status === 'connected')
-        .sort((a, b) => a.priority - b.priority)[0] ?? null;
+      const preferred = whatsapp.activeProvider
+        ? whatsapp.providers.find((provider) => provider.provider_key === whatsapp.activeProvider) ?? null
+        : [...whatsapp.providers]
+            .filter((provider) => provider.enabled && provider.status === 'connected')
+            .sort((a, b) => a.priority - b.priority)[0] ?? null;
       setSocialApps(res.apps.map((app) => (
         app.platform_key === 'whatsapp'
           ? {
@@ -184,20 +186,23 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
     setWaProviderBusy('test-all');
     setSocialError(null);
     try {
-      const configured = socialApps
-        .find((app) => app.platform_key === 'whatsapp')
-        ?.whatsapp_providers
-        ?.filter((provider) => provider.configured) ?? [];
-      const results = await Promise.allSettled(
-        configured.map((provider) => whatsappProviderAdmin.test(provider.provider_key)),
-      );
-      const failed = results.filter((result) => result.status === 'rejected');
+      await whatsappProviderAdmin.testAll();
       await loadSocialApps();
-      if (failed.length > 0) {
-        setSocialError(`فشل فحص ${failed.length} مزود WhatsApp. راجع حالة كل مزود أدناه.`);
-      }
     } catch (error) {
       setSocialError(error instanceof Error ? error.message : 'فشل فحص WhatsApp Providers');
+    } finally {
+      setWaProviderBusy(null);
+    }
+  }
+
+  async function handleSetActiveWhatsAppProvider(provider: WhatsAppProviderConfig) {
+    setWaProviderBusy(provider.provider_key);
+    setSocialError(null);
+    try {
+      await whatsappProviderAdmin.setActive(provider.provider_key);
+      await loadSocialApps();
+    } catch (error) {
+      setSocialError(error instanceof Error ? error.message : 'تعذّر تعيين المزود الأساسي');
     } finally {
       setWaProviderBusy(null);
     }
@@ -464,7 +469,7 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                                   }>
                                     {provider.status === 'connected' ? 'سليم' : provider.status === 'error' ? 'خطأ' : 'غير مُعد'}
                                   </Badge>
-                                  {isActive && <Badge color="accent">Default by priority</Badge>}
+                                  {isActive && <Badge color="accent">Primary</Badge>}
                                   {provider.configured && (
                                     <Badge color={provider.enabled ? 'brand' : 'neutral'}>
                                       {provider.enabled ? 'مفعّل' : 'معطّل'}
@@ -536,6 +541,20 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                                       {provider.enabled ? 'تعطيل' : 'تفعيل'}
                                     </Button>
                                   )}
+                                  {provider.configured
+                                    && provider.enabled
+                                    && provider.status === 'connected'
+                                    && !isActive
+                                    && (
+                                      <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        onClick={() => void handleSetActiveWhatsAppProvider(provider)}
+                                        disabled={providerBusy}
+                                      >
+                                        جعله Primary
+                                      </Button>
+                                    )}
                                   {provider.configured && (
                                     <Button
                                       size="sm"
