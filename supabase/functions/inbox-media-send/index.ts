@@ -56,6 +56,189 @@ async function evolutionConfig(): Promise<{ baseUrl: string; apiKey: string }> {
   return { baseUrl: String(app.app_id).trim().replace(/\/+$/, ''), apiKey: String(secret.app_secret) };
 }
 
+async function alternativeProviderConfig(
+  platformKey: 'whatsapp_waha' | 'whatsapp_wppconnect',
+): Promise<{ baseUrl: string; secret: string }> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps').select('app_id,enabled,status').eq('platform_key', platformKey).maybeSingle(),
+    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', platformKey).maybeSingle(),
+  ]);
+  if (!app?.enabled || app.status !== 'connected' || !app.app_id || !secret?.app_secret) {
+    throw new Error(`${platformKey === 'whatsapp_waha' ? 'WAHA' : 'WPPConnect'} WhatsApp provider غير مُعد`);
+  }
+  return { baseUrl: String(app.app_id).trim().replace(/\/+$/, ''), secret: String(secret.app_secret) };
+}
+
+function jidDigits(value: string): string {
+  return value.split('@')[0].replace(/\D/g, '');
+}
+
+function wahaChatId(value: string): string {
+  if (value.endsWith('@g.us') || value.endsWith('@c.us')) return value;
+  const digits = jidDigits(value);
+  return digits ? `${digits}@c.us` : value;
+}
+
+function extractProviderMessageId(body: Record<string, unknown>): string | null {
+  if (typeof body.id === 'string') return body.id;
+  const id = body.id as Record<string, unknown> | undefined;
+  if (typeof id?._serialized === 'string') return id._serialized;
+  const key = body.key as Record<string, unknown> | undefined;
+  if (typeof key?.id === 'string') return key.id;
+  const response = body.response as Record<string, unknown> | undefined;
+  if (typeof response?.id === 'string') return response.id;
+  const responseId = response?.id as Record<string, unknown> | undefined;
+  if (typeof responseId?._serialized === 'string') return responseId._serialized;
+  return null;
+}
+
+async function persistOutboundMedia(params: {
+  account: Record<string, unknown>;
+  bytes: Uint8Array;
+  filename: string;
+  mimeType: string;
+  externalId: string | null;
+}): Promise<string | null> {
+  const accountId = String(params.account.id ?? 'unknown');
+  const messageKey = params.externalId || crypto.randomUUID();
+  const path = `${params.account.workspace_id}/${accountId}/outbound-${messageKey}/${safeName(params.filename)}`;
+  const { error } = await supabase.storage.from('inbox-media').upload(path, params.bytes, {
+    contentType: params.mimeType || 'application/octet-stream',
+    upsert: true,
+  });
+  return error ? null : path;
+}
+
+async function sendWahaMedia(params: {
+  account: Record<string, unknown>;
+  to: string;
+  file: File;
+  kind: 'image' | 'video' | 'audio' | 'document';
+  caption: string;
+}): Promise<{ externalId: string | null; storagePath: string | null; messageType: string }> {
+  const metadata = (params.account.metadata ?? {}) as Record<string, unknown>;
+  const session = typeof metadata.instance_name === 'string' ? metadata.instance_name : '';
+  if (!session) throw new Error('جلسة WAHA غير موجودة');
+  const cfg = await alternativeProviderConfig('whatsapp_waha');
+  const bytes = new Uint8Array(await params.file.arrayBuffer());
+  const base64 = bytesToBase64(bytes);
+  const mimeType = params.file.type || 'application/octet-stream';
+
+  let endpoint = '/api/sendFile';
+  let messageType = params.kind;
+  let convert = false;
+  if (params.kind === 'image' && mimeType === 'image/jpeg') endpoint = '/api/sendImage';
+  else if (params.kind === 'image') messageType = 'document';
+  else if (params.kind === 'video') {
+    endpoint = '/api/sendVideo';
+    convert = true;
+  } else if (params.kind === 'audio') {
+    endpoint = '/api/sendVoice';
+    convert = true;
+  }
+
+  const response = await fetch(`${cfg.baseUrl}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'X-Api-Key': cfg.secret,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      session,
+      chatId: wahaChatId(params.to),
+      file: {
+        mimetype: mimeType,
+        filename: params.file.name || 'attachment',
+        data: base64,
+      },
+      ...(params.caption && params.kind !== 'audio' ? { caption: params.caption } : {}),
+      ...(convert ? { convert: true } : {}),
+    }),
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(typeof body.message === 'string' ? body.message : `WAHA media HTTP ${response.status}`);
+  }
+  const externalId = extractProviderMessageId(body);
+  const storagePath = await persistOutboundMedia({
+    account: params.account,
+    bytes,
+    filename: params.file.name || 'attachment',
+    mimeType,
+    externalId,
+  });
+  return { externalId, storagePath, messageType };
+}
+
+async function sendWppConnectMedia(params: {
+  account: Record<string, unknown>;
+  to: string;
+  file: File;
+  kind: 'image' | 'video' | 'audio' | 'document';
+  caption: string;
+}): Promise<{ externalId: string | null; storagePath: string | null; messageType: string }> {
+  const metadata = (params.account.metadata ?? {}) as Record<string, unknown>;
+  const session = typeof metadata.instance_name === 'string' ? metadata.instance_name : '';
+  if (!session) throw new Error('جلسة WPPConnect غير موجودة');
+
+  const [{ baseUrl }, { data: tokenRow }] = await Promise.all([
+    alternativeProviderConfig('whatsapp_wppconnect'),
+    supabase.from('social_account_tokens').select('access_token').eq('account_id', params.account.id).maybeSingle(),
+  ]);
+  if (!tokenRow?.access_token || tokenRow.access_token === 'wppconnect-provider') {
+    throw new Error('WPPConnect session token مفقود — أعد الربط');
+  }
+
+  const bytes = new Uint8Array(await params.file.arrayBuffer());
+  const rawBase64 = bytesToBase64(bytes);
+  const mimeType = params.file.type || 'application/octet-stream';
+  const dataUri = `data:${mimeType};base64,${rawBase64}`;
+  const jid = params.to;
+  const isGroup = jid.endsWith('@g.us');
+  const isLid = jid.endsWith('@lid');
+  const phone = isGroup || isLid ? jid : jidDigits(jid);
+
+  let endpoint = '/send-file';
+  let payload: Record<string, unknown> = {
+    phone,
+    isGroup,
+    isNewsletter: jid.endsWith('@newsletter'),
+    isLid,
+    filename: params.file.name || 'attachment',
+    caption: params.caption || '',
+    base64: dataUri,
+  };
+  if (params.kind === 'image') endpoint = '/send-image';
+  if (params.kind === 'audio') {
+    endpoint = '/send-voice-base64';
+    payload = { phone, isGroup, base64Ptt: rawBase64 };
+  }
+
+  const response = await fetch(`${baseUrl}/api/${encodeURIComponent(session)}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenRow.access_token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(typeof body.message === 'string' ? body.message : `WPPConnect media HTTP ${response.status}`);
+  }
+  const externalId = extractProviderMessageId(body);
+  const storagePath = await persistOutboundMedia({
+    account: params.account,
+    bytes,
+    filename: params.file.name || 'attachment',
+    mimeType,
+    externalId,
+  });
+  return { externalId, storagePath, messageType: params.kind };
+}
+
 function recipient(value: string): string {
   return value.endsWith('@s.whatsapp.net') ? value.replace('@s.whatsapp.net', '') : value;
 }
@@ -179,16 +362,15 @@ Deno.serve(async (req) => {
   if (!account) return json(409, { error: 'حساب WhatsApp لم يعد موجودًا' });
 
   const provider = String((account.metadata as Record<string, unknown> | null)?.provider ?? 'meta');
-  if (provider === 'evolution') {
+  if (provider === 'evolution' || provider === 'waha' || provider === 'wppconnect') {
     try {
-      const sent = await sendEvolutionMedia({
-        account,
-        to: conversation.external_participant_id,
-        file,
-        kind,
-        caption,
-      });
-      const content = displayContent(kind, file.name || 'attachment', caption);
+      const sent = provider === 'evolution'
+        ? { ...(await sendEvolutionMedia({ account, to: conversation.external_participant_id, file, kind, caption })), messageType: kind }
+        : provider === 'waha'
+          ? await sendWahaMedia({ account, to: conversation.external_participant_id, file, kind, caption })
+          : await sendWppConnectMedia({ account, to: conversation.external_participant_id, file, kind, caption });
+
+      const content = displayContent(sent.messageType, file.name || 'attachment', caption);
       const { data: message, error: messageError } = await supabase
         .from('inbox_messages')
         .insert({
@@ -201,8 +383,8 @@ Deno.serve(async (req) => {
           ...(sent.externalId ? { external_id: sent.externalId } : {}),
           metadata: {
             source: 'inbox_media_send',
-            provider: 'evolution',
-            message_type: kind,
+            provider,
+            message_type: sent.messageType,
             storage_path: sent.storagePath,
             mime_type: file.type || 'application/octet-stream',
             filename: file.name || null,
@@ -222,7 +404,8 @@ Deno.serve(async (req) => {
       }).eq('id', conversationId);
       return json(200, { ok: true, message });
     } catch (error) {
-      return json(502, { error: error instanceof Error ? error.message : 'تعذّر إرسال المرفق عبر Evolution' });
+      const label = provider === 'evolution' ? 'Evolution' : provider === 'waha' ? 'WAHA' : 'WPPConnect';
+      return json(502, { error: error instanceof Error ? error.message : `تعذّر إرسال المرفق عبر ${label}` });
     }
   }
 
