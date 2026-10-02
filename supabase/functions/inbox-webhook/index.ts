@@ -55,6 +55,120 @@ async function verifySignature(rawBody: string, signatureHeader: string | null, 
 
 type Account = { id: string; workspace_id: string; platform: string };
 
+function whatsappMessageContent(message: Record<string, unknown>): { content: string; meta: Record<string, unknown> } {
+  const type = typeof message.type === 'string' ? message.type : 'unknown';
+  if (type === 'text') {
+    const text = message.text as Record<string, unknown> | undefined;
+    return { content: typeof text?.body === 'string' ? text.body : '[رسالة نصية]', meta: { message_type: type } };
+  }
+  if (type === 'image' || type === 'video' || type === 'audio' || type === 'document' || type === 'sticker') {
+    const media = message[type] as Record<string, unknown> | undefined;
+    const labels: Record<string, string> = {
+      image: 'صورة',
+      video: 'فيديو',
+      audio: 'رسالة صوتية',
+      document: 'ملف',
+      sticker: 'ملصق',
+    };
+    const caption = typeof media?.caption === 'string' ? media.caption.trim() : '';
+    const filename = typeof media?.filename === 'string' ? media.filename : null;
+    const suffix = filename ? `: ${filename}` : '';
+    return {
+      content: caption || `[${labels[type] ?? type}${suffix}]`,
+      meta: {
+        message_type: type,
+        media_id: media?.id ?? null,
+        mime_type: media?.mime_type ?? null,
+        sha256: media?.sha256 ?? null,
+        filename,
+        caption: caption || null,
+      },
+    };
+  }
+  if (type === 'location') {
+    const location = message.location as Record<string, unknown> | undefined;
+    return {
+      content: typeof location?.name === 'string' ? `[موقع: ${location.name}]` : '[موقع]',
+      meta: { message_type: type, location: location ?? null },
+    };
+  }
+  if (type === 'contacts') {
+    return { content: '[جهة اتصال]', meta: { message_type: type, contacts: message.contacts ?? null } };
+  }
+  if (type === 'button') {
+    const button = message.button as Record<string, unknown> | undefined;
+    return {
+      content: typeof button?.text === 'string' ? button.text : '[رد زر]',
+      meta: { message_type: type, button: button ?? null },
+    };
+  }
+  if (type === 'interactive') {
+    const interactive = message.interactive as Record<string, unknown> | undefined;
+    const buttonReply = interactive?.button_reply as Record<string, unknown> | undefined;
+    const listReply = interactive?.list_reply as Record<string, unknown> | undefined;
+    const title = typeof buttonReply?.title === 'string'
+      ? buttonReply.title
+      : typeof listReply?.title === 'string'
+        ? listReply.title
+        : '[رد تفاعلي]';
+    return { content: title, meta: { message_type: type, interactive: interactive ?? null } };
+  }
+  return { content: `[رسالة WhatsApp من نوع ${type}]`, meta: { message_type: type } };
+}
+
+async function updateWhatsAppDeliveryStatus(
+  supabase: ReturnType<typeof createClient>,
+  account: Account,
+  status: Record<string, unknown>,
+): Promise<void> {
+  const messageId = typeof status.id === 'string' ? status.id : null;
+  const deliveryStatus = typeof status.status === 'string' ? status.status : null;
+  if (!messageId || !deliveryStatus) return;
+
+  const { data: message } = await supabase
+    .from('inbox_messages')
+    .select('id,metadata,conversation_id')
+    .eq('workspace_id', account.workspace_id)
+    .eq('external_id', messageId)
+    .eq('direction', 'outbound')
+    .maybeSingle();
+  if (!message) return;
+
+  const errors = Array.isArray(status.errors) ? status.errors : [];
+  const firstError = errors[0] as Record<string, unknown> | undefined;
+  const errorText = firstError
+    ? [firstError.title, firstError.message, (firstError.error_data as Record<string, unknown> | undefined)?.details]
+        .filter((value) => typeof value === 'string' && value)
+        .join(' — ')
+    : null;
+
+  await supabase
+    .from('inbox_messages')
+    .update({
+      metadata: {
+        ...(message.metadata ?? {}),
+        delivery_status: deliveryStatus,
+        delivery_status_at: safeWebhookDate(status.timestamp) ?? new Date().toISOString(),
+        recipient_id: status.recipient_id ?? null,
+        pricing: status.pricing ?? null,
+        conversation: status.conversation ?? null,
+        delivery_error: errorText,
+        delivery_errors: errors,
+      },
+    })
+    .eq('id', message.id);
+
+  if (deliveryStatus === 'failed') {
+    await supabase.from('notifications').insert({
+      workspace_id: account.workspace_id,
+      type: 'inbox_delivery_failed',
+      title: 'فشل إرسال رسالة WhatsApp',
+      body: errorText || 'Meta أعادت حالة failed للرسالة.',
+      payload: { conversation_id: message.conversation_id, platform: 'whatsapp', external_message_id: messageId },
+    });
+  }
+}
+
 async function findAccounts(supabase: ReturnType<typeof createClient>, providerAccountId: string): Promise<Account[]> {
   // external_id holds the Meta page id / phone_number_id depending on
   // platform, matching how social-oauth-callback populates it at connect time.
@@ -223,14 +337,18 @@ async function handleMetaEntry(supabase: ReturnType<typeof createClient>, entry:
       const changes = (entry.changes as Array<Record<string, unknown>> | undefined) ?? [];
       for (const c of changes) {
         const value = (c.value as Record<string, unknown> | undefined) ?? {};
+        const statuses = (value.statuses as Array<Record<string, unknown>> | undefined) ?? [];
+        for (const status of statuses) {
+          await updateWhatsAppDeliveryStatus(supabase, account, status);
+        }
+
         const messages = (value.messages as Array<Record<string, unknown>> | undefined) ?? [];
         const contacts = (value.contacts as Array<Record<string, unknown>> | undefined) ?? [];
         for (const message of messages) {
           const messageId = message.id as string | undefined;
           const from = message.from as string | undefined;
-          const body = message.text as Record<string, unknown> | undefined;
-          const content = (body?.body as string | undefined) ?? (message.caption as string | undefined);
-          if (!messageId || !from || !content) continue;
+          if (!messageId || !from) continue;
+          const parsed = whatsappMessageContent(message);
           const contact = contacts.find((candidate) => (candidate.wa_id as string) === from);
           const profile = contact?.profile as Record<string, unknown> | undefined;
           await upsertConversationAndMessage(supabase, {
@@ -241,10 +359,15 @@ async function handleMetaEntry(supabase: ReturnType<typeof createClient>, entry:
             external_id: from,
             external_participant_id: from,
             sender_name: (profile?.name as string | undefined) ?? from,
-            content,
+            content: parsed.content,
             message_external_id: messageId,
             created_at: safeWebhookDate(message.timestamp),
-            metadata: { source: 'whatsapp_webhook', message_type: message.type },
+            metadata: {
+              source: 'whatsapp_webhook',
+              ...parsed.meta,
+              context: message.context ?? null,
+              referral: message.referral ?? null,
+            },
           });
         }
       }
