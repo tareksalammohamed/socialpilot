@@ -1,3 +1,4 @@
+import { closeSession, disconnectedAccount, isWppConnected } from '../_shared/whatsapp-session.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 const CORS = {
@@ -66,7 +67,7 @@ function normalizeState(value: unknown): string {
 function connectedState(provider: ProviderKey, state: string): boolean {
   if (provider === 'evolution') return ['open', 'connected'].includes(state);
   if (provider === 'waha') return ['working', 'connected', 'authenticated'].includes(state);
-  return ['connected', 'islogged', 'logged', 'open', 'inchat', 'ischat'].includes(state.replace(/\s+/g, ''));
+  return isWppConnected(state);
 }
 
 function instanceName(workspaceId: string): string {
@@ -288,7 +289,7 @@ async function evolutionStart(runtime: ProviderRuntime, instance: string, webhoo
   const webhookPayload = {
     webhook: {
       enabled: true,
-      url: `${supabaseUrl}/functions/v1/whatsapp-provider-webhook?provider=evolution`,
+      url: `${supabaseUrl}/functions/v1/whatsapp-evolution-webhook`,
       webhookByEvents: false,
       webhookBase64: false,
       events: ['QRCODE_UPDATED','CONNECTION_UPDATE','MESSAGES_UPSERT','MESSAGES_UPDATE','SEND_MESSAGE','SEND_MESSAGE_UPDATE'],
@@ -328,8 +329,7 @@ async function evolutionStart(runtime: ProviderRuntime, instance: string, webhoo
 
 async function evolutionDisconnect(runtime: ProviderRuntime, instance: string): Promise<void> {
   const headers = { apikey: runtime.secret };
-  await fetch(`${runtime.baseUrl}/instance/logout/${encodeURIComponent(instance)}`, { method: 'DELETE', headers }).catch(() => null);
-  await fetch(`${runtime.baseUrl}/instance/delete/${encodeURIComponent(instance)}`, { method: 'DELETE', headers }).catch(() => null);
+  await closeSession(`${runtime.baseUrl}/instance/delete/${encodeURIComponent(instance)}`, { method: 'DELETE', headers });
 }
 
 async function wahaState(runtime: ProviderRuntime, instance: string): Promise<string> {
@@ -349,7 +349,7 @@ async function wahaStart(runtime: ProviderRuntime, instance: string, webhookSecr
       client: { deviceName: 'SocialPilot', browserName: 'Chrome' },
       ignore: { status: true, groups: true, channels: true },
       webhooks: [{
-        url: `${supabaseUrl}/functions/v1/whatsapp-provider-webhook?provider=waha`,
+        url: `${supabaseUrl}/functions/v1/whatsapp-waha-webhook`,
         events: ['message', 'message.ack', 'session.status'],
         hmac: { key: webhookSecret },
         customHeaders: [{ name: 'x-socialpilot-secret', value: webhookSecret }],
@@ -420,8 +420,7 @@ async function wahaStart(runtime: ProviderRuntime, instance: string, webhookSecr
 
 async function wahaDisconnect(runtime: ProviderRuntime, instance: string): Promise<void> {
   const headers = { 'X-Api-Key': runtime.secret, Accept: 'application/json' };
-  await fetch(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}/logout`, { method: 'POST', headers }).catch(() => null);
-  await fetch(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, { method: 'DELETE', headers }).catch(() => null);
+  await closeSession(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, { method: 'DELETE', headers });
 }
 
 async function wppGenerateToken(runtime: ProviderRuntime, instance: string): Promise<string> {
@@ -466,7 +465,7 @@ async function wppState(runtime: ProviderRuntime, instance: string, token: strin
 
 async function wppStart(runtime: ProviderRuntime, instance: string, webhookSecret: string): Promise<StartResult> {
   const token = await wppGenerateToken(runtime, instance);
-  const webhook = `${supabaseUrl}/functions/v1/whatsapp-provider-webhook?provider=wppconnect&secret=${encodeURIComponent(webhookSecret)}`;
+  const webhook = `${supabaseUrl}/functions/v1/whatsapp-wppconnect-webhook?session=${encodeURIComponent(instance)}&secret=${encodeURIComponent(webhookSecret)}`;
   const started = await wppRequest(runtime, instance, '/start-session', token, {
     method: 'POST',
     body: JSON.stringify({ webhook, waitQrCode: true }),
@@ -488,10 +487,10 @@ async function wppDisconnect(runtime: ProviderRuntime, instance: string, token?:
   const bearer = token && !token.endsWith('-provider') && token !== 'provider-session'
     ? token
     : await wppGenerateToken(runtime, instance);
-  await fetch(`${runtime.baseUrl}/api/${encodeURIComponent(instance)}/logout-session`, {
+  await closeSession(`${runtime.baseUrl}/api/${encodeURIComponent(instance)}/logout-session`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/json' },
-  }).catch(() => null);
+  });
 }
 
 async function providerState(
@@ -561,7 +560,7 @@ async function saveAccount(params: {
     .single();
   if (error || !account) throw new Error(error?.message ?? 'تعذّر حفظ جلسة WhatsApp');
 
-  await supabase.from('social_account_tokens').upsert({
+  const { error: tokenError } = await supabase.from('social_account_tokens').upsert({
     account_id: account.id,
     access_token: params.result.sessionToken ?? `${params.runtime.providerKey}-provider`,
     refresh_token: params.webhookSecret,
@@ -569,6 +568,7 @@ async function saveAccount(params: {
     expires_at: null,
     updated_at: new Date().toISOString(),
   }, { onConflict: 'account_id' });
+  if (tokenError) throw new Error('تعذّر حفظ بيانات جلسة WhatsApp');
 
   return account;
 }
@@ -582,7 +582,11 @@ Deno.serve(async (req: Request) => {
     workspaceId?: string;
     providerKey?: ProviderKey;
   };
-  const workspaceId = body.workspaceId?.trim();
+  const workspaceId = typeof body?.workspaceId === 'string' ? body.workspaceId.trim() : '';
+  if (!body || !['list_methods', 'start', 'status', 'disconnect', 'switch'].includes(String(body.action))
+    || (body.providerKey !== undefined && !validProvider(body.providerKey))) {
+    return json(400, { error: 'Invalid WhatsApp action or provider' });
+  }
   if (!workspaceId || !body.action) return json(400, { error: 'workspaceId و action مطلوبين' });
 
   const auth = await requireAdmin(req, workspaceId);
@@ -660,9 +664,12 @@ Deno.serve(async (req: Request) => {
       if (account && currentProvider) {
         const runtime = runtimes.find((row) => row.providerKey === currentProvider);
         if (runtime) {
-          await disconnectProvider(runtime, instance, tokens.accessToken).catch(() => undefined);
+          await disconnectProvider(runtime, instance, tokens.accessToken);
         }
-        await supabase.from('social_accounts').delete().eq('id', account.id).eq('workspace_id', workspaceId);
+        const { error } = await supabase.from('social_accounts')
+          .update(disconnectedAccount(metadata))
+          .eq('id', account.id).eq('workspace_id', workspaceId);
+        if (error) throw new Error('تعذّر حفظ حالة الفصل');
       }
       return json(200, {
         ok: true,
@@ -689,13 +696,6 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    if (body.action === 'switch' && account && currentProvider) {
-      const runtime = runtimes.find((row) => row.providerKey === currentProvider);
-      if (runtime) {
-        await disconnectProvider(runtime, instance, tokens.accessToken).catch(() => undefined);
-      }
-    }
-
     let candidates: ProviderRuntime[];
     if (body.providerKey && validProvider(body.providerKey)) {
       candidates = runtimes.filter((runtime) => runtime.providerKey === body.providerKey);
@@ -705,13 +705,27 @@ Deno.serve(async (req: Request) => {
       const currentHealthy = currentProvider
         ? runtimes.find((runtime) => runtime.providerKey === currentProvider && runtime.enabled && runtime.status === 'connected')
         : null;
-      candidates = currentHealthy
-        ? [currentHealthy, ...healthyProviders(runtimes, currentProvider)]
+      // Existing numbers require an explicit switch, even when the old provider is unhealthy.
+      candidates = currentProvider
+        ? (currentHealthy ? [currentHealthy] : [])
         : healthyProviders(runtimes);
     }
 
+    candidates = candidates.filter((runtime) => runtime.enabled && runtime.status === 'connected' && runtime.baseUrl && runtime.secret);
     if (candidates.length === 0) {
       return json(409, { error: 'لا يوجد WhatsApp Provider سليم ومفعّل', attempts: [], methods });
+    }
+
+    if (account && currentProvider && body.action !== 'switch' && candidates.some((candidate) => candidate.providerKey !== currentProvider)) {
+      return json(409, { error: 'استخدم التحويل المنظم لتغيير مزود الرقم الحالي', currentProvider });
+    }
+    if (body.action === 'switch' && account && currentProvider) {
+      const previous = runtimes.find((runtime) => runtime.providerKey === currentProvider);
+      if (!previous?.baseUrl || !previous.secret) throw new Error('بيانات المزوّد القديم مطلوبة لإغلاق الجلسة قبل التحويل');
+      await disconnectProvider(previous, instance, tokens.accessToken);
+      const { error } = await supabase.from('social_accounts').update(disconnectedAccount(metadata))
+        .eq('id', account.id).eq('workspace_id', workspaceId);
+      if (error) throw new Error('تعذّر حفظ حالة الفصل');
     }
 
     const webhookSecret = body.action === 'switch' || !tokens.webhookSecret
@@ -757,8 +771,10 @@ Deno.serve(async (req: Request) => {
           ok: false,
           error: error instanceof Error ? error.message : 'provider_start_failed',
         });
-        // Best-effort cleanup before trying the next provider.
-        await disconnectProvider(runtime, instance, tokens.accessToken).catch(() => undefined);
+        // Do not log out an existing number after a transient reconnect failure.
+        if (account && currentProvider === runtime.providerKey && body.action !== 'switch') break;
+        // Stop fallback if cleanup is unconfirmed; two live sessions can duplicate messages.
+        await disconnectProvider(runtime, instance, runtime.providerKey === currentProvider ? tokens.accessToken : null);
       }
     }
 

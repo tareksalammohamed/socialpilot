@@ -38,3 +38,18 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  whatsapp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+      - name: Check WhatsApp Edge Functions
+        working-directory: supabase
+        run: deno task check:whatsapp
+      - name: Test WhatsApp lifecycle and webhooks
+        working-directory: supabase
+        run: deno task test:whatsapp

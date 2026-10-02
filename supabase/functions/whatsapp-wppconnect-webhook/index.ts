@@ -1,3 +1,4 @@
+import { isWppConnected } from '../_shared/whatsapp-session.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 const CORS = {
@@ -269,7 +270,7 @@ async function upsertInbound(params: {
     ? `[${type === 'image' ? 'صورة' : type === 'video' ? 'فيديو' : type === 'audio' ? 'رسالة صوتية' : type === 'sticker' ? 'ملصق' : 'ملف'}${filename ? `: ${filename}` : ''}]`
     : '[رسالة WhatsApp]');
   const isGroup = from.endsWith('@g.us');
-  const senderName = String(params.payload.sender?.pushname ?? params.payload.senderName ?? params.payload.notifyName ?? participant(from));
+  const senderName = String((params.payload.sender as Record<string, unknown> | undefined)?.pushname ?? params.payload.senderName ?? params.payload.notifyName ?? participant(from));
 
   const { data: conversation, error: conversationError } = await supabase.from('inbox_conversations').upsert({
     workspace_id: workspaceId,
@@ -377,8 +378,7 @@ async function applyAck(account: Record<string, unknown>, payload: Record<string
 }
 
 function isConnectedStatus(value: unknown): boolean {
-  const state = String(value ?? '').toLowerCase();
-  return state.includes('connected') || state.includes('logged') || state === 'inchat' || state === 'ischat' || state === 'open';
+  return isWppConnected(value);
 }
 
 async function providerBaseUrl(): Promise<string> {
@@ -401,9 +401,20 @@ Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') return json(405, { error: 'Method not allowed' });
 
   const url = new URL(req.url);
-  const session = url.searchParams.get('session') ?? '';
+  let session = url.searchParams.get('session') ?? '';
   const suppliedSecret = url.searchParams.get('secret') ?? '';
-  if (!session || !suppliedSecret) return json(401, { error: 'Missing webhook credentials' });
+  if (suppliedSecret.length < 32) return json(401, { error: 'Missing webhook credentials' });
+  // Older callback URLs identify the account by its per-session secret.
+  if (!session) {
+    const { data: token } = await supabase.from('social_account_tokens').select('account_id')
+      .eq('refresh_token', suppliedSecret).maybeSingle();
+    if (!token?.account_id) return json(401, { error: 'Invalid webhook secret' });
+    const { data: owner } = await supabase.from('social_accounts').select('metadata')
+      .eq('id', token.account_id).eq('platform', 'whatsapp').maybeSingle();
+    if (owner?.metadata?.provider !== 'wppconnect') return json(401, { error: 'Invalid webhook secret' });
+    session = String(owner.metadata.instance_name ?? '');
+    if (!session) return json(401, { error: 'Missing session' });
+  }
 
   const { data: account } = await supabase.from('social_accounts')
     .select('id,workspace_id,status,metadata')
@@ -420,8 +431,10 @@ Deno.serve(async (req: Request) => {
   const bearer = typeof tokenRow?.access_token === 'string' ? tokenRow.access_token : '';
   if (!webhookSecret || suppliedSecret !== webhookSecret || !bearer) return json(401, { error: 'Invalid webhook secret' });
 
-  const root = await req.json().catch(() => null) as Record<string, unknown> | null;
-  if (!root) return json(400, { error: 'Invalid JSON' });
+  const envelope = await req.json().catch(() => null) as Record<string, unknown> | null;
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return json(400, { error: 'Invalid JSON' });
+  const wrapped = envelope.body as Record<string, unknown> | undefined;
+  const root = wrapped && typeof wrapped === 'object' && typeof wrapped.event === 'string' ? wrapped : envelope;
   const event = String(root.event ?? root.type ?? '').toLowerCase();
   const payload = eventPayload(root);
 

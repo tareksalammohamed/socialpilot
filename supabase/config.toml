@@ -42,3 +42,6 @@ verify_jwt = false
 [functions.whatsapp-wppconnect-webhook]
 verify_jwt = false
 
+# Legacy callback router forwards raw payloads to the authenticated provider handlers.
+[functions.whatsapp-provider-webhook]
+verify_jwt = false
