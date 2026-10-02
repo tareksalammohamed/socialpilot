@@ -457,10 +457,32 @@ export function ContentScreen() {
 
   if (loading) return <ScreenLoader />;
 
+  const scheduledCount = calendar.filter((item) => ['planned', 'scheduled', 'publishing'].includes(item.status)).length;
+  const reviewCount = content.filter((item) => item.status === 'review' || item.quality_status === 'needs_improvement').length;
+  const publishedCount = content.filter((item) => item.status === 'published').length;
+  const connectedCount = accounts.filter((item) => item.status === 'connected').length;
+
   return (
-    <div className="px-5 py-6 safe-top">
+    <div className="page-shell safe-top pb-28 max-w-6xl">
+      <section className="surface-hero mb-5">
+        <div className="flex items-start justify-between gap-4 mb-5">
+          <div>
+            <p className="eyebrow">CONTENT OPERATIONS</p>
+            <h1 className="text-2xl font-bold text-ink-50 mt-1">المحتوى والتقويم</h1>
+            <p className="text-ink-400 text-sm mt-2">راجع النسخ، اعتمد الجودة، عدّل الجدولة أو انشر مباشرة من نفس المسار.</p>
+          </div>
+          <div className="status-orb"><FileText size={20} className="text-brand-300" /></div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="metric-tile"><p className="metric-value">{content.length}</p><p className="metric-label">إجمالي المحتوى</p></div>
+          <div className="metric-tile"><p className="metric-value">{scheduledCount}</p><p className="metric-label">في الجدول</p></div>
+          <div className="metric-tile"><p className={`metric-value ${reviewCount ? 'text-warning-300' : ''}`}>{reviewCount}</p><p className="metric-label">يحتاج مراجعة</p></div>
+          <div className="metric-tile"><p className="metric-value">{publishedCount}</p><p className="metric-label">تم نشره · {connectedCount} حساب</p></div>
+        </div>
+      </section>
+
       {/* Tab toggle */}
-      <div className="flex bg-ink-900 rounded-xl p-1 mb-5">
+      <div className="flex bg-ink-900/80 border border-ink-800 rounded-xl p-1 mb-5 max-w-md">
         <button
           onClick={() => setView('list')}
           className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm transition-all ${
@@ -495,7 +517,7 @@ export function ContentScreen() {
               const isExpanded = expandedId === c.id;
               const variants = variantsByContent[c.id];
               return (
-                <Card key={c.id} className="!p-0 overflow-hidden">
+                <Card key={c.id} className="surface-card !p-0 overflow-hidden">
                   <button onClick={() => toggleExpand(c.id)} className="w-full text-right p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
@@ -539,7 +561,7 @@ export function ContentScreen() {
                           else if (!account) disabledReason = `مفيش حساب ${meta?.label ?? v.platform} مربوط`;
 
                           return (
-                            <div key={v.id} className="rounded-xl bg-ink-900 border border-ink-800 p-3">
+                            <div key={v.id} className="rounded-xl bg-ink-950/45 border border-ink-800 p-3">
                               <div className="flex items-center justify-between gap-2 mb-2">
                                 <div className="flex items-center gap-2 min-w-0">
                                   {Icon && <Icon size={16} style={{ color: meta.color }} />}
