@@ -299,7 +299,10 @@ export function MoreScreen() {
     setConnectNotice(null);
     setConnectingPlatform(platform);
     try {
-      const url = await startSocialOAuth(workspace.id, capability.appKey as Exclude<SocialPlatformAppKey, 'telegram'>);
+      const url = await startSocialOAuth(
+        workspace.id,
+        capability.appKey as Exclude<SocialPlatformAppKey, 'telegram' | 'whatsapp'>,
+      );
       window.location.href = url;
     } catch (error) {
       setConnectError(error instanceof Error ? error.message : 'تعذّر بدء عملية الربط');
