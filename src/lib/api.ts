@@ -387,6 +387,44 @@ export async function callAgentTurn(params: {
 }
 
 
+export async function dispatchAssistantTask(taskId: string): Promise<{
+  ok: true;
+  taskId: string;
+  status: string;
+  dispatched: boolean;
+}> {
+  const { data: session } = await supabase.auth.getSession();
+  const token = session.session?.access_token;
+  if (!token) throw new Error('يجب تسجيل الدخول لتشغيل مهمة الـAI');
+
+  const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/assistant-task-dispatch`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+    },
+    body: JSON.stringify({ taskId }),
+  });
+  const body = await response.json().catch(() => ({})) as {
+    error?: string;
+    ok?: true;
+    taskId?: string;
+    status?: string;
+    dispatched?: boolean;
+  };
+  if (!response.ok || !body.ok || !body.taskId) {
+    throw new Error(body.error ?? `تعذّر تشغيل مهمة الـAI (${response.status})`);
+  }
+  return {
+    ok: true,
+    taskId: body.taskId,
+    status: body.status ?? 'queued',
+    dispatched: body.dispatched === true,
+  };
+}
+
+
 export async function listInboxConversations(workspaceId: string): Promise<InboxConversation[]> {
   const { data, error } = await supabase
     .from('inbox_conversations')
