@@ -11,7 +11,6 @@ import {
   Radio,
   Clock3,
   CheckCircle2,
-  CircleDashed,
   RotateCcw,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
