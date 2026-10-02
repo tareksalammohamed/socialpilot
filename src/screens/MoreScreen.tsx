@@ -156,7 +156,7 @@ export function MoreScreen() {
     if (capability.connectMode === 'bot') return Boolean(telegramBotUsername);
     if (capability.connectMode !== 'oauth' || !capability.appKey) return false;
     const app = appStatusByKey.get(capability.appKey);
-    return Boolean(app?.enabled && app?.configured && app.status === 'connected');
+    return Boolean(app?.enabled && app?.configured);
   }
 
   async function togglePlatform(platform: SocialPlatform) {
