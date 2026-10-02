@@ -162,7 +162,7 @@ function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
       disposed = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [message.id, hasMedia]);
+  }, [message.id, mediaId, storagePath, hasMedia]);
 
   if (!hasMedia || !type) return null;
   if (mediaLoading) return <div className="mt-2 text-[11px] text-ink-500">جارٍ تحميل المرفق...</div>;
