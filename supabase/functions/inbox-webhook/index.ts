@@ -134,6 +134,19 @@ async function updateWhatsAppDeliveryStatus(
     .maybeSingle();
   if (!message) return;
 
+  const previousStatus = typeof message.metadata?.delivery_status === 'string'
+    ? message.metadata.delivery_status
+    : null;
+  const rank: Record<string, number> = { accepted: 0, sent: 1, delivered: 2, read: 3 };
+  if (
+    deliveryStatus !== 'failed'
+    && previousStatus
+    && (rank[previousStatus] ?? -1) > (rank[deliveryStatus] ?? -1)
+  ) {
+    return;
+  }
+  if (previousStatus === 'read' && deliveryStatus === 'failed') return;
+
   const errors = Array.isArray(status.errors) ? status.errors : [];
   const firstError = errors[0] as Record<string, unknown> | undefined;
   const errorText = firstError
