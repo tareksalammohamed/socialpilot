@@ -216,7 +216,7 @@ export function MoreScreen() {
     }
     const cleanUrl = window.location.pathname + (params.toString() ? `?${params}` : '');
     window.history.replaceState({}, '', cleanUrl);
-  }, [loadAccounts, loadIntegrationState]);
+  }, [loadAccounts, loadIntegrationState, loadWhatsAppProviderState]);
 
   if (showSuperAdmin) return <SuperAdminScreen onBack={() => setShowSuperAdmin(false)} />;
   if (showAiUsage) return <AiUsageScreen onBack={() => setShowAiUsage(false)} />;
