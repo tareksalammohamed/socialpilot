@@ -204,6 +204,12 @@ export function MoreScreen() {
     const existing = accounts.find((account) => account.platform === platform);
     const capability = PLATFORM_CAPABILITIES[platform];
 
+    if (platform === 'whatsapp' && existing?.metadata?.onboarding_state === 'needs_registration') {
+      setConnectError(null);
+      setConnectNotice('أكمل PIN المكوّن من 6 أرقام أسفل بطاقة WhatsApp لتفعيل الرقم.');
+      return;
+    }
+
     if (existing?.status === 'connected') {
       setConnectingPlatform(platform);
       setConnectError(null);
@@ -453,6 +459,9 @@ export function MoreScreen() {
               if (connected) {
                 stateLabel = 'متصل';
                 stateColor = 'brand';
+              } else if (platform === 'whatsapp' && account?.metadata?.onboarding_state === 'needs_registration') {
+                stateLabel = 'بانتظار PIN';
+                stateColor = 'warning';
               } else if (account?.status === 'expired') {
                 stateLabel = 'انتهت الصلاحية';
                 stateColor = 'warning';
@@ -493,7 +502,13 @@ export function MoreScreen() {
                           onClick={() => void togglePlatform(platform)}
                           disabled={busy || (!connected && (capability.connectMode === 'oauth' || capability.connectMode === 'embedded') && !ready)}
                         >
-                          {connected ? 'فصل' : busy ? 'جارٍ الربط...' : 'ربط'}
+                          {connected
+                            ? 'فصل'
+                            : platform === 'whatsapp' && account?.metadata?.onboarding_state === 'needs_registration'
+                              ? 'إكمال'
+                              : busy
+                                ? 'جارٍ الربط...'
+                                : 'ربط'}
                         </Button>
                       )}
                     </div>
