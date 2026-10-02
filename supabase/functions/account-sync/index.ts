@@ -399,6 +399,85 @@ async function checkEvolutionWhatsApp(account: AccountRow): Promise<SyncOutcome>
   };
 }
 
+async function alternativeWhatsAppConfig(
+  platformKey: 'whatsapp_waha' | 'whatsapp_wppconnect',
+): Promise<{ baseUrl: string; secret: string }> {
+  const [{ data: app }, { data: secret }] = await Promise.all([
+    supabase.from('social_platform_apps').select('app_id,enabled,status').eq('platform_key', platformKey).maybeSingle(),
+    supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', platformKey).maybeSingle(),
+  ]);
+  if (!app?.enabled || app.status !== 'connected' || !app.app_id || !secret?.app_secret) {
+    throw new Error(`${platformKey === 'whatsapp_waha' ? 'WAHA' : 'WPPConnect'} provider غير مُعد`);
+  }
+  return { baseUrl: String(app.app_id).trim().replace(/\/+$/, ''), secret: String(secret.app_secret) };
+}
+
+async function checkWahaWhatsApp(account: AccountRow): Promise<SyncOutcome> {
+  const instance = typeof account.metadata?.instance_name === 'string' ? account.metadata.instance_name : '';
+  if (!instance) return { ok: false, status: 'error', error: 'WAHA session name غير موجود' };
+  const cfg = await alternativeWhatsAppConfig('whatsapp_waha');
+  const response = await fetch(`${cfg.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
+    headers: { 'X-Api-Key': cfg.secret, Accept: 'application/json' },
+  });
+  const body = await readJson(response);
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: 'error',
+      error: typeof body.message === 'string' ? body.message : `WAHA HTTP ${response.status}`,
+    };
+  }
+  const state = String(body.status ?? 'UNKNOWN').toUpperCase();
+  if (state !== 'WORKING') {
+    return { ok: false, status: 'error', error: `WAHA session state: ${state}` };
+  }
+  const me = (body.me ?? {}) as Record<string, unknown>;
+  const meId = typeof me.id === 'string' ? me.id.replace(/@c\.us$/i, '') : undefined;
+  return {
+    ok: true,
+    status: 'connected',
+    handle: meId ?? account.handle ?? undefined,
+    display_name: typeof me.pushName === 'string' ? me.pushName : account.display_name ?? undefined,
+  };
+}
+
+async function checkWppConnectWhatsApp(account: AccountRow): Promise<SyncOutcome> {
+  const instance = typeof account.metadata?.instance_name === 'string' ? account.metadata.instance_name : '';
+  if (!instance) return { ok: false, status: 'error', error: 'WPPConnect session name غير موجود' };
+  const cfg = await alternativeWhatsAppConfig('whatsapp_wppconnect');
+  const token = await readToken(account.id);
+  if (!token?.access_token || token.access_token === 'wppconnect-provider') {
+    return { ok: false, status: 'error', error: 'WPPConnect session token غير موجود' };
+  }
+
+  const response = await fetch(
+    `${cfg.baseUrl}/api/${encodeURIComponent(instance)}/check-connection-session`,
+    {
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        Accept: 'application/json',
+      },
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: 'error',
+      error: typeof body.message === 'string' ? body.message : `WPPConnect HTTP ${response.status}`,
+    };
+  }
+  const state = String(body.status ?? body.state ?? body.message ?? 'UNKNOWN').toUpperCase();
+  const connected = ['CONNECTED', 'ISLOGGED', 'INCHAT', 'OPEN', 'WORKING'].some((value) => state.includes(value));
+  if (!connected) return { ok: false, status: 'error', error: `WPPConnect session state: ${state}` };
+  return {
+    ok: true,
+    status: 'connected',
+    handle: account.handle ?? undefined,
+    display_name: account.display_name ?? undefined,
+  };
+}
+
 async function checkWhatsApp(account: AccountRow, accessToken: string): Promise<SyncOutcome> {
   const providerId = account.external_id ?? account.page_id;
   if (!providerId) return { ok: false, status: 'error', error: 'معرّف WhatsApp غير موجود' };
@@ -421,8 +500,10 @@ async function checkWhatsApp(account: AccountRow, accessToken: string): Promise<
 }
 
 async function checkAccount(account: AccountRow): Promise<SyncOutcome> {
-  if (account.platform === 'whatsapp' && account.metadata?.provider === 'evolution') {
-    return checkEvolutionWhatsApp(account);
+  if (account.platform === 'whatsapp') {
+    if (account.metadata?.provider === 'evolution') return checkEvolutionWhatsApp(account);
+    if (account.metadata?.provider === 'waha') return checkWahaWhatsApp(account);
+    if (account.metadata?.provider === 'wppconnect') return checkWppConnectWhatsApp(account);
   }
 
   const storedToken = await readToken(account.id);
@@ -481,7 +562,10 @@ async function syncOne(account: AccountRow): Promise<SyncOutcome> {
 
   await supabase.from('social_accounts').update({
     status: outcome.status,
-    needs_reconnect: outcome.status === 'expired' || (account.platform === 'whatsapp' && account.metadata?.provider === 'evolution' && !outcome.ok),
+    needs_reconnect: outcome.status === 'expired'
+      || (account.platform === 'whatsapp'
+        && ['evolution', 'waha', 'wppconnect'].includes(String(account.metadata?.provider ?? ''))
+        && !outcome.ok),
     ...(outcome.handle ? { handle: outcome.handle } : {}),
     ...(outcome.display_name ? { display_name: outcome.display_name } : {}),
     metadata,
