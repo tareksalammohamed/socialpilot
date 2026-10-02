@@ -353,17 +353,17 @@ Deno.serve(async (req: Request) => {
         conversation_id: conversationId,
         direction: 'outbound',
         content: storedContent,
-        is_ai: body.isAi === true,
+        is_ai: serviceCall && body.isAi === true,
         user_id: userId,
         ...(externalMessageId ? { external_id: externalMessageId } : {}),
         metadata: {
-          source: body.isAi === true
+          source: serviceCall && body.isAi === true
             ? (body.autoReplyRunId ? 'ai_auto_reply' : 'ai_assisted_reply')
             : mode === 'template'
               ? 'whatsapp_template'
               : 'inbox_reply',
-          ...(body.aiAnalysisId ? { ai_analysis_id: body.aiAnalysisId } : {}),
-          ...(body.autoReplyRunId ? { auto_reply_run_id: body.autoReplyRunId } : {}),
+          ...(serviceCall && body.aiAnalysisId ? { ai_analysis_id: body.aiAnalysisId } : {}),
+          ...(serviceCall && body.autoReplyRunId ? { auto_reply_run_id: body.autoReplyRunId } : {}),
           ...(mode === 'template' ? {
             template_name: template?.name ?? null,
             template_language: template?.language ?? null,
