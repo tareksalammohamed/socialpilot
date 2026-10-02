@@ -2,14 +2,12 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Settings,
   Brain,
-  Link2,
   LogOut,
   Shield,
   TrendingUp,
   ChevronLeft,
   RefreshCw,
   CheckCircle2,
-  AlertTriangle,
   Radio,
   CalendarDays,
   MessageSquareText,
@@ -325,11 +323,11 @@ export function MoreScreen() {
       </section>
 
       <section className="mb-5">
-        <button onClick={() => setShowAccounts((value) => !value)} className="section-heading w-full text-right">
-          <div>
+        <div className="section-heading">
+          <button onClick={() => setShowAccounts((value) => !value)} className="text-right flex-1">
             <p className="eyebrow">CHANNEL OPERATIONS</p>
             <h2 className="section-title">القنوات والحسابات</h2>
-          </div>
+          </button>
           <div className="flex items-center gap-2">
             <Button
               variant="secondary"
@@ -340,9 +338,15 @@ export function MoreScreen() {
             >
               <RefreshCw size={14} className={accountSyncBusy ? 'animate-spin' : ''} />
             </Button>
-            <ChevronLeft size={18} className={`text-ink-500 transition-transform ${showAccounts ? '-rotate-90' : ''}`} />
+            <button
+              onClick={() => setShowAccounts((value) => !value)}
+              className="p-2 rounded-lg hover:bg-ink-800 transition-colors"
+              aria-label={showAccounts ? 'إخفاء القنوات' : 'إظهار القنوات'}
+            >
+              <ChevronLeft size={18} className={`text-ink-500 transition-transform ${showAccounts ? '-rotate-90' : ''}`} />
+            </button>
           </div>
-        </button>
+        </div>
 
         {showAccounts && (
           <div className="grid gap-3 lg:grid-cols-2">
@@ -422,13 +426,13 @@ export function MoreScreen() {
                     </div>
 
                     {!connected && capability.connectMode === 'oauth' && app && !ready && (
-                      <div className="mt-3 rounded-xl bg-warning-500/8 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
+                      <div className="mt-3 rounded-xl bg-warning-500/10 border border-warning-500/20 px-3 py-2 text-warning-300 text-[11px]">
                         التكامل موجود لكن يحتاج App ID/Secret وتفعيل من Super Admin.
                       </div>
                     )}
 
                     {platform === 'tiktok' && connected && (
-                      <div className="mt-3 rounded-xl bg-accent-500/8 border border-accent-500/20 px-3 py-2 text-accent-300 text-[11px]">
+                      <div className="mt-3 rounded-xl bg-accent-500/10 border border-accent-500/20 px-3 py-2 text-accent-300 text-[11px]">
                         الحساب مربوط. النشر المباشر يظل مقيدًا بمتطلبات TikTok للـContent Posting API وخصوصية المستخدم والميديا.
                       </div>
                     )}
