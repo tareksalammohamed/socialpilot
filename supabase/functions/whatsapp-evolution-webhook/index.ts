@@ -26,11 +26,42 @@ function normalizeBaseUrl(value: string): string {
 
 async function providerConfig(): Promise<{ baseUrl: string; apiKey: string }> {
   const [{ data: app }, { data: secret }] = await Promise.all([
-    supabase.from('social_platform_apps').select('app_id,enabled').eq('platform_key', 'whatsapp').maybeSingle(),
+    supabase.from('social_platform_apps').select('app_id,enabled,has_secret').eq('platform_key', 'whatsapp').maybeSingle(),
     supabase.from('social_platform_app_secrets').select('app_secret').eq('platform_key', 'whatsapp').maybeSingle(),
   ]);
-  if (!app?.enabled || !app.app_id || !secret?.app_secret) throw new Error('Evolution provider is not configured');
-  return { baseUrl: normalizeBaseUrl(String(app.app_id)), apiKey: String(secret.app_secret) };
+  const raw = typeof secret?.app_secret === 'string' ? secret.app_secret.trim() : '';
+
+  if (raw.startsWith('{')) {
+    const bundle = JSON.parse(raw) as {
+      providers?: {
+        evolution?: {
+          baseUrl?: string;
+          credential?: string;
+          enabled?: boolean;
+          status?: string;
+        };
+      };
+    };
+    const config = bundle.providers?.evolution;
+    if (
+      !app?.has_secret
+      || !config?.baseUrl
+      || !config.credential
+      || config.enabled !== true
+      || config.status !== 'connected'
+    ) {
+      throw new Error('Evolution provider is not configured');
+    }
+    return {
+      baseUrl: normalizeBaseUrl(config.baseUrl),
+      apiKey: config.credential,
+    };
+  }
+
+  if (!app?.enabled || !app.app_id || !raw || !/^https?:\/\//i.test(String(app.app_id))) {
+    throw new Error('Evolution provider is not configured');
+  }
+  return { baseUrl: normalizeBaseUrl(String(app.app_id)), apiKey: raw };
 }
 
 function unwrapMessage(message: Record<string, unknown>): Record<string, unknown> {
