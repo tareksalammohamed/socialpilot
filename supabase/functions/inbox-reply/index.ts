@@ -73,26 +73,68 @@ async function whatsappProviderRuntime(accountId: string, provider: WhatsAppWebP
   secret: string;
   sessionToken: string | null;
 }> {
-  const [{ data: config }, { data: providerSecret }, { data: tokenRow }] = await Promise.all([
-    supabase.from('whatsapp_provider_configs')
-      .select('base_url,enabled,status')
-      .eq('provider_key', provider)
+  const [{ data: app }, { data: providerSecret }, { data: tokenRow }] = await Promise.all([
+    supabase.from('social_platform_apps')
+      .select('app_id,enabled,has_secret')
+      .eq('platform_key', 'whatsapp')
       .maybeSingle(),
-    supabase.from('whatsapp_provider_secrets')
-      .select('primary_secret')
-      .eq('provider_key', provider)
+    supabase.from('social_platform_app_secrets')
+      .select('app_secret')
+      .eq('platform_key', 'whatsapp')
       .maybeSingle(),
     supabase.from('social_account_tokens')
       .select('access_token')
       .eq('account_id', accountId)
       .maybeSingle(),
   ]);
-  if (!config?.enabled || config.status !== 'connected' || !config.base_url || !providerSecret?.primary_secret) {
+
+  const raw = typeof providerSecret?.app_secret === 'string' ? providerSecret.app_secret.trim() : '';
+  let config: {
+    baseUrl: string;
+    credential: string;
+    enabled: boolean;
+    status: string;
+  } | null = null;
+
+  if (raw.startsWith('{')) {
+    try {
+      const bundle = JSON.parse(raw) as {
+        version?: number;
+        providers?: Partial<Record<WhatsAppWebProvider, {
+          baseUrl?: string;
+          credential?: string;
+          enabled?: boolean;
+          status?: string;
+        }>>;
+      };
+      const selected = bundle.providers?.[provider];
+      if (selected?.baseUrl && selected.credential) {
+        config = {
+          baseUrl: selected.baseUrl,
+          credential: selected.credential,
+          enabled: selected.enabled === true,
+          status: selected.status ?? 'not_configured',
+        };
+      }
+    } catch {
+      config = null;
+    }
+  } else if (provider === 'evolution' && raw && typeof app?.app_id === 'string' && /^https?:\/\//i.test(app.app_id)) {
+    config = {
+      baseUrl: app.app_id,
+      credential: raw,
+      enabled: Boolean(app.enabled),
+      status: app.enabled ? 'connected' : 'error',
+    };
+  }
+
+  if (!app?.has_secret || !config?.enabled || config.status !== 'connected') {
     throw new Error(`WhatsApp provider ${provider} غير جاهز`);
   }
+
   return {
-    baseUrl: String(config.base_url).trim().replace(/\/+$/, ''),
-    secret: String(providerSecret.primary_secret),
+    baseUrl: config.baseUrl.trim().replace(/\/+$/, ''),
+    secret: config.credential,
     sessionToken: typeof tokenRow?.access_token === 'string' ? tokenRow.access_token : null,
   };
 }
