@@ -49,6 +49,11 @@ BEGIN
  UPDATE public.assistant_tasks SET locked_at=now()-interval '11 minutes' WHERE id=tid;
  IF EXISTS(SELECT 1 FROM public.claim_assistant_task('retry',tid)) THEN RAISE EXCEPTION 'ambiguous_publish_replayed'; END IF;
  IF (SELECT status FROM public.assistant_tasks WHERE id=tid)<>'failed' THEN RAISE EXCEPTION 'ambiguous_publish_stuck'; END IF;
+ -- Rejecting an approval is persisted; no user can forge completion.
+ tid:=gen_random_uuid();PERFORM public.enqueue_assistant_task(wid,'agent','{"message":"schedule","agentContext":{"currentVariantId":"30000000-0000-0000-0000-000000000001"}}',tid);PERFORM public.claim_assistant_task('pending',tid);
+ PERFORM public.complete_assistant_task(tid,'pending','{"pendingApproval":{"reason":"Review first","toolCalls":[]}}');
+ PERFORM public.dismiss_assistant_approval(wid,'30000000-0000-0000-0000-000000000001');
+ IF (SELECT result ? 'pendingApproval' FROM public.assistant_tasks WHERE id=tid) THEN RAISE EXCEPTION 'rejected_approval_restored'; END IF;
  -- Revoked workspace access blocks committing work even with a valid lease.
  tid:=gen_random_uuid();PERFORM public.enqueue_assistant_task(wid,'agent','{"message":"edit"}',tid);PERFORM public.claim_assistant_task('revoked',tid);
  DELETE FROM public.workspace_members WHERE workspace_id=wid;

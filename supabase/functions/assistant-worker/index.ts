@@ -1,3 +1,4 @@
+import { executeBrandMemoryTool, BRAND_MEMORY_TOOLS } from '../ai-gateway/agent/executors-brand.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { executePublishingTool, PUBLISHING_TOOLS, type UserScope } from '../ai-gateway/agent/executors-publishing.ts';
 import type { AgentContext, ToolCall } from '../ai-gateway/agent/types.ts';
@@ -49,8 +50,9 @@ async function execute(task: Task, worker: string): Promise<void> {
         const context = { ...(task.payload.agentContext as object ?? {}), workspaceId: task.workspace_id, userId: task.user_id } as AgentContext;
         const toolResults = [];
         for (const c of task.payload.toolCalls as ToolCall[]) {
-          if (!PUBLISHING_TOOLS.has(c.name)) throw new Error(`Unsupported approved tool: ${c.name}`);
-          toolResults.push(await executePublishingTool(c, context, db, scope));
+          if (PUBLISHING_TOOLS.has(c.name)) toolResults.push(await executePublishingTool(c, context, db, scope));
+          else if (BRAND_MEMORY_TOOLS.has(c.name)) toolResults.push(await executeBrandMemoryTool(c, context, db));
+          else throw new Error(`Unsupported approved tool: ${c.name}`);
         }
         turn = { toolResults };
       } else {

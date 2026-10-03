@@ -212,18 +212,11 @@ export function ContentScreen() {
       }
 
       const out = succeeded.output as { text?: string; hashtags?: string[]; cta?: string };
-      const nextStatus = variant.status === 'approved' ? 'review' : variant.status;
-      if (nextStatus !== variant.status) {
-        // Mirror handleSaveVariant's safety rule: an AI-driven edit invalidates
-        // a prior approval too — content shouldn't stay "approved" after its
-        // text silently changed underneath that approval.
-        await supabase.from('content_variants').update({ status: nextStatus }).eq('id', variant.id).eq('workspace_id', workspace.id);
-        setContent((prev) => prev.map((item) => item.id === variant.content_id && item.status === 'approved' ? { ...item, status: 'draft' } : item));
-      }
+      const nextStatus = 'review' as const;
       setVariantsByContent((prev) => ({
         ...prev,
         [variant.content_id]: (prev[variant.content_id] ?? []).map((item) => item.id === variant.id
-          ? { ...item, text: out.text ?? item.text, hashtags: out.hashtags ?? item.hashtags, cta: out.cta ?? item.cta, status: nextStatus }
+          ? { ...item, text: out.text ?? item.text, hashtags: out.hashtags ?? item.hashtags, cta: out.cta ?? item.cta, status: nextStatus, quality_status: 'pending', quality_score: null }
           : item),
       }));
       setAiInstructionByVariant((prev) => ({ ...prev, [variant.id]: '' }));
@@ -296,7 +289,10 @@ export function ContentScreen() {
     }
   }
 
-  function handleRejectPendingTool(variant: ContentVariant) {
+  async function handleRejectPendingTool(variant: ContentVariant) {
+    if (!workspace) return;
+    const { error } = await supabase.rpc('dismiss_assistant_approval', { p_workspace_id: workspace.id, p_variant_id: variant.id });
+    if (error) { setAiEditResults(prev => ({ ...prev, [variant.id]: error.message })); return; }
     setPendingApprovalByVariant((prev) => { const next = { ...prev }; delete next[variant.id]; return next; });
     setAiEditResults((prev) => ({ ...prev, [variant.id]: 'تم إلغاء الإجراء.' }));
   }

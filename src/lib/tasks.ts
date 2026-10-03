@@ -28,5 +28,6 @@ export async function waitForTask<T>(id: string): Promise<T> {
 }
 
 export async function durableRpc(workspaceId: string, rpc: string, args: Record<string, unknown>) {
-  return waitForTask(await enqueueTask(workspaceId, 'rpc', { rpc, args }));
+  const labels: Record<string, string> = { approve_content_variant: 'اعتماد المنشور وجدولته', reschedule_calendar_item: 'تعديل موعد النشر', cancel_calendar_item: 'إلغاء الجدولة' };
+  return waitForTask(await enqueueTask(workspaceId, 'rpc', { rpc, args, message: labels[rpc] ?? 'تنفيذ الإجراء' }));
 }

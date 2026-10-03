@@ -252,7 +252,7 @@ export async function publishVariant(params: {
   variantId: string;
   calendarItemId?: string;
 }): Promise<PublishResult> {
-  return waitForTask<PublishResult>(await enqueueTask(params.workspaceId, 'publish', { ...params }));
+  return waitForTask<PublishResult>(await enqueueTask(params.workspaceId, 'publish', { ...params, message: 'نشر المنشور' }));
 }
 
 export async function callAiGateway(req: AiGatewayRequest): Promise<AiGatewayResponse> {
@@ -296,7 +296,7 @@ export async function callApprovedTools(params: {
   agentContext?: AgentContext;
   legacyContext?: Record<string, unknown>;
 }): Promise<{ toolResults: AgentToolResult[] }> {
-  return waitForTask<{ toolResults: AgentToolResult[] }>(await enqueueTask(params.workspaceId, 'approved', { ...params }));
+  return waitForTask<{ toolResults: AgentToolResult[] }>(await enqueueTask(params.workspaceId, 'approved', { ...params, message: 'تنفيذ الإجراء المعتمد' }));
 }
 
 export async function callAgentTurn(params: {

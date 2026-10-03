@@ -19,7 +19,7 @@ export function TaskActivity({ workspaceId, onChange, onTasks }: { workspaceId?:
       const { data, error } = await supabase.from('assistant_tasks').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }).limit(20);
       if (cancelled || error || !data) return;
       setTasks(data as DurableTask[]);
-      const signature = JSON.stringify(data.map(t => [t.id,t.status]));
+      const signature = JSON.stringify(data.map(t => [t.id,t.status,t.updated_at]));
       if (signature !== previous.current) {
         previous.current = signature;
         restore.current(data as DurableTask[]);
