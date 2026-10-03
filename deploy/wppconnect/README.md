@@ -2,6 +2,8 @@
 
 WPPConnect is the second fallback provider.
 
+For a Windows computer without Docker or a VPS, follow [WINDOWS.md](WINDOWS.md).
+
 ## Production setup
 
 1. Run on a persistent Linux VPS/container host behind HTTPS.

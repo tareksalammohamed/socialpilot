@@ -1,3 +1,4 @@
+import { applySessionState, eventObservedAt } from '../_shared/whatsapp-session.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 const CORS = {
@@ -318,8 +319,7 @@ async function upsertMessage(params: {
     .single();
 
   if (conversationError || !conversation) {
-    console.error('conversation upsert failed', conversationError?.message);
-    return;
+    throw new Error('Evolution conversation persistence failed');
   }
 
   let mediaMetadata: Record<string, unknown> = {};
@@ -365,8 +365,7 @@ async function upsertMessage(params: {
     .maybeSingle();
 
   if (messageError) {
-    console.error('message upsert failed', messageError.message);
-    return;
+    throw new Error('Evolution message persistence failed');
   }
 
   if (inserted && !fromMe) {
@@ -417,19 +416,20 @@ async function applyMessageUpdate(account: Record<string, unknown>, data: unknow
     const next = deliveryStatus(update.status ?? update.update ?? update.messageUpdate);
     if (!externalId || !next) continue;
 
-    const { data: row } = await supabase.from('inbox_messages')
+    const { data: row, error: ackLookupError } = await supabase.from('inbox_messages')
       .select('id,metadata,conversation_id')
       .eq('workspace_id', account.workspace_id)
       .eq('external_id', externalId)
       .eq('direction', 'outbound')
       .maybeSingle();
+    if (ackLookupError) throw new Error('Delivery status lookup failed');
     if (!row) continue;
 
     const previous = typeof row.metadata?.delivery_status === 'string' ? row.metadata.delivery_status : null;
     if (previous && previous !== 'failed' && next !== 'failed' && (rank[previous] ?? -1) > (rank[next] ?? -1)) continue;
     if (previous === 'read' && next === 'failed') continue;
 
-    await supabase.from('inbox_messages').update({
+    const { error: ackError } = await supabase.from('inbox_messages').update({
       metadata: {
         ...(row.metadata ?? {}),
         delivery_status: next,
@@ -437,6 +437,7 @@ async function applyMessageUpdate(account: Record<string, unknown>, data: unknow
         provider_update: update,
       },
     }).eq('id', row.id);
+    if (ackError) throw new Error('Delivery status persistence failed');
 
     if (next === 'failed') {
       await supabase.from('notifications').insert({
@@ -464,21 +465,25 @@ Deno.serve(async (req) => {
       : '';
   if (!instance) return json(200, { ok: true, ignored: true, reason: 'missing_instance' });
 
-  const { data: account } = await supabase.from('social_accounts')
+  const { data: account, error: lookupError } = await supabase.from('social_accounts')
     .select('id,workspace_id,status,metadata')
     .eq('platform', 'whatsapp')
     .contains('metadata', { provider: 'evolution', instance_name: instance })
     .maybeSingle();
+  if (lookupError) return json(503, { error: 'Account lookup unavailable' });
   if (!account) return json(200, { ok: true, ignored: true, reason: 'unknown_instance' });
 
-  const { data: secretRow } = await supabase.from('social_account_tokens')
+  const { data: secretRow, error: tokenLookupError } = await supabase.from('social_account_tokens')
     .select('refresh_token')
     .eq('account_id', account.id)
     .maybeSingle();
+  if (tokenLookupError) return json(503, { error: 'Session lookup unavailable' });
   const suppliedSecret = req.headers.get('x-socialpilot-secret') ?? '';
   if (!secretRow?.refresh_token || suppliedSecret !== secretRow.refresh_token) {
     return json(401, { error: 'Invalid webhook secret' });
   }
+
+  if (account.metadata?.session_active === false) return json(200, { ok: true, ignored: true, reason: 'inactive_session' });
 
   const event = String(payload.event ?? '').toLowerCase();
   const data = payload.data;
@@ -489,7 +494,7 @@ Deno.serve(async (req) => {
       const state = String(stateData.state ?? 'unknown').toLowerCase();
       const connected = ['open', 'connected'].includes(state);
       const sender = typeof payload.sender === 'string' ? payload.sender : null;
-      await supabase.from('social_accounts').update({
+      await applySessionState(supabase, String(account.id), suppliedSecret, {
         status: connected ? 'connected' : 'error',
         needs_reconnect: !connected,
         ...(sender ? {
@@ -499,12 +504,11 @@ Deno.serve(async (req) => {
         } : {}),
         last_sync_at: new Date().toISOString(),
         metadata: {
-          ...(account.metadata ?? {}),
           provider_state: state,
           onboarding_state: connected ? 'ready' : 'scan_qr',
           status_reason: stateData.statusReason ?? null,
         },
-      }).eq('id', account.id);
+      }, eventObservedAt(payload.date_time ?? payload.timestamp));
       return json(200, { ok: true });
     }
 
