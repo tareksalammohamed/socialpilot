@@ -36,6 +36,7 @@ type FixtureOptions = {
   closeStatus?: number; wahaEnabled?: boolean; current?: string; newAccount?: boolean;
   saveFailure?: boolean; applyFailure?: boolean; lookupFailure?: boolean; messageFailure?: boolean;
   conversationFailure?: boolean; inactive?: boolean; wahaExisting?: boolean; wppConnected?: boolean;
+  ackFailure?: boolean;
   startFailure?: boolean; wppLogoutMissing?: boolean; wppCloseFailure?: boolean;
   beforeWahaStart?: () => Promise<void>;
 };
@@ -124,7 +125,10 @@ async function fixture(run: (calls: Call[], readAccount: () => Record<string, un
     if (table === 'social_accounts') return options.lookupFailure ? failure() : json(account);
     if (table === 'social_account_tokens') return json(tokens);
     if (table === 'inbox_conversations') return options.conversationFailure ? failure() : json({ id: 'conversation-1' });
-    if (table === 'inbox_messages') return options.messageFailure ? failure() : json(null);
+    if (table === 'inbox_messages') {
+      if (options.ackFailure) return req.method === 'PATCH' ? failure() : json({ id: 'message-1', metadata: {} });
+      return options.messageFailure ? failure() : json(null);
+    }
     throw new Error(`Unexpected database request: ${url}`);
   };
   try { await run(calls, () => account); } finally { globalThis.fetch = originalFetch; }
@@ -429,4 +433,26 @@ Deno.test('every provider switch direction preserves identity and closes the pre
       }, { current });
     }
   }
+});
+
+Deno.test('account-sync retains the webhook watchdog inside its lifecycle lease', async () => {
+  await fixture(async (calls) => {
+    assert((await accountSync(new Request('https://app.test', { method: 'POST',
+      headers: { Authorization: 'Bearer test-user', 'Content-Type': 'application/json' }, body: JSON.stringify({ account_id: 'account-1' }),
+    }))).status === 200);
+    assert(calls.some((c) => c.url.hostname === 'waha.test' && c.method === 'PUT'));
+    assert(calls.some((c) => c.url.pathname.endsWith('/whatsapp_claim_operation')));
+  }, { current: 'waha', wahaExisting: true });
+});
+
+Deno.test('all providers return failure when delivery acknowledgements cannot be saved', async () => {
+  await fixture(async () => {
+    assert((await wppWebhook(wppEvent({ event: 'onack', id: 'msg-1', ack: 2 }))).status === 500);
+  }, { current: 'wppconnect', ackFailure: true });
+  await fixture(async () => {
+    assert((await wahaWebhook(await wahaEvent({ session: 'session-1', event: 'message.ack', payload: { id: 'msg-1', ack: 2 } }))).status === 500);
+  }, { current: 'waha', ackFailure: true });
+  await fixture(async () => {
+    assert((await evolutionWebhook(evolutionEvent({ instance: 'session-1', event: 'messages.update', data: { key: { id: 'msg-1' }, status: 2 } }))).status === 500);
+  }, { current: 'evolution', ackFailure: true });
 });

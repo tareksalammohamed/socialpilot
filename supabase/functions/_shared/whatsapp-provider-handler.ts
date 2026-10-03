@@ -271,29 +271,7 @@ async function evolutionState(runtime: ProviderRuntime, instance: string): Promi
   return normalizeState(row?.connectionStatus ?? row?.connectionState ?? row?.state);
 }
 
-async function evolutionStart(runtime: ProviderRuntime, instance: string, webhookSecret: string): Promise<StartResult> {
-  let state = await evolutionState(runtime, instance);
-  if (state === 'missing' || state === 'unknown') {
-    const created = await requestJson(`${runtime.baseUrl}/instance/create`, {
-      method: 'POST',
-      headers: { apikey: runtime.secret, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        instanceName: instance,
-        integration: 'WHATSAPP-BAILEYS',
-        qrcode: true,
-        rejectCall: true,
-        groupsIgnore: true,
-        alwaysOnline: false,
-        readMessages: false,
-        readStatus: false,
-        syncFullHistory: false,
-      }),
-    });
-    if (!created.response.ok && created.response.status !== 409) {
-      throw new Error(String(created.body.message ?? created.body.error ?? `Evolution create HTTP ${created.response.status}`));
-    }
-  }
-
+async function configureEvolutionWebhook(runtime: ProviderRuntime, instance: string, webhookSecret: string): Promise<void> {
   const webhookPayload = {
     webhook: {
       enabled: true,
@@ -317,6 +295,33 @@ async function evolutionStart(runtime: ProviderRuntime, instance: string, webhoo
     });
   }
   if (!hook.response.ok) throw new Error(`Evolution webhook HTTP ${hook.response.status}`);
+
+}
+
+async function evolutionStart(runtime: ProviderRuntime, instance: string, webhookSecret: string): Promise<StartResult> {
+  let state = await evolutionState(runtime, instance);
+  if (state === 'missing' || state === 'unknown') {
+    const created = await requestJson(`${runtime.baseUrl}/instance/create`, {
+      method: 'POST',
+      headers: { apikey: runtime.secret, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instanceName: instance,
+        integration: 'WHATSAPP-BAILEYS',
+        qrcode: true,
+        rejectCall: true,
+        groupsIgnore: true,
+        alwaysOnline: false,
+        readMessages: false,
+        readStatus: false,
+        syncFullHistory: false,
+      }),
+    });
+    if (!created.response.ok && created.response.status !== 409) {
+      throw new Error(String(created.body.message ?? created.body.error ?? `Evolution create HTTP ${created.response.status}`));
+    }
+  }
+
+  await configureEvolutionWebhook(runtime, instance, webhookSecret);
 
   let connect = await requestJson(`${runtime.baseUrl}/instance/connect/${encodeURIComponent(instance)}`, {
     headers: { apikey: runtime.secret, Accept: 'application/json' },
@@ -349,8 +354,8 @@ async function wahaState(runtime: ProviderRuntime, instance: string): Promise<st
   return normalizeState(result.body.status ?? result.body.state);
 }
 
-async function wahaStart(runtime: ProviderRuntime, instance: string, webhookSecret: string): Promise<StartResult> {
-  const sessionConfig = {
+function wahaSessionConfig(instance: string, webhookSecret: string) {
+  return {
     name: instance,
     start: true,
     config: {
@@ -365,6 +370,18 @@ async function wahaStart(runtime: ProviderRuntime, instance: string, webhookSecr
       }],
     },
   };
+}
+
+async function configureWahaWebhook(runtime: ProviderRuntime, instance: string, webhookSecret: string): Promise<void> {
+  const configured = await requestJson(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
+    method: 'PUT', headers: { 'X-Api-Key': runtime.secret, 'Content-Type': 'application/json' },
+    body: JSON.stringify(wahaSessionConfig(instance, webhookSecret)),
+  });
+  if (!configured.response.ok) throw new Error(`WAHA webhook configuration HTTP ${configured.response.status}`);
+}
+
+async function wahaStart(runtime: ProviderRuntime, instance: string, webhookSecret: string): Promise<StartResult> {
+  const sessionConfig = wahaSessionConfig(instance, webhookSecret);
 
   let state = await wahaState(runtime, instance);
   if (state === 'missing' || state === 'unknown') {
@@ -386,11 +403,7 @@ async function wahaStart(runtime: ProviderRuntime, instance: string, webhookSecr
   }
 
   if (state !== 'missing' && state !== 'unknown') {
-    const configured = await requestJson(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}`, {
-      method: 'PUT', headers: { 'X-Api-Key': runtime.secret, 'Content-Type': 'application/json' },
-      body: JSON.stringify(sessionConfig),
-    });
-    if (!configured.response.ok) throw new Error(`WAHA webhook configuration HTTP ${configured.response.status}`);
+    await configureWahaWebhook(runtime, instance, webhookSecret);
   }
 
   const started = await requestJson(`${runtime.baseUrl}/api/sessions/${encodeURIComponent(instance)}/start`, {
@@ -667,6 +680,12 @@ export async function handleWhatsAppProvider(req: Request, expectedProvider?: Pr
       let statusError: string | undefined;
       if (runtime?.enabled && runtime.status === 'connected' && runtime.baseUrl && runtime.secret) {
         try {
+          // Preserve account-sync's webhook watchdog under the same operation lease.
+          // Avoid changing session configuration on each three-second QR poll.
+          if (authorizedWorkspaceId === workspaceId && tokens.webhookSecret) {
+            if (currentProvider === 'evolution') await configureEvolutionWebhook(runtime, instance, tokens.webhookSecret);
+            if (currentProvider === 'waha') await configureWahaWebhook(runtime, instance, tokens.webhookSecret);
+          }
           const result = await providerState(runtime, instance, tokens.accessToken);
           state = result.state;
           if (result.sessionToken && result.sessionToken !== tokens.accessToken) {
