@@ -4,6 +4,8 @@
     "check:whatsapp": "deno check functions/whatsapp-provider/index.ts functions/whatsapp-provider-webhook/index.ts functions/whatsapp-waha-webhook/index.ts functions/whatsapp-wppconnect-webhook/index.ts functions/whatsapp-evolution/index.ts functions/whatsapp-evolution-webhook/index.ts functions/inbox-reply/index.ts functions/inbox-media-send/index.ts functions/account-sync/index.ts functions/social-platform-admin/index.ts functions/inbox-auto-reply/index.ts",
     "test:whatsapp": "deno test --allow-env --allow-read=functions tests/whatsapp_test.ts",
     "check:content": "deno check functions/assistant-worker/index.ts functions/ai-gateway/index.ts functions/social-publish/index.ts functions/scheduler-tick/index.ts",
-    "test:content": "deno test tests/durable_steps_test.ts"
+    "test:content": "deno test tests/durable_steps_test.ts",
+    "check:analytics": "deno check functions/analytics-sync/index.ts",
+    "test:analytics": "deno test tests/analytics_test.ts"
   }
 }

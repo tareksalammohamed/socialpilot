@@ -94,6 +94,10 @@ jobs:
         working-directory: supabase
       - run: deno task test:content
         working-directory: supabase
+      - run: deno task check:analytics
+        working-directory: supabase
+      - run: deno task test:analytics
+        working-directory: supabase
 
   content-database:
     runs-on: ubuntu-latest
@@ -127,3 +131,6 @@ jobs:
           -f supabase/migrations/20261003005932_durable_content_workflows.sql
           -f supabase/migrations/20261003010435_persist_assistant_approval_decisions.sql
           -f supabase/tests/durable_content.sql
+          -f supabase/tests/analytics_schema_fixture.sql
+          -f supabase/migrations/20261003030423_accurate_analytics_snapshots.sql
+          -f supabase/tests/analytics.sql

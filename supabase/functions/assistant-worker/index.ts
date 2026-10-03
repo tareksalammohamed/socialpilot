@@ -1,3 +1,4 @@
+import { aggregateInsights } from '../_shared/analytics-math.ts';
 import { executeBrandMemoryTool, BRAND_MEMORY_TOOLS } from '../ai-gateway/agent/executors-brand.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { executePublishingTool, PUBLISHING_TOOLS, type UserScope } from '../ai-gateway/agent/executors-publishing.ts';
@@ -23,13 +24,29 @@ async function execute(task: Task, worker: string): Promise<void> {
   try {
     const { data: member } = await db.from('workspace_members').select('role').eq('workspace_id', task.workspace_id).eq('user_id', task.user_id).maybeSingle();
     if (!member) throw new Error('workspace_access_denied');
+    if (task.task_kind === 'analytics') {
+      const previous = task.checkpoint ?? { cursor: 0, synced: 0, attempted: 0, errors: [], unsupportedPlatforms: [] };
+      const part = await call('analytics-sync', { workspaceId: task.workspace_id, cursor: previous.cursor }, task, worker);
+      const result = { cursor: part.nextCursor, synced: Number(previous.synced ?? 0)+Number(part.synced ?? 0), attempted: Number(previous.attempted ?? 0)+Number(part.attempted ?? 0),
+        errors: [...previous.errors as unknown[], ...part.errors as unknown[]], unsupportedPlatforms: [...new Set([...previous.unsupportedPlatforms as string[], ...part.unsupportedPlatforms as string[]])] };
+      if (part.hasMore) {
+        const {data:saved,error:saveError}=await db.from('assistant_tasks').update({ checkpoint: result, status: 'queued', worker_id: null, locked_at: null, attempt_count: 0, available_at: new Date().toISOString() }).eq('id',task.id).eq('worker_id',worker).eq('status','running').select('id').maybeSingle();
+        if(saveError||!saved)throw new Error('lease_lost');
+      } else {
+        const { error } = await db.rpc('complete_assistant_task', { p_task_id: task.id, p_worker_id: worker, p_turn: result });
+        if(error) throw error;
+      }
+      return;
+    }
     if (['create','agent'].includes(task.task_kind)) {
       const legacy = (task.payload.legacyContext ?? {}) as Record<string, unknown>;
       if (!Object.hasOwn(legacy, 'performance')) {
-        const { data: insights, error } = await db.from('post_insights').select('metric,value,platform').eq('workspace_id', task.workspace_id).order('timestamp', { ascending:false }).limit(200);
-        if (error) throw error;
-        const performance: Record<string, number> = {};
-        for (const row of insights ?? []) { const k = `${row.platform}:${row.metric}`; performance[k] = (performance[k] ?? 0) + Number(row.value ?? 0); }
+        const insights=[];
+        for(let offset=0;;offset+=1000){
+          const {data,error}=await db.from('latest_post_insights').select('*').eq('workspace_id',task.workspace_id).order('id').range(offset,offset+999);
+          if(error)throw error;insights.push(...(data??[]));if((data??[]).length<1000)break;
+        }
+        const performance = { ...aggregateInsights(insights).totals };
         task.payload = { ...task.payload, legacyContext: { ...legacy, performance } };
         const { data: saved, error: saveError } = await db.from('assistant_tasks').update({ payload: task.payload }).eq('id',task.id).eq('worker_id',worker).eq('status','running').select('id').maybeSingle();
         if (saveError || !saved) throw new Error('lease_lost');
