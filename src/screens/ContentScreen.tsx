@@ -1,3 +1,5 @@
+import { durableRpc, type DurableTask } from '@/lib/tasks';
+import { TaskActivity } from '@/components/TaskActivity';
 import { useEffect, useState } from 'react';
 import { FileText, Calendar as CalendarIcon, ChevronLeft, ChevronRight, ChevronDown, Send, Check, ExternalLink, Pencil, Save, X, Sparkles, Image as ImageIcon, Trash2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
@@ -210,18 +212,11 @@ export function ContentScreen() {
       }
 
       const out = succeeded.output as { text?: string; hashtags?: string[]; cta?: string };
-      const nextStatus = variant.status === 'approved' ? 'review' : variant.status;
-      if (nextStatus !== variant.status) {
-        // Mirror handleSaveVariant's safety rule: an AI-driven edit invalidates
-        // a prior approval too — content shouldn't stay "approved" after its
-        // text silently changed underneath that approval.
-        await supabase.from('content_variants').update({ status: nextStatus }).eq('id', variant.id).eq('workspace_id', workspace.id);
-        setContent((prev) => prev.map((item) => item.id === variant.content_id && item.status === 'approved' ? { ...item, status: 'draft' } : item));
-      }
+      const nextStatus = 'review' as const;
       setVariantsByContent((prev) => ({
         ...prev,
         [variant.content_id]: (prev[variant.content_id] ?? []).map((item) => item.id === variant.id
-          ? { ...item, text: out.text ?? item.text, hashtags: out.hashtags ?? item.hashtags, cta: out.cta ?? item.cta, status: nextStatus }
+          ? { ...item, text: out.text ?? item.text, hashtags: out.hashtags ?? item.hashtags, cta: out.cta ?? item.cta, status: nextStatus, quality_status: 'pending', quality_score: null }
           : item),
       }));
       setAiInstructionByVariant((prev) => ({ ...prev, [variant.id]: '' }));
@@ -231,6 +226,27 @@ export function ContentScreen() {
     } finally {
       setAiEditingVariantId(null);
     }
+  }
+
+  function restoreTasks(tasks: DurableTask[]) {
+    const seen = new Set<string>();
+    const pending: typeof pendingApprovalByVariant = {};
+    const messages: Record<string, string> = {};
+    for (const task of tasks) {
+      const context = task.payload.agentContext as { currentVariantId?: string } | undefined;
+      const id = context?.currentVariantId ?? task.payload.variantId as string | undefined;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      if (task.status === 'queued' || task.status === 'running') messages[id] = 'المهمة محفوظة وتعمل على السيرفر.';
+      if (task.status === 'failed') messages[id] = task.error ?? 'فشل تنفيذ المهمة';
+      if (task.result?.pendingApproval) pending[id] = task.result.pendingApproval as typeof pending[string];
+      if (task.result?.clarifyingQuestion) messages[id] = String(task.result.clarifyingQuestion);
+      const failed = (task.result?.toolResults as { ok: boolean; error?: string }[] | undefined)?.filter(r => !r.ok);
+      if (failed?.length) messages[id] = failed.map(r => r.error ?? 'فشل الإجراء').join(' | ');
+      if (!failed?.length && task.status === 'completed' && !task.result?.pendingApproval && !task.result?.clarifyingQuestion) messages[id] = 'اكتملت المهمة؛ تم تحديث المحتوى.';
+    }
+    setPendingApprovalByVariant(pending);
+    setAiEditResults(prev => ({ ...prev, ...messages }));
   }
 
   async function refreshAfterAgentAction(contentId: string) {
@@ -273,7 +289,10 @@ export function ContentScreen() {
     }
   }
 
-  function handleRejectPendingTool(variant: ContentVariant) {
+  async function handleRejectPendingTool(variant: ContentVariant) {
+    if (!workspace) return;
+    const { error } = await supabase.rpc('dismiss_assistant_approval', { p_workspace_id: workspace.id, p_variant_id: variant.id });
+    if (error) { setAiEditResults(prev => ({ ...prev, [variant.id]: error.message })); return; }
     setPendingApprovalByVariant((prev) => { const next = { ...prev }; delete next[variant.id]; return next; });
     setAiEditResults((prev) => ({ ...prev, [variant.id]: 'تم إلغاء الإجراء.' }));
   }
@@ -382,12 +401,11 @@ export function ContentScreen() {
     if (!workspace) return;
     setApprovingId(variant.id);
     try {
-      const { error } = await supabase.rpc('approve_content_variant', {
+      await durableRpc(workspace.id, 'approve_content_variant', {
         p_workspace_id: workspace.id,
         p_variant_id: variant.id,
         p_scheduled_for: variant.scheduled_at ?? null,
       });
-      if (error) throw error;
       setApprovalResults((prev) => ({ ...prev, [variant.id]: 'تمت الموافقة وربط المحتوى بالتقويم ومهمة النشر' }));
       setVariantsByContent((prev) => ({
         ...prev,
@@ -409,12 +427,11 @@ export function ContentScreen() {
     setCalendarMessage(null);
     try {
       const scheduledFor = new Date(value).toISOString();
-      const { error } = await supabase.rpc('reschedule_calendar_item', {
+      await durableRpc(workspace.id, 'reschedule_calendar_item', {
         p_workspace_id: workspace.id,
         p_calendar_item_id: item.id,
         p_scheduled_for: scheduledFor,
       });
-      if (error) throw error;
       setCalendar((prev) => prev.map((entry) => entry.id === item.id ? { ...entry, scheduled_for: scheduledFor, status: 'scheduled' } : entry));
       setContent((prev) => prev.map((entry) => entry.id === item.content_id ? { ...entry, scheduled_at: scheduledFor, status: 'scheduled' } : entry));
       setCalendarMessage('تم تحديث الموعد ومهمة النشر المرتبطة بدون إنشاء مهمة مكررة.');
@@ -464,6 +481,7 @@ export function ContentScreen() {
 
   return (
     <div className="page-shell safe-top pb-28 max-w-6xl">
+      <TaskActivity workspaceId={workspace?.id} onChange={refreshAfterAgentAction} onTasks={restoreTasks} />
       <section className="surface-hero mb-5">
         <div className="flex items-start justify-between gap-4 mb-5">
           <div>

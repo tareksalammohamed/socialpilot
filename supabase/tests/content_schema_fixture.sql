@@ -1,0 +1,24 @@
+-- Disposable PostgreSQL fixture for durable workflow transaction tests.
+CREATE ROLE anon;
+CREATE ROLE authenticated;
+CREATE ROLE service_role BYPASSRLS;
+CREATE SCHEMA auth;
+CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS $$ SELECT NULLIF(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
+CREATE TABLE auth.users(id uuid PRIMARY KEY);
+CREATE TABLE public.workspaces(id uuid PRIMARY KEY);
+CREATE TABLE public.workspace_members(workspace_id uuid REFERENCES public.workspaces, user_id uuid REFERENCES auth.users, role text);
+CREATE FUNCTION public.user_workspace_role(uuid) RETURNS text LANGUAGE sql AS $$ SELECT role FROM public.workspace_members WHERE workspace_id=$1 AND user_id=auth.uid() $$;
+CREATE FUNCTION public.touch_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.updated_at=now();RETURN NEW;END $$;
+CREATE TABLE public.content(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),workspace_id uuid REFERENCES public.workspaces,title text NOT NULL,goal text,topic text,audience text,master_text text,platforms jsonb NOT NULL DEFAULT '[]',status text,batch_id uuid,scheduled_at timestamptz,quality_score numeric,quality_status text DEFAULT 'pending');
+CREATE TABLE public.content_variants(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),content_id uuid REFERENCES public.content,workspace_id uuid REFERENCES public.workspaces,platform text,text text NOT NULL,hashtags text[] DEFAULT '{}',cta text,media_brief jsonb DEFAULT '{}',status text,scheduled_at timestamptz,quality_score numeric,quality_status text DEFAULT 'pending');
+CREATE TABLE public.calendar_items(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),workspace_id uuid,content_id uuid,variant_id uuid,platform text,scheduled_for timestamptz,status text,UNIQUE(workspace_id,variant_id));
+CREATE TABLE public.publishing_jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),workspace_id uuid,variant_id uuid,calendar_item_id uuid,idempotency_key text UNIQUE,action text,status text,scheduled_for timestamptz,platform text,last_error text,completed_at timestamptz);
+CREATE TABLE public.quality_reviews(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),workspace_id uuid,variant_id uuid REFERENCES public.content_variants,verdict text CHECK(verdict IN ('pass','review','fail')),scores jsonb,reasons jsonb,fixes_applied integer);
+CREATE TABLE public.assistant_tasks(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),workspace_id uuid REFERENCES public.workspaces,user_id uuid REFERENCES auth.users,request_text text,status text DEFAULT 'running' CHECK(status IN ('running','completed','failed')),result_type text,result jsonb,error text,legacy_context jsonb DEFAULT '{}',content_id uuid REFERENCES public.content,batch_id uuid,created_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now());
+ALTER TABLE public.assistant_tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY assistant_tasks_select_own ON public.assistant_tasks FOR SELECT TO authenticated USING(user_id=auth.uid() AND public.user_workspace_role(workspace_id) IS NOT NULL);
+GRANT USAGE ON SCHEMA public,auth TO authenticated,service_role;
+GRANT SELECT,INSERT,UPDATE ON public.assistant_tasks TO authenticated;
+GRANT SELECT ON public.workspace_members TO authenticated;
+CREATE SCHEMA cron;
+CREATE FUNCTION cron.schedule(text,text,text) RETURNS bigint LANGUAGE sql AS $$ SELECT 1::bigint $$;

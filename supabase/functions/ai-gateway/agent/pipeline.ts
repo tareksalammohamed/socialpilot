@@ -1,3 +1,4 @@
+import type { DurableSteps } from '../../_shared/durable-steps.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { routeAndRun, type CapabilityRequest } from '../router.ts';
 import { TOOL_REGISTRY, listToolsForPrompt } from './tools.ts';
@@ -160,8 +161,9 @@ export async function runAgentTurn(
   req: AgentRequest,
   runLegacy: LegacyRunner,
   userScope: UserScope | null = null,
+  durable?: DurableSteps,
 ): Promise<AgentTurnResult> {
-  const planned = await planTurn(supabase, req);
+  const planned = durable ? await durable.run('planner', () => planTurn(supabase, req)) : await planTurn(supabase, req);
 
   if (planned.clarifyingQuestion) {
     return {
@@ -181,7 +183,12 @@ export async function runAgentTurn(
   // Run only the non-destructive steps now (content drafting, analysis, reads).
   const toolResults: ToolResult[] = [];
   for (const call of safeCalls) {
-    const res = await executeTool(call, req.context, runLegacy, supabase, req.legacyContext ?? {}, userScope);
+    const execute = async () => {
+      const result = await executeTool(call, req.context, runLegacy, supabase, req.legacyContext ?? {}, userScope);
+      if (durable && !result.ok) throw new Error(result.error ?? 'agent_execution_failed');
+      return result;
+    };
+    const res = durable ? await durable.run(`tool:${call.id}`, execute, false) : await execute();
     toolResults.push(res);
     const step = plan.steps.find((s) => s.id === call.id);
     if (step) step.status = res.ok ? 'done' : 'failed';

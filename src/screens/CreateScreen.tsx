@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { callAgentTurn } from '@/lib/api';
+import { enqueueTask } from '@/lib/tasks';
 import { Button, Card, ErrorBanner, Spinner, Badge } from '@/components/ui';
 import { PLATFORM_META } from '@/lib/constants';
 import { parseIntent, scheduleDates, DEFAULT_SCHEDULE_HOUR } from '@/lib/intent';
@@ -17,7 +17,7 @@ type AssistantTask = {
   workspace_id: string;
   user_id: string;
   request_text: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'queued' | 'running' | 'completed' | 'failed';
   result_type: 'content' | 'plan' | 'advice' | 'clarification' | null;
   result: Record<string, unknown> | null;
   error: string | null;
@@ -81,7 +81,7 @@ export function CreateScreen() {
     setSaved(Boolean(task.content_id));
     setPlanSaved(Boolean(task.batch_id));
 
-    if (task.status === 'running') {
+    if (task.status === 'running' || task.status === 'queued') {
       setChat([{ role: 'user', text: task.request_text }]);
       setMode('thinking');
       return;
@@ -153,6 +153,7 @@ export function CreateScreen() {
         .select('*')
         .eq('workspace_id', workspace.id)
         .eq('user_id', user.id)
+        .eq('task_kind', 'create')
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -167,6 +168,11 @@ export function CreateScreen() {
       setRestoringTask(false);
     })();
 
+    const poll = setInterval(() => {
+      void supabase.from('assistant_tasks').select('*').eq('workspace_id', workspace.id)
+        .eq('user_id', user.id).eq('task_kind', 'create').order('created_at', { ascending: false })
+        .limit(1).maybeSingle().then(({ data }) => { if (!cancelled && data) applyTask(data as AssistantTask); });
+    }, 5000);
     const channel = supabase
       .channel(`assistant-tasks:${workspace.id}:${user.id}`)
       .on(
@@ -179,7 +185,7 @@ export function CreateScreen() {
         },
         (payload) => {
           const task = payload.new as AssistantTask;
-          if (task.workspace_id !== workspace.id) return;
+          if (task.workspace_id !== workspace.id || (task as AssistantTask & { task_kind: string }).task_kind !== 'create') return;
           if (!activeTaskId || task.id === activeTaskId) applyTask(task);
         },
       )
@@ -187,6 +193,7 @@ export function CreateScreen() {
 
     return () => {
       cancelled = true;
+      clearInterval(poll);
       void supabase.removeChannel(channel);
     };
   }, [workspace?.id, user?.id, activeTaskId, applyTask]);
@@ -210,128 +217,20 @@ export function CreateScreen() {
     // but this data still drives create_content_plan's exact slot count
     // (see the note in agent/types.ts on `legacyContext`).
     const parsed = parseIntent(message);
-    let taskId: string | null = null;
-
     try {
-      const { data: task, error: taskError } = await supabase
-        .from('assistant_tasks')
-        .insert({
-          workspace_id: workspace.id,
-          user_id: user.id,
-          request_text: message.trim(),
-          status: 'running',
-          legacy_context: {
-            post_count: parsed.postCount,
-            start_date: parsed.startDate,
-            end_date: parsed.endDate,
-            frequency: parsed.frequency,
-            schedule: parsed.schedule,
-            content_goal: parsed.contentGoal,
-            content_type: parsed.contentType,
-            platforms: parsed.platforms,
-          },
-        })
-        .select('*')
-        .single();
-      if (taskError || !task) throw taskError ?? new Error('تعذّر إنشاء مهمة AI');
-      taskId = task.id;
-      setActiveTaskId(task.id);
-
-      const { data: recentInsights } = await supabase
-        .from('post_insights')
-        .select('metric,value,platform,timestamp')
-        .eq('workspace_id', workspace.id)
-        .order('timestamp', { ascending: false })
-        .limit(200);
-      const performance = (recentInsights ?? []).reduce<Record<string, number>>((summary, row) => {
-        const key = `${row.platform}:${row.metric}`;
-        summary[key] = (summary[key] ?? 0) + Number(row.value ?? 0);
-        return summary;
-      }, {});
-
-      const turn = await callAgentTurn({
-        workspaceId: workspace.id,
-        message,
-        platforms: parsed.platforms.length > 0 ? parsed.platforms : undefined,
+      const taskId = await enqueueTask(workspace.id, 'create', {
+        message: message.trim(), platforms: parsed.platforms,
         agentContext: { currentRoute: 'create' },
         legacyContext: {
-          post_count: parsed.postCount,
-          start_date: parsed.startDate,
-          end_date: parsed.endDate,
-          frequency: parsed.frequency,
-          schedule: parsed.schedule,
-          performance,
-          content_goal: parsed.contentGoal,
-          content_type: parsed.contentType,
+          post_count: parsed.postCount, start_date: parsed.startDate, end_date: parsed.endDate,
+          frequency: parsed.frequency, schedule: parsed.schedule, content_goal: parsed.contentGoal,
+          content_type: parsed.contentType, platforms: parsed.platforms,
         },
       });
-
-      if (turn.clarifyingQuestion) {
-        const question = turn.clarifyingQuestion as string;
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'clarification', result: { text: question }, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setChat((prev) => [...prev, { role: 'ai', text: question }]);
-        setMode('idle');
-        return;
-      }
-
-      const succeeded = turn.toolResults.find((r) => r.ok && r.output);
-      if (!succeeded) {
-        const failed = turn.toolResults.find((r) => r.error);
-        throw new Error(failed?.error ?? 'الـAI مقدرش ينفذ الطلب ده دلوقتي.');
-      }
-
-      const toolName = succeeded.name;
-      const result = succeeded.output as Record<string, unknown>;
-      setChat((prev) => [...prev, { role: 'ai', text: summarizeResult(result, toolName) }]);
-
-      if (toolName === 'create_content') {
-        const generated = result as GeneratedContent;
-        const contentId = await saveContent(generated, message);
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'content', result, content_id: contentId, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setContent(generated);
-        setSaved(Boolean(contentId));
-        setMode('content');
-      } else if (toolName === 'create_content_plan') {
-        const generatedPlan = result as ContentPlan;
-        const batchId = await savePlan(generatedPlan);
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'plan', result, batch_id: batchId, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setPlan(generatedPlan);
-        setPlanSaved(Boolean(batchId));
-        setMode('plan');
-      } else {
-        const r = result as { advice?: string };
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'completed', result_type: 'advice', result: r, error: null })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-        setAdvice(r.advice ?? 'تم');
-        setMode('advice');
-      }
+      setActiveTaskId(taskId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'فشل تنفيذ الطلب';
-      if (taskId) {
-        await supabase
-          .from('assistant_tasks')
-          .update({ status: 'failed', error: msg })
-          .eq('id', taskId)
-          .eq('user_id', user.id);
-      }
-      setError(msg);
-      setMode('error');
-      setChat((prev) => [...prev, { role: 'ai', text: `خطأ: ${msg}` }]);
+      const msg = err instanceof Error ? err.message : 'تعذّر إرسال المهمة';
+      setError(msg); setMode('error');
     }
   }
 
@@ -531,7 +430,7 @@ export function CreateScreen() {
             <div>
               <p className="eyebrow">AI CONTENT STUDIO</p>
               <h1 className="text-2xl font-bold text-ink-50 mt-1">أنشئ ونفّذ بالذكاء الاصطناعي</h1>
-              <p className="text-ink-400 text-sm mt-2">اطلب بوست، خطة، تحليل أو تعديل — والعملية تفضل محفوظة حتى لو تنقلت بين الصفحات.</p>
+              <p className="text-ink-400 text-sm mt-2">اطلب بوست، خطة، تحليل أو تعديل — والتنفيذ يكمل على السيرفر حتى لو قفلت التطبيق.</p>
             </div>
           </div>
           <Badge color={mode === 'thinking' ? 'accent' : mode === 'error' ? 'danger' : content || plan || advice ? 'brand' : 'neutral'}>
