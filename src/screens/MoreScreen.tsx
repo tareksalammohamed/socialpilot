@@ -178,6 +178,10 @@ export function MoreScreen() {
       try {
         const status = await getWhatsAppProviderStatus(workspace.id);
         if (cancelled) return;
+        // WPPConnect starts the browser asynchronously; the PNG may arrive
+        // after the first response. Keep refreshing it while the dialog is open.
+        if (status.qrBase64) setWhatsappQrBase64(status.qrBase64);
+        if (status.pairingCode) setWhatsappPairingCode(status.pairingCode);
         setWhatsappProviderState(status.state);
         setWhatsappProviderKey(status.providerKey ?? null);
         setWhatsappProviderLabel(status.providerLabel ?? null);

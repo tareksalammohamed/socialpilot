@@ -1,3 +1,4 @@
+import { applySessionState, eventObservedAt } from '../_shared/whatsapp-session.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 const CORS = {
@@ -255,8 +256,7 @@ async function upsertInbound(account: Record<string, unknown>, payload: Record<s
   }, { onConflict: 'account_id,platform,type,external_id' }).select('id').single();
 
   if (conversationError || !conversation) {
-    console.error('WAHA conversation upsert failed', conversationError?.message);
-    return;
+    throw new Error('WAHA conversation persistence failed');
   }
 
   const mediaMetadata = hasMedia && media
@@ -289,8 +289,7 @@ async function upsertInbound(account: Record<string, unknown>, payload: Record<s
   }, { onConflict: 'conversation_id,external_id', ignoreDuplicates: true }).select('id').maybeSingle();
 
   if (messageError) {
-    console.error('WAHA message upsert failed', messageError.message);
-    return;
+    throw new Error('WAHA message persistence failed');
   }
 
   if (inserted) {
@@ -310,12 +309,13 @@ async function applyAck(account: Record<string, unknown>, payload: Record<string
   const next = ackStatus(payload);
   if (!externalId || !next) return;
 
-  const { data: row } = await supabase.from('inbox_messages')
+  const { data: row, error: ackLookupError } = await supabase.from('inbox_messages')
     .select('id,metadata,conversation_id')
     .eq('workspace_id', account.workspace_id)
     .eq('external_id', externalId)
     .eq('direction', 'outbound')
     .maybeSingle();
+  if (ackLookupError) throw new Error('Delivery status lookup failed');
   if (!row) return;
 
   const rank: Record<string, number> = { accepted: 0, sent: 1, delivered: 2, read: 3 };
@@ -323,7 +323,7 @@ async function applyAck(account: Record<string, unknown>, payload: Record<string
   if (next !== 'failed' && previous && (rank[previous] ?? -1) > (rank[next] ?? -1)) return;
   if (previous === 'read' && next === 'failed') return;
 
-  await supabase.from('inbox_messages').update({
+  const { error: ackError } = await supabase.from('inbox_messages').update({
     metadata: {
       ...(row.metadata ?? {}),
       delivery_status: next,
@@ -331,6 +331,7 @@ async function applyAck(account: Record<string, unknown>, payload: Record<string
       provider_update: payload,
     },
   }).eq('id', row.id);
+  if (ackError) throw new Error('Delivery status persistence failed');
 }
 
 Deno.serve(async (req: Request) => {
@@ -345,20 +346,23 @@ Deno.serve(async (req: Request) => {
     return json(400, { error: 'Invalid JSON' });
   }
 
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return json(400, { error: 'Invalid JSON' });
   const session = typeof event.session === 'string' ? event.session : '';
   if (!session) return json(200, { ok: true, ignored: true, reason: 'missing_session' });
 
-  const { data: account } = await supabase.from('social_accounts')
+  const { data: account, error: lookupError } = await supabase.from('social_accounts')
     .select('id,workspace_id,status,metadata')
     .eq('platform', 'whatsapp')
     .contains('metadata', { provider: 'waha', instance_name: session })
     .maybeSingle();
+  if (lookupError) return json(503, { error: 'Account lookup unavailable' });
   if (!account) return json(200, { ok: true, ignored: true, reason: 'unknown_session' });
 
-  const { data: tokenRow } = await supabase.from('social_account_tokens')
+  const { data: tokenRow, error: tokenLookupError } = await supabase.from('social_account_tokens')
     .select('refresh_token')
     .eq('account_id', account.id)
     .maybeSingle();
+  if (tokenLookupError) return json(503, { error: 'Session lookup unavailable' });
   const secret = typeof tokenRow?.refresh_token === 'string' ? tokenRow.refresh_token : '';
   if (!secret) return json(401, { error: 'Webhook secret missing' });
 
@@ -370,6 +374,8 @@ Deno.serve(async (req: Request) => {
     return json(401, { error: 'Invalid WAHA webhook signature' });
   }
 
+  if (account.metadata?.session_active === false) return json(200, { ok: true, ignored: true, reason: 'inactive_session' });
+
   const eventName = String(event.event ?? '').toLowerCase();
   const payload = (event.payload ?? {}) as Record<string, unknown>;
 
@@ -380,18 +386,17 @@ Deno.serve(async (req: Request) => {
       const me = (payload.me ?? event.me ?? {}) as Record<string, unknown>;
       const meId = typeof me.id === 'string' ? me.id : null;
       const pushName = typeof me.pushName === 'string' ? me.pushName : null;
-      await supabase.from('social_accounts').update({
+      await applySessionState(supabase, String(account.id), secret, {
         status: connected ? 'connected' : 'error',
         needs_reconnect: !connected,
         ...(meId ? { external_id: meId, handle: participantFromJid(meId) } : {}),
         ...(pushName ? { display_name: pushName } : {}),
         last_sync_at: new Date().toISOString(),
         metadata: {
-          ...(account.metadata ?? {}),
           provider_state: state,
           onboarding_state: connected ? 'ready' : 'scan_qr',
         },
-      }).eq('id', account.id);
+      }, eventObservedAt(event.timestamp));
       return json(200, { ok: true });
     }
 

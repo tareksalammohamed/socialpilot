@@ -1,4 +1,4 @@
-import { isWppConnected } from '../_shared/whatsapp-session.ts';
+import { applySessionState, eventObservedAt, isWppConnected } from '../_shared/whatsapp-session.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 const CORS = {
@@ -292,8 +292,7 @@ async function upsertInbound(params: {
   }, { onConflict: 'account_id,platform,type,external_id' }).select('id').single();
 
   if (conversationError || !conversation) {
-    console.error('WPPConnect conversation upsert failed', conversationError?.message);
-    return;
+    throw new Error('WPPConnect conversation persistence failed');
   }
 
   let mediaMetadata: Record<string, unknown> = {};
@@ -334,8 +333,7 @@ async function upsertInbound(params: {
   }, { onConflict: 'conversation_id,external_id', ignoreDuplicates: true }).select('id').maybeSingle();
 
   if (messageError) {
-    console.error('WPPConnect message upsert failed', messageError.message);
-    return;
+    throw new Error('WPPConnect message persistence failed');
   }
   if (inserted) {
     await supabase.from('notifications').insert({
@@ -354,12 +352,13 @@ async function applyAck(account: Record<string, unknown>, payload: Record<string
   const status = ackStatus(payload);
   if (!id || !status) return;
 
-  const { data: row } = await supabase.from('inbox_messages')
+  const { data: row, error: ackLookupError } = await supabase.from('inbox_messages')
     .select('id,metadata')
     .eq('workspace_id', account.workspace_id)
     .eq('external_id', id)
     .eq('direction', 'outbound')
     .maybeSingle();
+  if (ackLookupError) throw new Error('Delivery status lookup failed');
   if (!row) return;
 
   const rank: Record<string, number> = { accepted: 0, sent: 1, delivered: 2, read: 3 };
@@ -367,7 +366,7 @@ async function applyAck(account: Record<string, unknown>, payload: Record<string
   if (status !== 'failed' && previous && (rank[previous] ?? -1) > (rank[status] ?? -1)) return;
   if (previous === 'read' && status === 'failed') return;
 
-  await supabase.from('inbox_messages').update({
+  const { error: ackError } = await supabase.from('inbox_messages').update({
     metadata: {
       ...(row.metadata ?? {}),
       delivery_status: status,
@@ -375,6 +374,7 @@ async function applyAck(account: Record<string, unknown>, payload: Record<string
       provider_update: payload,
     },
   }).eq('id', row.id);
+  if (ackError) throw new Error('Delivery status persistence failed');
 }
 
 function isConnectedStatus(value: unknown): boolean {
@@ -416,20 +416,24 @@ Deno.serve(async (req: Request) => {
     if (!session) return json(401, { error: 'Missing session' });
   }
 
-  const { data: account } = await supabase.from('social_accounts')
+  const { data: account, error: lookupError } = await supabase.from('social_accounts')
     .select('id,workspace_id,status,metadata')
     .eq('platform', 'whatsapp')
     .contains('metadata', { provider: 'wppconnect', instance_name: session })
     .maybeSingle();
+  if (lookupError) return json(503, { error: 'Account lookup unavailable' });
   if (!account) return json(200, { ok: true, ignored: true, reason: 'unknown_session' });
 
-  const { data: tokenRow } = await supabase.from('social_account_tokens')
+  const { data: tokenRow, error: tokenLookupError } = await supabase.from('social_account_tokens')
     .select('access_token,refresh_token')
     .eq('account_id', account.id)
     .maybeSingle();
+  if (tokenLookupError) return json(503, { error: 'Session lookup unavailable' });
   const webhookSecret = typeof tokenRow?.refresh_token === 'string' ? tokenRow.refresh_token : '';
   const bearer = typeof tokenRow?.access_token === 'string' ? tokenRow.access_token : '';
   if (!webhookSecret || suppliedSecret !== webhookSecret || !bearer) return json(401, { error: 'Invalid webhook secret' });
+
+  if (account.metadata?.session_active === false) return json(200, { ok: true, ignored: true, reason: 'inactive_session' });
 
   const envelope = await req.json().catch(() => null) as Record<string, unknown> | null;
   if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return json(400, { error: 'Invalid JSON' });
@@ -439,7 +443,7 @@ Deno.serve(async (req: Request) => {
   const payload = eventPayload(root);
 
   try {
-    if (event === 'onmessage' || event === 'message' || event === 'message.received') {
+    if (event === 'onmessage' || event === 'unreadmessages' || event === 'message' || event === 'message.received') {
       await upsertInbound({
         account,
         payload,
@@ -463,16 +467,15 @@ Deno.serve(async (req: Request) => {
     ) {
       const rawState = payload.status ?? payload.state ?? payload.sessionStatus ?? root.status;
       const connected = isConnectedStatus(rawState);
-      await supabase.from('social_accounts').update({
+      await applySessionState(supabase, String(account.id), webhookSecret, {
         status: connected ? 'connected' : 'error',
         needs_reconnect: !connected,
         last_sync_at: new Date().toISOString(),
         metadata: {
-          ...(account.metadata ?? {}),
           provider_state: String(rawState ?? 'unknown'),
           onboarding_state: connected ? 'ready' : 'scan_qr',
         },
-      }).eq('id', account.id);
+      }, eventObservedAt(root.timestamp ?? root.date_time));
       return json(200, { ok: true });
     }
 
