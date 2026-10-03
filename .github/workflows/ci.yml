@@ -79,5 +79,5 @@ jobs:
         run: >-
           psql -v ON_ERROR_STOP=1
           -f supabase/tests/whatsapp_schema_fixture.sql
-          -f supabase/migrations/20261003000816_whatsapp_session_lifecycle.sql
+          -f supabase/migrations/20261003003036_whatsapp_session_lifecycle.sql
           -f supabase/tests/whatsapp_lifecycle.sql
