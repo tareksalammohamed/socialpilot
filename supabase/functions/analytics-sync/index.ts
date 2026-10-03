@@ -1,4 +1,5 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
+import { metricNumber, normalizeXMetrics } from '../_shared/analytics-math.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -22,6 +23,7 @@ type Job = {
   status?: string | null;
   last_attempt_at?: string | null;
   created_at?: string | null;
+  completed_at?: string | null;
 };
 
 type Account = {
@@ -46,10 +48,10 @@ type InsightRow = {
   fetched_at: string;
 };
 
-async function fetchWithRetry(input: string | URL, init: RequestInit, maxAttempts = 3): Promise<Response> {
+async function fetchWithRetry(input: string | URL, init: RequestInit, maxAttempts = 2): Promise<Response> {
   let response: Response | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    response = await fetch(input, init);
+    response = await fetch(input, { ...init, signal: AbortSignal.timeout(12_000) });
     const retryable = response.status === 429 || response.status >= 500;
     if (response.ok || !retryable || attempt === maxAttempts) return response;
     const retryAfter = Number(response.headers.get('retry-after') ?? 0);
@@ -93,8 +95,8 @@ async function readJsonResponse(response: Response, fallback: string): Promise<R
 
 async function graphGet(path: string, accessToken: string, params: Record<string, string> = {}): Promise<Record<string, unknown>> {
   const url = new URL(`https://graph.facebook.com/${path}`);
-  for (const [key, value] of Object.entries({ ...params, access_token: accessToken })) url.searchParams.set(key, value);
-  const response = await fetchWithRetry(url.toString(), { headers: { Accept: 'application/json' } });
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  const response = await fetchWithRetry(url.toString(), { headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}` } });
   return readJsonResponse(response, 'Meta Graph API request failed');
 }
 
@@ -149,7 +151,7 @@ async function getAccount(workspaceId: string, platform: string): Promise<Accoun
 
 async function variantContext(job: Job): Promise<{ contentId: string | null }> {
   if (!job.variant_id) return { contentId: null };
-  const { data: variant } = await supabase.from('content_variants').select('content_id').eq('id', job.variant_id).maybeSingle();
+  const { data: variant } = await supabase.from('content_variants').select('content_id').eq('id', job.variant_id).eq('workspace_id',job.workspace_id).maybeSingle();
   return { contentId: variant?.content_id ?? null };
 }
 
@@ -160,9 +162,10 @@ async function upsertRows(rows: InsightRow[]): Promise<number> {
   return rows.length;
 }
 
-function makeRow(job: Job, contentId: string | null, platform: string, source: string, metric: string, value: unknown, timestamp: string): InsightRow | null {
-  const numeric = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(numeric)) return null;
+function makeRow(job: Job, contentId: string | null, platform: string, source: string, metric: string, value: unknown, timestamp: string | null | undefined): InsightRow | null {
+  const numeric = metricNumber(value);
+  if (numeric === null) return null;
+  if(!timestamp || !Number.isFinite(Date.parse(timestamp)))throw new Error('Published timestamp missing');
   return {
     workspace_id: job.workspace_id,
     content_id: contentId,
@@ -178,92 +181,6 @@ function makeRow(job: Job, contentId: string | null, platform: string, source: s
   };
 }
 
-function auditPostId(detail: unknown): string | null {
-  if (!detail || typeof detail !== 'object') return null;
-  const value = (detail as Record<string, unknown>).post_id;
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function auditPlatform(detail: unknown): string | null {
-  if (!detail || typeof detail !== 'object') return null;
-  const value = (detail as Record<string, unknown>).platform;
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-async function reconcilePublishedJobs(workspaceId: string): Promise<{ reconciled: number; evidence: number }> {
-  const { data: audits, error: auditsError } = await supabase
-    .from('audit_logs')
-    .select('entity_id,detail,created_at')
-    .eq('workspace_id', workspaceId)
-    .eq('action', 'publish_succeeded')
-    .eq('entity', 'content_variants')
-    .order('created_at', { ascending: false })
-    .limit(200);
-  if (auditsError) throw auditsError;
-
-  const evidence = (audits ?? []).filter((audit) => Boolean(auditPostId(audit.detail) && auditPlatform(audit.detail))).length;
-  if (!audits?.length) return { reconciled: 0, evidence };
-
-  const { data: jobs, error: jobsError } = await supabase
-    .from('publishing_jobs')
-    .select('id,workspace_id,variant_id,calendar_item_id,external_post_id,platform,published_at,status,last_attempt_at,created_at')
-    .eq('workspace_id', workspaceId)
-    .neq('status', 'succeeded')
-    .order('created_at', { ascending: false })
-    .limit(200);
-  if (jobsError) throw jobsError;
-
-  const remaining = [...(jobs as Job[] ?? [])];
-  let reconciled = 0;
-  for (const audit of audits) {
-    const externalPostId = auditPostId(audit.detail);
-    const platform = auditPlatform(audit.detail);
-    if (!externalPostId || !platform || !audit.entity_id) continue;
-
-    const candidateIndex = remaining.findIndex((job) => job.variant_id === audit.entity_id && !job.external_post_id && (!job.platform || job.platform === platform));
-    if (candidateIndex < 0) continue;
-    const job = remaining[candidateIndex];
-    remaining.splice(candidateIndex, 1);
-    const publishedAt = String(audit.created_at ?? job.published_at ?? job.last_attempt_at ?? new Date().toISOString());
-    const { error: updateError } = await supabase.from('publishing_jobs').update({
-      status: 'succeeded',
-      completed_at: publishedAt,
-      published_at: publishedAt,
-      last_attempt_at: publishedAt,
-      external_post_id: externalPostId,
-      platform,
-      last_error: null,
-      result: { platform, post_id: externalPostId, source: 'publish_succeeded_audit' },
-    }).eq('id', job.id);
-    if (updateError) throw updateError;
-
-    if (job.calendar_item_id) await supabase.from('calendar_items').update({ status: 'published' }).eq('id', job.calendar_item_id);
-    if (job.variant_id) {
-      const context = await variantContext(job);
-      if (context.contentId) await supabase.from('content').update({ status: 'published' }).eq('id', context.contentId);
-    }
-    reconciled += 1;
-  }
-  return { reconciled, evidence };
-}
-
-// X's public_metrics use API-specific field names. Map them to the same metric vocabulary
-// used by Facebook/Instagram/LinkedIn (impressions, likes, comments, shares, saved) so the
-// dashboard's cross-platform aggregation, engagement totals, and KPI cards recognize them.
-// retweet_count and quote_count both represent a repost/quote-style share and are summed
-// into a single "shares" value instead of overwriting each other under one metric key.
-function normalizeXMetrics(raw: Record<string, unknown>): Record<string, number> {
-  const num = (value: unknown): number => (typeof value === 'number' ? value : Number(value ?? 0)) || 0;
-  const normalized: Record<string, number> = {
-    impressions: num(raw.impression_count),
-    likes: num(raw.like_count),
-    comments: num(raw.reply_count),
-    shares: num(raw.retweet_count) + num(raw.quote_count),
-    saved: num(raw.bookmark_count),
-  };
-  return Object.fromEntries(Object.entries(normalized).filter(([, value]) => Number.isFinite(value)));
-}
-
 async function syncX(job: Job): Promise<number> {
   if (!job.external_post_id) return 0;
   const context = await variantContext(job);
@@ -273,13 +190,13 @@ async function syncX(job: Job): Promise<number> {
   const body = await response.json();
   if (!response.ok || !body.data) throw new Error(body?.detail ?? 'X insights request failed');
   const metrics = normalizeXMetrics(body.data.public_metrics ?? {});
-  const timestamp = body.data.created_at ?? job.published_at ?? new Date().toISOString();
+  const timestamp = body.data.created_at ?? job.published_at ?? job.created_at ?? job.completed_at;
   const rows = Object.entries(metrics).map(([metric, value]) => makeRow(job, context.contentId, 'x', 'x_api', metric, value, timestamp)).filter((row): row is InsightRow => Boolean(row));
   if (!rows.length) throw new Error('X returned no post-level metrics for this post');
   return upsertRows(rows);
 }
 
-async function syncFacebook(job: Job): Promise<number> {
+async function syncFacebook(job: Job, warnings: string[]): Promise<number> {
   if (!job.external_post_id) return 0;
   const context = await variantContext(job);
   const account = await getAccount(job.workspace_id, 'facebook');
@@ -287,7 +204,7 @@ async function syncFacebook(job: Job): Promise<number> {
   const post = await graphGet(`${META_GRAPH_VERSION}/${encodeURIComponent(job.external_post_id)}`, token, {
     fields: 'created_time,shares,reactions.limit(0).summary(true),comments.limit(0).summary(true)',
   });
-  const timestamp = String(post.created_time ?? job.published_at ?? new Date().toISOString());
+  const timestamp = typeof post.created_time === 'string' ? post.created_time : job.published_at ?? job.created_at ?? job.completed_at;
   const rows: InsightRow[] = [];
   const shares = (post.shares as Record<string, unknown> | undefined)?.count;
   const reactions = ((post.reactions as Record<string, unknown> | undefined)?.summary as Record<string, unknown> | undefined)?.total_count;
@@ -304,42 +221,45 @@ async function syncFacebook(job: Job): Promise<number> {
       const row = makeRow(job, context.contentId, 'facebook', 'facebook_graph_api', 'clicks', values?.[0]?.value, timestamp);
       if (row) rows.push(row);
     }
-  } catch {
-    // post_clicks is optional; keep the interaction metrics if the Page lacks it.
+  } catch (error) {
+    warnings.push(`clicks: ${errorMessage(error)}`);
   }
 
   if (!rows.length) throw new Error('Facebook returned no post-level insights for this post');
   return upsertRows(rows);
 }
 
-async function syncInstagram(job: Job): Promise<number> {
+async function syncInstagram(job: Job, warnings: string[]): Promise<number> {
   if (!job.external_post_id) return 0;
   const context = await variantContext(job);
   const account = await getAccount(job.workspace_id, 'instagram');
   const token = await accessTokenFor(account, 'Instagram');
+  const externalPostId=job.external_post_id;
   const metricNames = ['comments', 'likes', 'reach', 'saved', 'shares', 'total_interactions', 'views'];
   const rows: InsightRow[] = [];
   const metricErrors: string[] = [];
 
-  for (const metric of metricNames) {
+  await Promise.all(metricNames.map(async metric => {
     try {
-      const body = await graphGet(`${META_GRAPH_VERSION}/${encodeURIComponent(job.external_post_id)}/insights`, token, { metric });
+      const body = await graphGet(`${META_GRAPH_VERSION}/${encodeURIComponent(externalPostId)}/insights`, token, { metric });
       const item = (body.data as Array<Record<string, unknown>> | undefined)?.[0];
       const values = item?.values as Array<Record<string, unknown>> | undefined;
       const value = (item?.total_value as Record<string, unknown> | undefined)?.value ?? values?.[0]?.value;
-      const timestamp = String(values?.[0]?.end_time ?? job.published_at ?? new Date().toISOString());
+      const timestamp = job.published_at ?? job.created_at;
+      if(!timestamp) throw new Error('Published timestamp missing');
       const row = makeRow(job, context.contentId, 'instagram', 'instagram_graph_api', metric, value, timestamp);
       if (row) rows.push(row);
     } catch (error) {
       metricErrors.push(`${metric}: ${error instanceof Error ? error.message : 'unavailable'}`);
     }
-  }
+  }));
 
+  warnings.push(...metricErrors);
   if (!rows.length) throw new Error(`Instagram returned no available media insights${metricErrors.length ? ` (${metricErrors.slice(0, 2).join('; ')})` : ''}`);
   return upsertRows(rows);
 }
 
-async function syncLinkedIn(job: Job): Promise<number> {
+async function syncLinkedIn(job: Job, warnings: string[]): Promise<number> {
   if (!job.external_post_id) return 0;
   const context = await variantContext(job);
   const account = await getAccount(job.workspace_id, 'linkedin');
@@ -360,7 +280,8 @@ async function syncLinkedIn(job: Job): Promise<number> {
   ];
   const rows: InsightRow[] = [];
 
-  for (const [queryType, metric] of metrics) {
+  await Promise.all(metrics.map(async ([queryType, metric]) => {
+    try {
     const url = new URL('https://api.linkedin.com/rest/memberCreatorPostAnalytics');
     url.searchParams.set('q', 'entity');
     url.searchParams.set('entity', `(${entityType}:${externalUrn})`);
@@ -376,62 +297,50 @@ async function syncLinkedIn(job: Job): Promise<number> {
     });
     const body = await readJsonResponse(response, `LinkedIn ${queryType} analytics request failed`);
     const item = (body.elements as Array<Record<string, unknown>> | undefined)?.[0];
-    const row = makeRow(job, context.contentId, 'linkedin', 'linkedin_member_creator_post_analytics', metric, item?.count, job.published_at ?? new Date().toISOString());
+    const row = makeRow(job, context.contentId, 'linkedin', 'linkedin_member_creator_post_analytics', metric, item?.count, job.published_at ?? job.created_at ?? job.completed_at);
     if (row) rows.push(row);
-  }
+    } catch(error) { warnings.push(`${metric}: ${errorMessage(error)}`); }
+  }));
 
-  if (!rows.length) throw new Error('LinkedIn returned no post-level analytics for this post');
+  if (!rows.length) throw new Error(warnings.join('; ') || 'LinkedIn returned no post-level analytics for this post');
   return upsertRows(rows);
 }
 
 Deno.serve(async (req: Request) => {
-  if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: corsHeaders });
-  if (req.method !== 'POST') return json(405, { error: 'Method not allowed' });
-  const authToken = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
-  const { data: user } = await supabase.auth.getUser(authToken);
-  if (!user.user) return json(401, { error: 'Invalid authentication' });
-  let body: { workspaceId?: string } = {};
-  try { body = await req.json(); } catch { return json(400, { error: 'Invalid JSON' }); }
-  if (!body.workspaceId) return json(400, { error: 'workspaceId is required' });
-  const { data: membership } = await supabase.from('workspace_members').select('role').eq('workspace_id', body.workspaceId).eq('user_id', user.user.id).maybeSingle();
-  if (!membership) return json(403, { error: 'Workspace access denied' });
-
-  let reconciled = { reconciled: 0, evidence: 0 };
-  try {
-    reconciled = await reconcilePublishedJobs(body.workspaceId);
-  } catch (error) {
-    return json(500, { error: `Publish evidence reconciliation failed: ${error instanceof Error ? error.message : 'unknown error'}` });
-  }
-
-  const { data: jobs, error: jobsError } = await supabase.from('publishing_jobs').select('id,workspace_id,variant_id,calendar_item_id,external_post_id,platform,published_at,status').eq('workspace_id', body.workspaceId).eq('status', 'succeeded').not('external_post_id', 'is', null).order('published_at', { ascending: false }).limit(100);
-  if (jobsError) return json(500, { error: jobsError.message });
-
-  let synced = 0;
-  const errors: Array<{ jobId: string; platform: string | null; error: string }> = [];
-  const unsupportedPlatforms = new Set<string>();
-  for (const job of (jobs as Job[]) ?? []) {
-    try {
-      if (job.platform === 'x') synced += await syncX(job);
-      else if (job.platform === 'facebook') synced += await syncFacebook(job);
-      else if (job.platform === 'instagram') synced += await syncInstagram(job);
-      else if (job.platform === 'linkedin') synced += await syncLinkedIn(job);
-      else if (job.platform) unsupportedPlatforms.add(job.platform);
-    } catch (error) {
-      const message = errorMessage(error);
-      if (job.platform === 'linkedin' && /403|not enough permissions|permission/i.test(message)) {
-        unsupportedPlatforms.add('linkedin');
-      } else {
-        errors.push({ jobId: job.id, platform: job.platform, error: message });
-      }
-    }
-  }
-  return json(200, {
-    ok: true,
-    synced,
-    attempted: jobs?.length ?? 0,
-    reconciledJobs: reconciled.reconciled,
-    publishSuccessEvidence: reconciled.evidence,
-    errors,
-    unsupportedPlatforms: Array.from(unsupportedPlatforms).sort(),
-  });
+ if(req.method==='OPTIONS') return new Response(null,{status:200,headers:corsHeaders});
+ if(req.method!=='POST') return json(405,{error:'Method not allowed'});
+ const token=(req.headers.get('Authorization')??'').replace(/^Bearer\s+/i,'');
+ const serviceKey=Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')??'';
+ let body:{workspaceId?:string;cursor?:number}={};
+ try{body=await req.json();}catch{return json(400,{error:'Invalid JSON'});}
+ if(!body.workspaceId) return json(400,{error:'workspaceId is required'});
+ if(token!==serviceKey || !serviceKey){
+  const {data:user}=await supabase.auth.getUser(token);
+  if(!user.user) return json(401,{error:'Invalid authentication'});
+  const client=createClient(Deno.env.get('SUPABASE_URL')??'',Deno.env.get('SUPABASE_ANON_KEY')??'',{global:{headers:{Authorization:`Bearer ${token}`}},auth:{persistSession:false}});
+  const {data,error}=await client.rpc('enqueue_assistant_task',{p_workspace_id:body.workspaceId,p_kind:'analytics',p_payload:{message:'تحديث مؤشرات المنصات'},p_request_id:crypto.randomUUID()});
+  return error?json(403,{error:error.message}):json(202,{ok:true,queued:true,taskId:data});
+ }
+ const {data:task}=await supabase.from('assistant_tasks').select('id,user_id,locked_at').eq('id',req.headers.get('X-Assistant-Task')??'').eq('worker_id',req.headers.get('X-Assistant-Worker')??'').eq('workspace_id',body.workspaceId).eq('task_kind','analytics').eq('status','running').maybeSingle();
+ if(!task || !task.locked_at || Date.now()-new Date(task.locked_at).getTime()>=10*60_000) return json(403,{error:'Invalid task lease'});
+ const {data:member}=await supabase.from('workspace_members').select('role').eq('workspace_id',body.workspaceId).eq('user_id',task.user_id).maybeSingle();
+ if(!member) return json(403,{error:'Workspace access denied'});
+ const cursor=Math.max(0,Math.floor(Number(body.cursor)||0));
+ const {data:jobs,error}=await supabase.from('latest_analytics_jobs').select('*').eq('workspace_id',body.workspaceId).order('published_at',{ascending:true}).order('id').range(cursor,cursor+1);
+ if(error) return json(500,{error:error.message});
+ let synced=0;
+ const errors:{jobId:string;platform:string|null;error:string}[]=[];
+ const unsupportedPlatforms=new Set<string>();
+ for(const job of (jobs??[]) as Job[]){
+  const warnings:string[]=[];
+  try{
+   if(job.platform==='x') synced+=await syncX(job);
+   else if(job.platform==='facebook') synced+=await syncFacebook(job,warnings);
+   else if(job.platform==='instagram') synced+=await syncInstagram(job,warnings);
+   else if(job.platform==='linkedin') synced+=await syncLinkedIn(job,warnings);
+   else if(job.platform) unsupportedPlatforms.add(job.platform);
+   if(warnings.length) errors.push({jobId:job.id,platform:job.platform,error:warnings.join('; ')});
+  }catch(error){errors.push({jobId:job.id,platform:job.platform,error:errorMessage(error)});}
+ }
+ return json(200,{ok:true,synced,attempted:jobs?.length??0,nextCursor:cursor+(jobs?.length??0),hasMore:jobs?.length===2,errors,unsupportedPlatforms:[...unsupportedPlatforms]});
 });
