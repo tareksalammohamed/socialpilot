@@ -22,13 +22,14 @@ type VariantRow = {
 };
 
 async function loadVariant(
-  supabase: SupabaseClient, workspaceId: string, contentId: string, platform?: string,
+  supabase: SupabaseClient, workspaceId: string, contentId: string, platform?: string, variantId?: string,
 ): Promise<VariantRow | null> {
   let query = supabase
     .from('content_variants')
     .select('id, content_id, platform, text, hashtags, cta, status')
     .eq('content_id', contentId)
     .eq('workspace_id', workspaceId);
+  if (variantId) query = query.eq('id', variantId);
   if (platform) query = query.eq('platform', platform);
   const { data, error } = await query.order('created_at', { ascending: false }).limit(1).maybeSingle();
   if (error || !data) return null;
@@ -61,7 +62,7 @@ export async function executeContentTool(
     return { callId: call.id, name: call.name, ok: false, error: 'محتاج أعرف تحديدًا أي منشور — مفيش contentId متاح.' };
   }
   const platform = (call.input.platform as string | undefined) ?? context.selectedPlatform;
-  const variant = await loadVariant(supabase, context.workspaceId, contentId, platform);
+  const variant = await loadVariant(supabase, context.workspaceId, contentId, platform, context.currentVariantId);
   if (!variant) {
     return { callId: call.id, name: call.name, ok: false, error: 'مفيش نسخة محتوى موجودة بالـid/platform ده.' };
   }
@@ -85,7 +86,7 @@ export async function executeContentTool(
       parsed = m ? JSON.parse(m[0]) : { text: result.content };
     }
 
-    const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString(), status: 'review', quality_status: 'pending', quality_score: null };
     if (parsed.text) update.text = parsed.text;
     if (parsed.hashtags && call.name === 'generate_hashtags') update.hashtags = parsed.hashtags;
     if (parsed.cta && call.name === 'generate_cta') update.cta = parsed.cta;
@@ -102,6 +103,7 @@ export async function executeContentTool(
       return { callId: call.id, name: call.name, ok: false, error: updateError.message };
     }
 
+    await supabase.from('content').update({ status: 'draft', quality_status: 'pending', quality_score: null }).eq('id', contentId).eq('workspace_id', context.workspaceId);
     return {
       callId: call.id,
       name: call.name,

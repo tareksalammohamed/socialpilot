@@ -1,3 +1,4 @@
+import { DurableSteps } from '../_shared/durable-steps.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { routeAndRun, withUsageTracking, NoModelAvailableError, NonFailoverError, type CapabilityRequest } from './router.ts';
 import { runAgentTurn, runApprovedCalls } from './agent/pipeline.ts';
@@ -176,7 +177,7 @@ async function assembleContext(workspaceId: string, intent: Intent): Promise<{
   const needsBrand = intent !== 'generate_brand_dna';
   const needsMemory = intent !== 'generate_brand_dna';
 
-  const tasks: Promise<unknown>[] = [];
+  const tasks: PromiseLike<unknown>[] = [];
 
   if (needsBrand) {
     tasks.push(
@@ -337,9 +338,16 @@ async function executeIntent(
   ctx: { brand: Record<string, unknown> | null; memory: { key: string; value: string; type: string }[] },
   platforms: string[],
   runtimeContext: Record<string, unknown> = {},
+  durable?: DurableSteps,
 ): Promise<{ result: Record<string, unknown>; tokensIn: number; tokensOut: number; meta: ExecutionMeta }> {
   const brandStr = brandContextString(ctx.brand);
   const memStr = memoryContextString(ctx.memory);
+
+  let stage = 0;
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const runLLM: typeof callLLM = (...args) => durable
+    ? durable.run(`llm:${digest}:${stage++}`, () => callLLM(...args))
+    : callLLM(...args);
 
   switch (intent) {
     case 'agent': {
@@ -349,7 +357,7 @@ async function executeIntent(
 المنصات المذكورة: ${JSON.stringify(platforms)}
 حلل الطلب دون تقييده بقائمة intents ثابتة. حدد ما الذي يريد المستخدم إنجازه، وما الخطوات المطلوبة، وهل يحتاج صورة/فيديو، مراجعة بشرية، أو جدولة. إذا كان الطلب بسيطًا فأجب مباشرة. أرجع JSON فقط بصيغة:
 {"intent_summary":"...","response":"...","next_actions":["..."],"requires_media":false,"requires_approval":false,"requires_schedule":false}`;
-      const r = await callLLM(intent, sys, prompt, true);
+      const r = await runLLM(intent, sys, prompt, true);
       const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ intent_summary: message, response: raw, next_actions: [], requires_media: false, requires_approval: false, requires_schedule: false }));
       return { result: { advice: String(parsed.response ?? ''), ...parsed }, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
     }
@@ -361,7 +369,7 @@ identity, tone, audience, content, visual, positioning, preferred_phrases, forbi
 preferred_phrases و forbidden_phrases يجب أن تكونا مصفوفتين من عبارات قصيرة، وcta_style وpositioning نصين واضحين.
 المعلومات الأساسية: ${message}
 أرجع JSON فقط بدون نص إضافي.`;
-      const r = await callLLM(intent, sys, prompt, true);
+      const r = await runLLM(intent, sys, prompt, true);
       const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ summary: raw }));
       return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
     }
@@ -385,11 +393,11 @@ preferred_phrases و forbidden_phrases يجب أن تكونا مصفوفتين �
   ]
 }
 أرجع JSON فقط. كل نسخة منصة يجب أن تكون مخصصة وغير مكررة.`;
-      const r = await callLLM(intent, sys, prompt, true);
+      const r = await runLLM(intent, sys, prompt, true);
       const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ master_text: raw, variants: [] }));
 
       const qualityPrompt = `قيّم المحتوى التالي وفق المعايير: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.\nأرجع JSON فقط بصيغة { "verdict": "pass|review|fail", "scores": { "hook": 0 }, "reasons": [], "suggested_improvements": [] }.\nالمحتوى: ${JSON.stringify(parsed)}`;
-      const qualityRun = await callLLM(intent, AGENTS.quality_engine(), qualityPrompt, true);
+      const qualityRun = await runLLM(intent, AGENTS.quality_engine(), qualityPrompt, true);
       const quality = parseJsonLoose<Record<string, unknown>>(qualityRun.content, () => ({ verdict: 'review', scores: {}, reasons: ['تعذر تحليل الجودة'], suggested_improvements: [] }));
       return {
         result: { ...parsed, quality },
@@ -423,7 +431,7 @@ ${JSON.stringify(skeletons)}
   ]
 }
 كل "content" نص كامل أصلي مخصص لمنصته، ولا تكرر نفس النص بين الفترات. أرجع JSON فقط.`;
-      const r = await callLLM(intent, sys, prompt, true);
+      const r = await runLLM(intent, sys, prompt, true);
       const parsed = parseJsonLoose<{ theme?: string; slots?: Array<Record<string, unknown>> }>(r.content, () => ({ theme: message, slots: [] }));
       const rawSlots = Array.isArray(parsed.slots) ? parsed.slots : [];
 
@@ -453,7 +461,7 @@ ${JSON.stringify(skeletons)}
 أرجع JSON فقط بصيغة مصفوفة بنفس الترتيب والعدد (${items.length} عنصر):
 [{ "verdict": "pass|review|fail", "scores": { "hook": 0 }, "reasons": [], "suggested_improvements": [] }]
 المحتوى: ${JSON.stringify(items.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
-        const run = await callLLM(intent, AGENTS.quality_engine(), qPrompt, true);
+        const run = await runLLM(intent, AGENTS.quality_engine(), qPrompt, true);
         tokensIn += run.tokensIn; tokensOut += run.tokensOut;
         fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
         const arr = parseJsonLoose<Array<Record<string, unknown>>>(run.content, () => []);
@@ -471,7 +479,7 @@ ${JSON.stringify(skeletons)}
         const improvePrompt = `حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر.
 أرجع JSON فقط بصيغة مصفوفة بنفس العدد والترتيب (${needsWork.length} عنصر): [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]
 العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
-        const improveRun = await callLLM(intent, AGENTS.content_creator(brandStr, memStr), improvePrompt, true);
+        const improveRun = await runLLM(intent, AGENTS.content_creator(brandStr, memStr), improvePrompt, true);
         tokensIn += improveRun.tokensIn; tokensOut += improveRun.tokensOut;
         fallbackCount += improveRun.fallbackCount; fallbackLog = [...fallbackLog, ...improveRun.fallbackLog];
         const improved = parseJsonLoose<Array<Record<string, unknown>>>(improveRun.content, () => []);
@@ -510,7 +518,7 @@ ${JSON.stringify(skeletons)}
 أفضل منصة محسوبة: ${String(runtimeContext.best_platform ?? 'غير محدد')}
 عدد أيام الفترة: ${String(runtimeContext.range_days ?? 'غير محدد')}
 حلل المؤشرات الواردة، واذكر ما الذي يجب تغييره فعليًا في الموضوع والمنصة والتوقيت والـ CTA. لا تكتفِ بوصف الأرقام. أرجع JSON بصيغة: { "advice": "..." }`;
-      const r = await callLLM(intent, sys, prompt, true);
+      const r = await runLLM(intent, sys, prompt, true);
       const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ advice: raw }));
       return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
     }
@@ -519,7 +527,7 @@ ${JSON.stringify(skeletons)}
       const sys = AGENTS.idea_generator(brandStr);
       const prompt = `الطلب: "${message}"
 اقترح أفكار محتوى بصيغة JSON: { "advice": "..." }`;
-      const r = await callLLM(intent, sys, prompt, true);
+      const r = await runLLM(intent, sys, prompt, true);
       const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ advice: raw }));
       return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
     }
@@ -529,7 +537,7 @@ ${JSON.stringify(skeletons)}
       const sys = AGENTS.analytics_advisor(brandStr);
       const prompt = `سؤال المستخدم: "${message}"
 أجب بنصيحة عملية ومختصرة بصيغة JSON: { "advice": "..." }`;
-      const r = await callLLM(intent, sys, prompt, true);
+      const r = await runLLM(intent, sys, prompt, true);
       const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ advice: raw }));
       return { result: parsed, tokensIn: r.tokensIn, tokensOut: r.tokensOut, meta: r };
     }
@@ -574,6 +582,16 @@ Deno.serve(async (req: Request) => {
     const auth = await authorize(req, workspaceId, onBehalfOfUserId);
     if (!auth.ok) return auth.response;
     const userId = auth.userId;
+    let durable: DurableSteps | undefined;
+    const taskId = req.headers.get('X-Assistant-Task');
+    if (taskId && auth.isServiceRole) {
+      const workerId = req.headers.get('X-Assistant-Worker') ?? '';
+      const { data: task } = await supabase.from('assistant_tasks').select('ai_steps, locked_at')
+        .eq('id', taskId).eq('workspace_id', workspaceId).eq('user_id', userId)
+        .eq('worker_id', workerId).eq('status', 'running').maybeSingle();
+      if (!task || Date.now()-new Date(task.locked_at).getTime()>=10*60_000) return jsonError(403,'lease_lost');
+      durable = new DurableSteps(supabase, taskId, workerId, task.ai_steps ?? {});
+    }
 
     // --- Universal Agent path (Phase 1) — bypasses the fixed 6-intent
     // dispatch entirely and goes through Context Assembly -> Planning ->
@@ -614,9 +632,9 @@ Deno.serve(async (req: Request) => {
         legacyIntent: 'generate_brand_dna' | 'create_content' | 'create_content_plan' | 'analyze_performance' | 'suggest_ideas' | 'general_advice',
         legacyMessage: string, legacyPlatforms: string[], runtimeCtx: Record<string, unknown>,
       ) => {
-        const ctx = await assembleContext(workspaceId, legacyIntent);
+        const ctx = durable ? await durable.run(`context:${legacyIntent}`, () => assembleContext(workspaceId, legacyIntent), false) : await assembleContext(workspaceId, legacyIntent);
         const { result, tokensIn, tokensOut } = await executeIntent(
-          legacyIntent, legacyMessage, ctx, legacyPlatforms, runtimeCtx,
+          legacyIntent, legacyMessage, ctx, legacyPlatforms, runtimeCtx, durable,
         );
         return { result, tokensIn, tokensOut };
       };
@@ -712,7 +730,15 @@ Deno.serve(async (req: Request) => {
           { message, context: fullContext, platforms, legacyContext },
           legacyRunner,
           userScope,
-        ));
+          durable,
+        ).catch(error => {
+          if (error instanceof Error && error.message.includes('background_checkpoint')) return { _checkpoint: true as const };
+          throw error;
+        }));
+        if ('_checkpoint' in turn) {
+          await finishAgentRun(usage, { status: 'succeeded', result: { checkpoint: true } });
+          return jsonError(503, 'background_checkpoint');
+        }
         await finishAgentRun(usage, {
           status: 'succeeded',
           result: { intentLabel: turn.intentLabel ?? null, steps: turn.plan?.steps?.length ?? 0, pendingApproval: Boolean(turn.pendingApproval) },

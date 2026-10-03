@@ -1,3 +1,4 @@
+import { enqueueTask, waitForTask } from './tasks';
 import { supabase } from './supabase';
 import type { AiGatewayRequest, AiGatewayResponse, InboxConversation, InboxMessage, InboxAiAnalysis, AgentContext, AgentTurnResult, AgentToolResult } from './types';
 
@@ -251,29 +252,7 @@ export async function publishVariant(params: {
   variantId: string;
   calendarItemId?: string;
 }): Promise<PublishResult> {
-  const { data: session } = await supabase.auth.getSession();
-  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/social-publish`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.session?.access_token ?? ''}`,
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
-    },
-    body: JSON.stringify(params),
-  });
-
-  let resBody: Record<string, unknown> = {};
-  try {
-    resBody = await res.json();
-  } catch {
-    // ignore parse errors, handled below
-  }
-
-  if (!res.ok) {
-    throw new Error((resBody?.error as string) ?? `فشل النشر (${res.status})`);
-  }
-  return resBody as PublishResult;
+  return waitForTask<PublishResult>(await enqueueTask(params.workspaceId, 'publish', { ...params }));
 }
 
 export async function callAiGateway(req: AiGatewayRequest): Promise<AiGatewayResponse> {
@@ -317,34 +296,7 @@ export async function callApprovedTools(params: {
   agentContext?: AgentContext;
   legacyContext?: Record<string, unknown>;
 }): Promise<{ toolResults: AgentToolResult[] }> {
-  const { data: session } = await supabase.auth.getSession();
-  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-gateway`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.session?.access_token ?? ''}`,
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
-    },
-    body: JSON.stringify({
-      agentMode: true,
-      workspaceId: params.workspaceId,
-      approvedToolCalls: params.toolCalls,
-      agentContext: params.agentContext,
-      legacyContext: params.legacyContext,
-    }),
-  });
-
-  let body: Record<string, unknown> = {};
-  try {
-    body = await res.json();
-  } catch {
-    // ignore parse errors, handled below
-  }
-  if (!res.ok) {
-    throw new Error((body?.error as string) ?? `فشل تنفيذ الإجراء المعتمد (${res.status})`);
-  }
-  return body as { toolResults: AgentToolResult[] };
+  return waitForTask<{ toolResults: AgentToolResult[] }>(await enqueueTask(params.workspaceId, 'approved', { ...params }));
 }
 
 export async function callAgentTurn(params: {
@@ -354,38 +306,8 @@ export async function callAgentTurn(params: {
   agentContext?: AgentContext;
   legacyContext?: Record<string, unknown>;
 }): Promise<AgentTurnResult> {
-  const { data: session } = await supabase.auth.getSession();
-  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-gateway`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.session?.access_token ?? ''}`,
-      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
-    },
-    body: JSON.stringify({
-      agentMode: true,
-      workspaceId: params.workspaceId,
-      message: params.message,
-      platforms: params.platforms,
-      agentContext: params.agentContext,
-      legacyContext: params.legacyContext,
-    }),
-  });
-
-  let body: Record<string, unknown> = {};
-  try {
-    body = await res.json();
-  } catch {
-    // ignore parse errors, handled below
-  }
-
-  if (!res.ok) {
-    throw new Error((body?.error as string) ?? `فشل طلب الـAgent (${res.status})`);
-  }
-  return body as AgentTurnResult;
+  return waitForTask<AgentTurnResult>(await enqueueTask(params.workspaceId, 'agent', { ...params }));
 }
-
 
 export async function listInboxConversations(workspaceId: string): Promise<InboxConversation[]> {
   const { data, error } = await supabase

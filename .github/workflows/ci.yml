@@ -81,3 +81,48 @@ jobs:
           -f supabase/tests/whatsapp_schema_fixture.sql
           -f supabase/migrations/20261003003036_whatsapp_session_lifecycle.sql
           -f supabase/tests/whatsapp_lifecycle.sql
+
+  content-workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+      - run: deno task check:content
+        working-directory: supabase
+      - run: deno task test:content
+        working-directory: supabase
+
+  content-database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: content_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: ci-only-password
+      PGDATABASE: content_test
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify durable claims, atomic saves, quality gates and permissions
+        run: >-
+          psql -v ON_ERROR_STOP=1
+          -f supabase/tests/content_schema_fixture.sql
+          -f supabase/migrations/20260816130000_0009_end_to_end_workflow.sql
+          -f supabase/migrations/20260816164000_0016_schedule_content_variant.sql
+          -f supabase/migrations/20260816151000_0012_reschedule_calendar_item.sql
+          -f supabase/migrations/20260928010000_0035_cancel_calendar_item.sql
+          -f supabase/migrations/20261003005932_durable_content_workflows.sql
+          -f supabase/tests/durable_content.sql

@@ -140,7 +140,7 @@ function assertNoMedia(media: ResolvedMedia, platformLabel: string): void {
   if (media) throw new Error(`رفع الصور/الفيديو على ${platformLabel} غير مدعوم بعد — أزل الميديا من النسخة أو انشر يدويًا (لن يُنشر النص بدون الصورة المرفقة)`);
 }
 
-async function fetchWithRetry(input: string | URL, init: RequestInit, maxAttempts = 3): Promise<Response> {
+async function fetchWithRetry(input: string | URL, init: RequestInit = {}, maxAttempts = 3): Promise<Response> {
   let response: Response | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     response = await fetch(input, init);
@@ -389,10 +389,15 @@ async function publishToX(variant: Variant, account: Record<string, unknown>, me
 }
 
 async function publishCalendarItem(item: CalendarItem): Promise<'published' | 'skipped'> {
-  const { data: variant } = await supabase.from('content_variants').select('*').eq('id', item.variant_id as string).maybeSingle();
+  const { data: variant } = await supabase.from('content_variants').select('*').eq('id', item.variant_id as string).eq('workspace_id', item.workspace_id).maybeSingle();
   if (!variant) {
     await supabase.from('calendar_items').update({ status: 'failed' }).eq('id', item.id);
     throw new Error('النسخة (variant) المرتبطة بهذا الموعد لم تعد موجودة');
+  }
+
+  if (variant.status !== 'approved' || ['needs_improvement','failed'].includes(variant.quality_status)) {
+    await supabase.from('calendar_items').update({ status: 'failed' }).eq('id', item.id);
+    throw new Error('مراجعة الجودة والموافقة مطلوبة قبل النشر');
   }
 
   const platform = variant.platform as string;
@@ -456,8 +461,13 @@ async function publishCalendarItem(item: CalendarItem): Promise<'published' | 's
       && Number.isFinite(lastAttemptMs)
       && Date.now() - lastAttemptMs < 15 * 60 * 1000;
     if (runningIsFresh) return 'skipped';
+    if (job.status === 'running') {
+      await supabase.from('publishing_jobs').update({ status: 'failed', last_error: 'توقف العامل بعد بدء النشر؛ تحقق من المنصة قبل إعادة المحاولة' }).eq('id', job.id).eq('status', 'running');
+      await supabase.from('calendar_items').update({ status: 'failed' }).eq('id', item.id);
+      throw new Error('نتيجة النشر غير مؤكدة؛ تحتاج مراجعة قبل إعادة الإرسال');
+    }
 
-    const claimStatuses = job.status === 'running' ? ['running'] : ['queued', 'failed'];
+    const claimStatuses = ['queued', 'failed'];
     const { data: claimed, error: claimError } = await supabase
       .from('publishing_jobs')
       .update({
@@ -614,7 +624,7 @@ Deno.serve(async (req: Request) => {
     const { data: dueItems, error: dueErr } = await supabase
       .from('calendar_items')
       .select('id, workspace_id, content_id, variant_id, platform, scheduled_for, status')
-      .eq('status', 'scheduled')
+      .in('status', ['scheduled', 'publishing'])
       .lte('scheduled_for', now)
       .limit(25);
 

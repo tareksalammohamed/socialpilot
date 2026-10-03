@@ -22,6 +22,8 @@ import type { ToolCall, ToolResult, AgentContext, ToolName } from './types.ts';
 // ---------------------------------------------------------------------------
 
 export type UserScope = {
+  taskId?: string;
+  workerId?: string;
   token: string;
   supabaseUrl: string;
   anonKey: string;
@@ -132,6 +134,7 @@ async function callSocialPublish(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${scope.token}`,
       apikey: scope.anonKey,
+      ...(scope.taskId ? { 'X-Assistant-Task': scope.taskId, 'X-Assistant-Worker': scope.workerId! } : {}),
     },
     body: JSON.stringify({ workspaceId, variantId, calendarItemId }),
   });

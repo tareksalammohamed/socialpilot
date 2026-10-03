@@ -45,7 +45,7 @@ type DashboardCalendarItem = {
 
 type DashboardAssistantTask = {
   id: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'queued' | 'running' | 'completed' | 'failed';
   request_text: string;
   result_type: string | null;
   error: string | null;
@@ -254,7 +254,7 @@ export function HomeScreen({ onNavigate }: { onNavigate: (tab: Tab) => void }) {
         </div>
       </section>
 
-      {(latestTask?.status === 'running' || failedJobs.length > 0 || metrics.review > 0 || metrics.unread > 0) && (
+      {((latestTask?.status === 'running' || latestTask?.status === 'queued') || failedJobs.length > 0 || metrics.review > 0 || metrics.unread > 0) && (
         <section className="mb-5">
           <div className="section-heading">
             <div>
@@ -263,7 +263,7 @@ export function HomeScreen({ onNavigate }: { onNavigate: (tab: Tab) => void }) {
             </div>
           </div>
           <div className="grid gap-2 md:grid-cols-2">
-            {latestTask?.status === 'running' && (
+            {(latestTask?.status === 'running' || latestTask?.status === 'queued') && (
               <Card onClick={() => onNavigate('create')} className="surface-card">
                 <div className="flex items-center gap-3">
                   <div className="icon-well"><Spinner size={17} className="text-brand-300" /></div>

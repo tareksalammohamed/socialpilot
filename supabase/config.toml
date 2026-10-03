@@ -45,3 +45,8 @@ verify_jwt = false
 # Legacy callback router forwards raw payloads to the authenticated provider handlers.
 [functions.whatsapp-provider-webhook]
 verify_jwt = false
+
+# Internal durable content worker authenticates the Vault cron secret or exact
+# service-role key; it never accepts an anonymous or ordinary user request.
+[functions.assistant-worker]
+verify_jwt = false

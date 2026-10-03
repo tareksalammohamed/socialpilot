@@ -25,6 +25,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
 
+const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL') ?? '',
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
@@ -126,7 +127,7 @@ function assertNoMedia(media: ResolvedMedia, platformLabel: string): void {
   if (media) throw new Error(`رفع الصور/الفيديو على ${platformLabel} غير مدعوم بعد — أزل الميديا من النسخة أو انشر يدويًا (لن يُنشر النص بدون الصورة المرفقة)`);
 }
 
-async function fetchWithRetry(input: string | URL, init: RequestInit, maxAttempts = 3): Promise<Response> {
+async function fetchWithRetry(input: string | URL, init: RequestInit = {}, maxAttempts = 3): Promise<Response> {
   let response: Response | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     response = await fetch(input, init);
@@ -392,8 +393,15 @@ Deno.serve(async (req: Request) => {
   const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
   if (!token) return jsonRes(401, { error: 'Missing authentication token' });
   const { data: userData, error: userError } = await supabase.auth.getUser(token);
-  if (userError || !userData.user) return jsonRes(401, { error: 'Invalid or expired token' });
-  const userId = userData.user.id;
+  let userId = userData.user?.id;
+  let taskWorkspace: string | null = null;
+  if (token === serviceRoleKey && serviceRoleKey) {
+    const { data: task } = await supabase.from('assistant_tasks').select('user_id, workspace_id, task_kind, payload, locked_at')
+      .eq('id', req.headers.get('X-Assistant-Task') ?? '').eq('worker_id', req.headers.get('X-Assistant-Worker') ?? '').eq('status', 'running').maybeSingle();
+    if (!task || Date.now() - new Date(task.locked_at).getTime() >= 10 * 60_000 || !['publish','approved'].includes(task.task_kind)) return jsonRes(403, { error: 'Invalid task lease' });
+    userId = task.user_id;
+    taskWorkspace = task.workspace_id;
+  } else if (userError || !userId) return jsonRes(401, { error: 'Invalid or expired token' });
 
   let body: { workspaceId?: string; variantId?: string; calendarItemId?: string };
   try {
@@ -403,6 +411,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const { workspaceId, variantId, calendarItemId } = body;
+  if (taskWorkspace && taskWorkspace !== workspaceId) return jsonRes(403, { error: 'Task workspace mismatch' });
   if (!workspaceId || !variantId) return jsonRes(400, { error: 'workspaceId و variantId مطلوبين' });
 
   const { data: membership } = await supabase
