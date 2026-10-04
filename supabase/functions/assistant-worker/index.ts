@@ -1,4 +1,4 @@
-import { creationDefaults, isSimpleCreation, isSchedulingFollowup, continueCreation } from '../_shared/creation-policy.ts';
+import { creationDefaults, isSimpleCreation, isSchedulingFollowup, continueRecentCreation } from '../_shared/creation-policy.ts';
 import { aggregateInsights } from '../_shared/analytics-math.ts';
 import { executeBrandMemoryTool, BRAND_MEMORY_TOOLS } from '../ai-gateway/agent/executors-brand.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
@@ -41,12 +41,10 @@ async function execute(task: Task, worker: string): Promise<void> {
     }
     if (['create','agent'].includes(task.task_kind)) {
       if(task.task_kind==='create'&&(task.payload.legacyContext as Record<string,unknown>|undefined)?.creation_defaults_applied!==true&&isSchedulingFollowup(String(task.payload.message??''))){
-        const {data:previous,error}=await db.from('assistant_tasks').select('request_text,payload').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('task_kind','create').eq('result_type','clarification').lt('created_at',task.created_at).gte('created_at',new Date(new Date(task.created_at).getTime()-24*60*60_000).toISOString()).order('created_at',{ascending:false}).limit(5);
+        const {data:previous,error}=await db.from('assistant_tasks').select('request_text,payload,result_type').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('task_kind','create').eq('status','completed').lt('created_at',task.created_at).gte('created_at',new Date(new Date(task.created_at).getTime()-24*60*60_000).toISOString()).order('created_at',{ascending:false}).limit(5);
         if(error)throw error;
-        for(const item of previous??[]){
-          const combined=continueCreation(String(task.payload.message??''),String(item.payload?.message??item.request_text));
-          if(combined!==task.payload.message){task.payload={...task.payload,message:combined};break;}
-        }
+        const combined=continueRecentCreation(String(task.payload.message??''),(previous??[]).map(item=>({message:String(item.payload?.message??item.request_text),resultType:item.result_type})));
+        task.payload={...task.payload,message:combined};
       }
       const draft={message:String(task.payload.message??''),platforms:task.payload.platforms as string[]|undefined,context:(task.payload.agentContext??{}) as {currentRoute?:string},legacyContext:task.payload.legacyContext as Record<string,unknown>|undefined};
       if(isSimpleCreation(draft)&&draft.legacyContext?.creation_defaults_applied!==true){

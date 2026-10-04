@@ -1,5 +1,5 @@
 import { parseIntent } from '../functions/_shared/content-intent.ts';
-import { creationDefaults, directCreationPlan, isSimpleCreation, continueCreation } from '../functions/_shared/creation-policy.ts';
+import { creationDefaults, directCreationPlan, isSimpleCreation, continueCreation, continueRecentCreation } from '../functions/_shared/creation-policy.ts';
 function equal(actual:unknown,expected:unknown){if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error(`${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);}
 const now=new Date('2026-10-04T12:31:00Z');
 const req=(message:string)=>({message,context:{currentRoute:'create'},legacyContext:{} as Record<string,unknown>});
@@ -43,4 +43,10 @@ Deno.test('a scheduling reply continues the prior draft instead of repeating que
  equal(request.legacyContext.post_count,7);equal(request.legacyContext.start_date,'2026-10-05');
  equal(directCreationPlan(request)?.steps[0].input.platforms,['linkedin']);
  equal(continueCreation('احذف المنشور','اعمل حملة أسبوع'),'احذف المنشور');
+});
+
+Deno.test('scheduling replies never reuse an old clarification across a completed draft',()=>{
+ const message='ابدا من بكره لمدة أسبوع';
+ equal(continueRecentCreation(message,[{message:'اكتب بوست جديد',resultType:'content'},{message:'اعمل حملة قديمة',resultType:'clarification'}]),message);
+ equal(continueRecentCreation(message,[{message:'الساعة تسعة',resultType:'clarification'},{message:'اعمل حملة أسبوع',resultType:'clarification'}]),continueCreation(message,'اعمل حملة أسبوع'));
 });

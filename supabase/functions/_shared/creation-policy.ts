@@ -49,3 +49,12 @@ export function continueCreation(message:string,previousMessage:string):string {
   if(!isSchedulingFollowup(message)||!isSimpleCreation({message:previousMessage,context:{currentRoute:'create'}}))return message;
   return `${message}\nالمطلوب الأصلي: ${previousMessage}`;
 }
+
+export function continueRecentCreation(message:string,previous:{message:string;resultType:string|null}[]):string {
+  for(const item of previous){
+    if(item.resultType!=='clarification')break;
+    const combined=continueCreation(message,item.message);
+    if(combined!==message)return combined;
+  }
+  return message;
+}
