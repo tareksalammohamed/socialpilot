@@ -6,13 +6,13 @@ Deno.test('whole weekly generation preserves real bodies through quality improve
  const q=(verdict:string)=>({verdict,scores:{overall:verdict==='pass'?85:60},reasons:[],suggested_improvements:[]});
  const post=(i:number)=>({title:`التأمين وإدارة الفريق ${i}`,content:`محتوى عربي كامل مخصص لليوم ${i} يوضح أهمية فهم احتياجات العميل وتدريب الفريق على شرح شروط التأمين بوضوح.`});
  const llm: CampaignLLM = async (_s,prompt,_j,validate,budget,excluded)=>{
-  if(budget<=2000)throw new Error('campaign budget too small');
+  if(budget<2000)throw new Error('campaign budget too small');
   let response:unknown;
   if(prompt.includes('"reviews"')) {
    qualityCalls++;
    if(excluded?.[0]!=='test'||!prompt.includes('brand')||!prompt.includes('انشئ حمله'))throw new Error('independent review context missing');
    const batch=JSON.parse(prompt.split('المحتوى: ')[1]) as {title:string;content:string}[];
-   if(batch.length>2)throw new Error('quality batches are too large');
+   if(batch.length>1)throw new Error('quality batches are too large');
    response={reviews:batch.map(s=>q(s.title.endsWith('2')&&!s.content.startsWith('محتوى محسّن')?'review':'pass'))};
   }else if(prompt.includes('"posts"')){
    response={posts:[{...post(2),content:'محتوى محسّن عملي يوضح كيف يدرب المدير فريقه على طرح أسئلة العميل قبل تقديم التأمين المناسب.'}]};
@@ -25,7 +25,7 @@ Deno.test('whole weekly generation preserves real bodies through quality improve
   return {content,tokensIn:10,tokensOut:100,provider:'test',model:'test',fallbackCount:0,fallbackLog:[]};
  };
  const out=await generateCampaign('انشئ حمله اسبوع يبدأ من انهارده عن التامين والادارة',['facebook','instagram','linkedin'],{post_count:7,schedule:{dates}},'brand','mem',llm,agents);
- if(stage!==7||qualityCalls!==5||out.result.slots.length!==7||out.result.slots.some((s,i)=>s.date!==dates[i]||!s.content||s.quality.verdict!=='pass'))throw new Error('incomplete campaign');
+ if(stage!==10||qualityCalls!==8||out.result.slots.length!==7||out.result.slots.some((s,i)=>s.date!==dates[i]||!s.content||s.quality.verdict!=='pass'))throw new Error('incomplete campaign');
  if(!out.result.slots[2].content.startsWith('محتوى محسّن'))throw new Error('improvement lost');
 });
 Deno.test('an invalid durable cached generation is rejected before quality or persistence',async()=>{
