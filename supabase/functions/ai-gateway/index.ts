@@ -338,7 +338,7 @@ async function executeIntent(
   const memStr = memoryContextString(ctx.memory);
 
   let stage = 0;
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["structured-v3",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["structured-v4",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
   const runLLM: typeof callLLM = (...args) => durable
     ? durable.run(`llm:${digest}:${stage++}`, () => callLLM(...args))
     : callLLM(...args);

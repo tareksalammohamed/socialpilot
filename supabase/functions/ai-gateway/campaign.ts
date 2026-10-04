@@ -57,19 +57,24 @@ ${JSON.stringify(skeletons)}
 
       const runQuality = async (items: Slot[]): Promise<Record<string, unknown>[]> => {
         if (items.length === 0) return [];
+        const reviews: Record<string, unknown>[] = [];
+        for (let offset = 0; offset < items.length; offset += 2) {
+        const batch = items.slice(offset, offset + 2);
         const qPrompt = `طلب المستخدم الأصلي: ${message}
 سياق العلامة والجمهور الذي يجب أن تقيس عليه الملاءمة: ${brandStr}
 قيّم كل عنصر من عناصر المحتوى التالية وفق: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.
 اكتب الأسباب والمقترحات بالعربية. الدرجات من 0 إلى 100 حصراً، وليس من 0 إلى 10. لا تعط pass إذا overall أقل من 70 أو النص بعيد عن الطلب أو يحتوي ادعاءات غير مدعومة.
-أرجع كائن JSON فقط يحتوي reviews بنفس الترتيب والعدد (${items.length} عنصر):
+أرجع كائن JSON فقط يحتوي reviews بنفس الترتيب والعدد (${batch.length} عنصر):
 {"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "reasons": [], "suggested_improvements": [] }]}
 قيّم أيضًا فهم الطلب وتنوع المحاور؛ لا تقبل حملة تختزل كل المحاور في دمج مصطنع متكرر. تحقق من أي منتج أو تغطية أو علاقة سببية يدعيها النص ولا تمررها بدون سند من السياق. تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
-المحتوى: ${JSON.stringify(items.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
-        const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", items.length, true, arabicOnly), Math.max(4000, items.length * 500), [r.model]);
+المحتوى: ${JSON.stringify(batch.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
+        const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 3000, [r.model]);
         tokensIn += run.tokensIn; tokensOut += run.tokensOut;
         fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
-        if (!validItems(run.content, "reviews", items.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
-        return (parseStructured(run.content) as { reviews: Record<string, unknown>[] }).reviews;
+        if (!validItems(run.content, "reviews", batch.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
+        reviews.push(...(parseStructured(run.content) as { reviews: Record<string, unknown>[] }).reviews);
+        }
+        return reviews;
       };
 
       const qualities = await runQuality(slots);
