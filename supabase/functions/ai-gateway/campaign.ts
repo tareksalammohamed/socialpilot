@@ -1,6 +1,6 @@
 import { parseStructured, validItems } from '../_shared/structured-output.ts';
 export type CampaignLLMResult = { content: string; tokensIn: number; tokensOut: number; provider: string; model: string; fallbackCount: number; fallbackLog: Array<{provider:string;model:string;error:string}> };
-export type CampaignLLM = (system: string, prompt: string, jsonMode: boolean, validate: (content:string)=>boolean, maxOutputTokens: number) => Promise<CampaignLLMResult>;
+export type CampaignLLM = (system: string, prompt: string, jsonMode: boolean, validate: (content:string)=>boolean, maxOutputTokens: number, excludedModelIds?: string[]) => Promise<CampaignLLMResult>;
 export async function generateCampaign(message:string, platforms:string[], runtimeContext:Record<string,unknown>, brandStr:string, memStr:string, runLLM:CampaignLLM, AGENTS: {strategy_planner:(brand:string,mem:string)=>string;content_creator:(brand:string,mem:string)=>string;quality_engine:()=>string}) {
       const scheduleDates = (runtimeContext.schedule as { dates?: string[] } | undefined)?.dates ?? [];
       const requestedCount = Math.max(1, Number(runtimeContext.post_count ?? scheduleDates.length) || scheduleDates.length || 1);
@@ -9,13 +9,16 @@ export async function generateCampaign(message:string, platforms:string[], runti
       const slotDates = scheduleDates.length > 0
         ? Array.from({ length: requestedCount }, (_, i) => scheduleDates[Math.min(i, scheduleDates.length - 1)])
         : Array.from({ length: requestedCount }, () => today);
-      const skeletons = slotDates.map((date, i) => ({ date, platform: plats[i % plats.length] }));
+      const topicTail = message.match(/عن\s+([^\n]+)$/)?.[1] ?? '';
+      const topics = topicTail.split(/\s+و(?:عن\s+)?/).map(t => t.trim()).filter(t => t.length >= 2 && t.length <= 80);
+      const skeletons = slotDates.map((date, i) => ({ date, platform: plats[i % plats.length], ...(topics.length > 1 ? { focus: topics[i % topics.length] } : {}) }));
 
       const arabicOnly = /[\p{Script=Arabic}]/u.test(message) && !/english|french|إنجليزي|انجليزي|بالإنجليزية|بالانجليزية|فرنسي/i.test(message);
       const sys = AGENTS.strategy_planner(brandStr, memStr);
       const prompt = `الطلب: "${message}"
 اكتب محتوى فعلي كامل (وليس عنوانًا فقط) لكل فترة من الفترات التالية، بنفس الترتيب والعدد بالضبط (${skeletons.length} فترة):
 ${JSON.stringify(skeletons)}
+عند وجود focus في الفترة، اجعله محور هذا المنشور تحديدًا؛ لا تدمج باقي المحاور فيه قسرًا.
 بيانات الأداء السابقة التي يجب أن تؤثر على اختيار المحاور: ${JSON.stringify(runtimeContext.performance ?? {})}
 هدف المحتوى (إن وُجد): ${runtimeContext.content_goal ?? 'غير محدد'}
 أرجع JSON فقط بصيغة:
@@ -62,10 +65,10 @@ ${JSON.stringify(skeletons)}
 {"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "reasons": [], "suggested_improvements": [] }]}
 قيّم أيضًا فهم الطلب وتنوع المحاور؛ لا تقبل حملة تختزل كل المحاور في دمج مصطنع متكرر. تحقق من أي منتج أو تغطية أو علاقة سببية يدعيها النص ولا تمررها بدون سند من السياق. تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
 المحتوى: ${JSON.stringify(items.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
-        const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", items.length, true), Math.max(4000, items.length * 500));
+        const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", items.length, true, arabicOnly), Math.max(4000, items.length * 500), [r.model]);
         tokensIn += run.tokensIn; tokensOut += run.tokensOut;
         fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
-        if (!validItems(run.content, "reviews", items.length, true)) throw new Error("Incomplete campaign quality review");
+        if (!validItems(run.content, "reviews", items.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
         return (parseStructured(run.content) as { reviews: Record<string, unknown>[] }).reviews;
       };
 

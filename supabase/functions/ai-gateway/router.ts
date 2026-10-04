@@ -326,14 +326,14 @@ async function recordHealth(
  */
 export async function routeAndRun(
   supabase: SupabaseClient,
-  req: CapabilityRequest & { systemPrompt: string; userPrompt: string; jsonMode: boolean; maxOutputTokens?: number; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
+  req: CapabilityRequest & { systemPrompt: string; userPrompt: string; jsonMode: boolean; maxOutputTokens?: number; excludedModelIds?: string[]; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
 ): Promise<RunResult> {
   const [{ candidates, providers }, { policy, allowPaidFallback }] = await Promise.all([
     loadCandidates(supabase, req.requiredCapabilities),
     loadPolicy(supabase),
   ]);
 
-  const ranked = rankCandidates(candidates, providers, policy, allowPaidFallback, req.preferredCapabilities ?? []).slice(0, MAX_ATTEMPTS);
+  const ranked = rankCandidates(candidates.filter(m => !req.excludedModelIds?.includes(m.model_id)), providers, policy, allowPaidFallback, req.preferredCapabilities ?? []).slice(0, MAX_ATTEMPTS);
   if (ranked.length === 0) throw new NoModelAvailableError();
 
   const fallbackLog: RunResult['fallbackLog'] = [];

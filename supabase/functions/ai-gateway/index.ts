@@ -140,7 +140,8 @@ async function callLLM(
   userPrompt: string,
   jsonMode = false,
   validate?: (content: string) => boolean,
-  maxOutputTokens = 2000
+  maxOutputTokens = 2000,
+  excludedModelIds: string[] = []
 ): Promise<{ content: string; tokensIn: number; tokensOut: number; provider: string; model: string; fallbackCount: number; fallbackLog: Array<{ provider: string; model: string; error: string }> }> {
   const result = await routeAndRun(supabase, {
     requiredCapabilities: TASK_CAPABILITIES[intent],
@@ -150,6 +151,7 @@ async function callLLM(
     jsonMode,
     validate: validate ?? (jsonMode ? validJson : undefined),
     maxOutputTokens,
+    excludedModelIds,
   });
   return {
     content: result.content,
@@ -336,7 +338,7 @@ async function executeIntent(
   const memStr = memoryContextString(ctx.memory);
 
   let stage = 0;
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["structured-v2",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["structured-v3",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
   const runLLM: typeof callLLM = (...args) => durable
     ? durable.run(`llm:${digest}:${stage++}`, () => callLLM(...args))
     : callLLM(...args);

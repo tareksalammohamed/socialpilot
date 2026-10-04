@@ -61,3 +61,8 @@ Deno.test('provider call propagates cancellation so fallback does not hang',asyn
   assert(rejected);
  }finally{globalThis.fetch=saved;}
 });
+
+Deno.test('Arabic quality explanations reject foreign-script contamination too',()=>{
+ const q={verdict:'pass',scores:{overall:85},reasons:['نص جيد например'],suggested_improvements:[]};
+ assert(!validItems(JSON.stringify({reviews:[q]}),'reviews',1,true,true));
+});
