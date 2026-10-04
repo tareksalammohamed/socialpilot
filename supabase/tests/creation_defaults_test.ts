@@ -50,3 +50,12 @@ Deno.test('scheduling replies never reuse an old clarification across a complete
  equal(continueRecentCreation(message,[{message:'اكتب بوست جديد',resultType:'content'},{message:'اعمل حملة قديمة',resultType:'clarification'}]),message);
  equal(continueRecentCreation(message,[{message:'الساعة تسعة',resultType:'clarification'},{message:'اعمل حملة أسبوع',resultType:'clarification'}]),continueCreation(message,'اعمل حملة أسبوع'));
 });
+
+Deno.test('the reported Egyptian today command starts today at a future local hour',()=>{
+ for(const word of ['انهارده','النهارده','النهاردة','انهاردة']) {
+  const request=creationDefaults(req(`انشئ حمله اسبوع يبدأ من ${word} عن التامين والادارة`),['facebook','instagram','linkedin'],now);
+  equal(request.legacyContext.start_date,'2026-10-04');
+  equal(request.legacyContext.end_date,'2026-10-10');
+  equal((request.legacyContext.schedule as {time:string}).time,'16:00');
+ }
+});

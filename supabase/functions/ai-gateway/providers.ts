@@ -59,7 +59,8 @@ export interface ProviderAdapter {
     userPrompt: string,
     jsonMode: boolean,
     baseUrlOverride?: string | null,
-    webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null
+    webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null,
+    maxOutputTokens?: number
   ): Promise<ChatResult>;
 }
 
@@ -191,7 +192,7 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
       }).filter((m) => m.model_id);
     },
 
-    async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, baseUrlOverride, webSearchOptions) {
+    async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, baseUrlOverride, webSearchOptions, maxOutputTokens = 2000) {
       const base = baseUrlOverride || defaultBaseUrl;
       const body: Record<string, unknown> = {
         model: modelId,
@@ -200,7 +201,7 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.7,
-        max_tokens: 2000,
+        max_tokens: maxOutputTokens,
       };
       if (jsonMode) body.response_format = { type: 'json_object' };
       // Web search (OpenRouter only, §lead-hunter "use the app's own AI models
@@ -225,6 +226,7 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
 
       if (!res.ok) throw new ProviderCallError(res.status, await readErrorBody(res));
       const data = await res.json();
+      if (data.choices?.[0]?.finish_reason === "length") throw new Error("Model output truncated");
       const message = data.choices?.[0]?.message ?? {};
       const content = message.content ?? '';
       const annotations = Array.isArray(message.annotations) ? message.annotations : [];
@@ -279,7 +281,7 @@ const anthropicAdapter: ProviderAdapter = {
     }).filter((m) => m.model_id);
   },
 
-  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode) {
+  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000) {
     const sys = jsonMode ? `${systemPrompt}\n\nRespond ONLY with valid JSON, no other text.` : systemPrompt;
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -292,12 +294,13 @@ const anthropicAdapter: ProviderAdapter = {
         model: modelId,
         system: sys,
         messages: [{ role: 'user', content: userPrompt }],
-        max_tokens: 2000,
+        max_tokens: maxOutputTokens,
         temperature: 0.7,
       }),
     });
     if (!res.ok) throw new ProviderCallError(res.status, await readErrorBody(res));
     const data = await res.json();
+    if (data.stop_reason === 'max_tokens') throw new Error('Model output truncated');
     const content = (data.content ?? []).map((b: Record<string, unknown>) => b.text ?? '').join('');
     return {
       content,
@@ -346,9 +349,9 @@ const geminiAdapter: ProviderAdapter = {
       .filter((m): m is DiscoveredModel => m !== null);
   },
 
-  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode) {
+  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-    const generationConfig: Record<string, unknown> = { temperature: 0.7, maxOutputTokens: 2000 };
+    const generationConfig: Record<string, unknown> = { temperature: 0.7, maxOutputTokens };
     if (jsonMode) generationConfig.responseMimeType = 'application/json';
 
     const res = await fetch(url, {
@@ -362,6 +365,7 @@ const geminiAdapter: ProviderAdapter = {
     });
     if (!res.ok) throw new ProviderCallError(res.status, await readErrorBody(res));
     const data = await res.json();
+    if (data.candidates?.[0]?.finishReason === 'MAX_TOKENS') throw new Error('Model output truncated');
     const content = data.candidates?.[0]?.content?.parts?.map((p: Record<string, unknown>) => p.text ?? '').join('') ?? '';
     return {
       content,
@@ -410,7 +414,7 @@ const cohereAdapter: ProviderAdapter = {
       .filter((m): m is DiscoveredModel => m !== null);
   },
 
-  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode) {
+  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000) {
     const res = await fetch('https://api.cohere.com/v2/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -420,6 +424,7 @@ const cohereAdapter: ProviderAdapter = {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
+        max_tokens: maxOutputTokens,
         response_format: jsonMode ? { type: 'json_object' } : undefined,
       }),
     });

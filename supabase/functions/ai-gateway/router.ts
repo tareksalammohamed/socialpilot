@@ -326,7 +326,7 @@ async function recordHealth(
  */
 export async function routeAndRun(
   supabase: SupabaseClient,
-  req: CapabilityRequest & { systemPrompt: string; userPrompt: string; jsonMode: boolean; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
+  req: CapabilityRequest & { systemPrompt: string; userPrompt: string; jsonMode: boolean; maxOutputTokens?: number; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
 ): Promise<RunResult> {
   const [{ candidates, providers }, { policy, allowPaidFallback }] = await Promise.all([
     loadCandidates(supabase, req.requiredCapabilities),
@@ -365,7 +365,8 @@ export async function routeAndRun(
         req.userPrompt,
         req.jsonMode,
         undefined,
-        req.webSearchOptions ?? undefined
+        req.webSearchOptions ?? undefined,
+        req.maxOutputTokens
       );
 
       if (req.validate && !req.validate(result.content)) {
