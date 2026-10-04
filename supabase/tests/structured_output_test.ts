@@ -37,3 +37,9 @@ Deno.test('Arabic campaigns reject foreign-script contamination while other lang
  assert(validItems(JSON.stringify({slots:[post]}),'slots',1,false,true));
  assert(validItems(JSON.stringify({slots:[foreign]}),'slots',1,false,false));
 });
+
+Deno.test('pass with a ten-point score cannot be mistaken for a valid hundred-point review',()=>{
+ const q={verdict:'pass',scores:{hook:7,overall:8},reasons:[],suggested_improvements:[]};
+ assert(!validItems(JSON.stringify({reviews:[q]}),'reviews',1,true));
+ assert(validItems(JSON.stringify({reviews:[{...q,scores:{hook:70,overall:80}}]}),'reviews',1,true));
+});

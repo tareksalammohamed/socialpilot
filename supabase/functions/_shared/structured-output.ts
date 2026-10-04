@@ -16,6 +16,8 @@ export function validItems(content: string, key: string, count: number, quality 
         && item.scores && typeof item.scores === 'object' && !Array.isArray(item.scores)
         && Object.keys(item.scores).length > 0
         && Object.values(item.scores).every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100)
+        && typeof item.scores.overall === 'number'
+        && (item.verdict !== 'pass' || item.scores.overall >= 70)
         && Array.isArray(item.reasons) && item.reasons.every((v: unknown) => typeof v === 'string')
         && Array.isArray(item.suggested_improvements);
       if (arabicOnly) {
