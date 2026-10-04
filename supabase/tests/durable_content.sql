@@ -26,7 +26,7 @@ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public.quality_reviews WHERE variant_id IN(SELECT id FROM public.content_variants WHERE content_id=cid) AND verdict='review') THEN RAISE EXCEPTION 'quality_not_saved'; END IF;
  -- Partial plan failure must leave no rows or falsely completed task.
  tid:=gen_random_uuid();PERFORM public.enqueue_assistant_task(wid,'create','{"message":"plan"}',tid);PERFORM public.claim_assistant_task('worker-plan',tid);
- turn:='{"toolResults":[{"ok":true,"name":"create_content_plan","output":{"theme":"Plan","slots":[{"date":"2027-01-01","platform":"facebook","title":"One","content":"Text","quality":{"verdict":"pass","scores":{},"reasons":[]}},{"date":"bad date","platform":"facebook","title":"Two"}]}}]}';
+ turn:='{"toolResults":[{"ok":true,"name":"create_content_plan","output":{"theme":"Plan","slots":[{"date":"2027-01-01","platform":"facebook","title":"One","content":"Text","quality":{"verdict":"pass","scores":{"hook":90},"reasons":[]}},{"date":"bad date","platform":"facebook","title":"Two","content":"Text two","quality":{"verdict":"review","scores":{"hook":60},"reasons":[]}}]}}]}';
  BEGIN PERFORM public.complete_assistant_task(tid,'worker-plan',turn); RAISE EXCEPTION 'invalid_plan_accepted'; EXCEPTION WHEN invalid_datetime_format THEN NULL; END;
  IF (SELECT count(*) FROM public.content)<>count_before THEN RAISE EXCEPTION 'partial_plan_saved'; END IF;
  IF (SELECT status FROM public.assistant_tasks WHERE id=tid)<>'running' THEN RAISE EXCEPTION 'failed_transaction_completed_task'; END IF;

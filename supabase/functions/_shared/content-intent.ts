@@ -132,9 +132,9 @@ export function parseIntent(message: string, now = new Date(), timezone = 'Afric
   let start = addDays(new Date(`${localToday}T00:00:00Z`),1);
   const explicitDate=text.match(/(?:من|يوم|بداية|بدايه|بدء|starting|from|on)\s*(\d{4}-\d{2}-\d{2})/);
   if(explicitDate && Number.isFinite(Date.parse(explicitDate[1])))start=new Date(`${explicitDate[1]}T00:00:00Z`);
-  else if(/اليوم|النهارده|today/.test(text))start=new Date(`${localToday}T00:00:00Z`);
+  else if(/اليوم|(?:ال)?نهارد[هة]|(?:ال)?نهارده|انهارد[هة]|today/.test(text))start=new Date(`${localToday}T00:00:00Z`);
   else if(/بكرة|بكره|غد|tomorrow/.test(text))start=addDays(new Date(`${localToday}T00:00:00Z`),1);
-  if(!explicitDate&&!/اليوم|النهارده|today|بكرة|بكره|غد|tomorrow/.test(text)){
+  if(!explicitDate&&!/اليوم|(?:ال)?نهارد[هة]|(?:ال)?نهارده|انهارد[هة]|today|بكرة|بكره|غد|tomorrow/.test(text)){
     const weekdays=[['الأحد','الاحد','sunday'],['الإثنين','الاثنين','الإتنين','الاتنين','monday'],['الثلاثاء','التلات','tuesday'],['الأربعاء','الاربعاء','wednesday'],['الخميس','thursday'],['الجمعة','الجمعه','friday'],['السبت','saturday']];
     const day=weekdays.findIndex(names=>names.some(name=>text.includes(name.toLowerCase())));
     if(day>=0){const today=new Date(`${localToday}T00:00:00Z`);const delta=(day-today.getUTCDay()+7)%7;start=addDays(today,delta||7);}
@@ -142,6 +142,12 @@ export function parseIntent(message: string, now = new Date(), timezone = 'Afric
   const timeMatch=text.match(/(?:الساعة|الساعه|ساعة|at)\s*(\d{1,2})(?::(\d{2}))?\s*(صباح(?:ا|ًا)?|مساء(?:ا|ً)?|ص|م|am|pm)?/);
   let hour=DEFAULT_SCHEDULE_HOUR,minute=0;
   if(timeMatch){hour=Number(timeMatch[1]);minute=Number(timeMatch[2]??0);if(/مساء|^م$|pm/.test(timeMatch[3]??'')&&hour<12)hour+=12;if(/صباح|^ص$|am/.test(timeMatch[3]??'')&&hour===12)hour=0; if(hour>23||minute>59)throw new Error('موعد النشر غير صحيح');}
+  if (!timeMatch && start.toISOString().slice(0,10) === localToday) {
+    const parts = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hour:'2-digit', minute:'2-digit', hourCycle:'h23' }).formatToParts(now);
+    const currentHour = Number(parts.find(p => p.type === 'hour')?.value);
+    const currentMinute = Number(parts.find(p => p.type === 'minute')?.value);
+    if (hour <= currentHour) { hour = Math.min(23, currentHour + 1); minute = currentHour === 23 ? Math.min(59, currentMinute + 1) : 0; }
+  }
   const time=`${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
   let spanDays: number;
   let count: number;

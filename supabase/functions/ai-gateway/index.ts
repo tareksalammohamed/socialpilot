@@ -1,3 +1,5 @@
+import { generateCampaign } from './campaign.ts';
+import { validJson, stableStringify } from '../_shared/structured-output.ts';
 import { DurableSteps } from '../_shared/durable-steps.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { routeAndRun, withUsageTracking, NoModelAvailableError, NonFailoverError, type CapabilityRequest } from './router.ts';
@@ -131,25 +133,14 @@ const TASK_PREFERRED_CAPABILITIES: Record<Intent, CapabilityRequest['preferredCa
   general_advice: [],
 };
 
-function looksLikeJson(content: string): boolean {
-  const trimmed = content.trim();
-  if (!trimmed) return false;
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    try {
-      JSON.parse(trimmed);
-      return true;
-    } catch {
-      /* fall through to brace-extraction check below */
-    }
-  }
-  return /\{[\s\S]*\}/.test(trimmed);
-}
 
 async function callLLM(
   intent: Intent,
   systemPrompt: string,
   userPrompt: string,
-  jsonMode = false
+  jsonMode = false,
+  validate?: (content: string) => boolean,
+  maxOutputTokens = 2000
 ): Promise<{ content: string; tokensIn: number; tokensOut: number; provider: string; model: string; fallbackCount: number; fallbackLog: Array<{ provider: string; model: string; error: string }> }> {
   const result = await routeAndRun(supabase, {
     requiredCapabilities: TASK_CAPABILITIES[intent],
@@ -157,7 +148,8 @@ async function callLLM(
     systemPrompt,
     userPrompt,
     jsonMode,
-    validate: jsonMode ? looksLikeJson : undefined,
+    validate: validate ?? (jsonMode ? validJson : undefined),
+    maxOutputTokens,
   });
   return {
     content: result.content,
@@ -344,7 +336,7 @@ async function executeIntent(
   const memStr = memoryContextString(ctx.memory);
 
   let stage = 0;
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["structured-v2",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
   const runLLM: typeof callLLM = (...args) => durable
     ? durable.run(`llm:${digest}:${stage++}`, () => callLLM(...args))
     : callLLM(...args);
@@ -407,109 +399,7 @@ preferred_phrases و forbidden_phrases يجب أن تكونا مصفوفتين �
       };
     }
 
-    case 'create_content_plan': {
-      const scheduleDates = (runtimeContext.schedule as { dates?: string[] } | undefined)?.dates ?? [];
-      const requestedCount = Math.max(1, Number(runtimeContext.post_count ?? scheduleDates.length) || scheduleDates.length || 1);
-      const plats = platforms.length > 0 ? platforms : ['linkedin', 'facebook', 'instagram'];
-      const today = new Date().toISOString().slice(0, 10);
-      const slotDates = scheduleDates.length > 0
-        ? Array.from({ length: requestedCount }, (_, i) => scheduleDates[Math.min(i, scheduleDates.length - 1)])
-        : Array.from({ length: requestedCount }, () => today);
-      const skeletons = slotDates.map((date, i) => ({ date, platform: plats[i % plats.length] }));
-
-      const sys = AGENTS.strategy_planner(brandStr, memStr);
-      const prompt = `الطلب: "${message}"
-اكتب محتوى فعلي كامل (وليس عنوانًا فقط) لكل فترة من الفترات التالية، بنفس الترتيب والعدد بالضبط (${skeletons.length} فترة):
-${JSON.stringify(skeletons)}
-بيانات الأداء السابقة التي يجب أن تؤثر على اختيار المحاور: ${JSON.stringify(runtimeContext.performance ?? {})}
-هدف المحتوى (إن وُجد): ${runtimeContext.content_goal ?? 'غير محدد'}
-أرجع JSON فقط بصيغة:
-{
-  "theme": "...",
-  "slots": [
-    { "date": "YYYY-MM-DD", "platform": "...", "title": "...", "content": "النص الكامل للمنشور", "goal": "...", "hashtags": ["..."], "cta": "..." }
-  ]
-}
-كل "content" نص كامل أصلي مخصص لمنصته، ولا تكرر نفس النص بين الفترات. أرجع JSON فقط.`;
-      const r = await runLLM(intent, sys, prompt, true);
-      const parsed = parseJsonLoose<{ theme?: string; slots?: Array<Record<string, unknown>> }>(r.content, () => ({ theme: message, slots: [] }));
-      const rawSlots = Array.isArray(parsed.slots) ? parsed.slots : [];
-
-      type Slot = { date: string; platform: string; title: string; content: string; goal?: string; content_type?: string; hashtags: string[]; cta?: string };
-      const slots: Slot[] = skeletons.map((skeleton, i) => {
-        const s = rawSlots[i] ?? {};
-        return {
-          date: skeleton.date,
-          platform: skeleton.platform,
-          title: String(s.title ?? `منشور ${i + 1}`),
-          content: String(s.content ?? s.body ?? s.title ?? ''),
-          goal: s.goal ? String(s.goal) : (runtimeContext.content_goal as string | undefined),
-          content_type: runtimeContext.content_type as string | undefined,
-          hashtags: Array.isArray(s.hashtags) ? (s.hashtags as string[]) : [],
-          cta: s.cta ? String(s.cta) : undefined,
-        };
-      });
-
-      let tokensIn = r.tokensIn;
-      let tokensOut = r.tokensOut;
-      let fallbackCount = r.fallbackCount;
-      let fallbackLog = r.fallbackLog;
-
-      const runQuality = async (items: Slot[]): Promise<Record<string, unknown>[]> => {
-        if (items.length === 0) return [];
-        const qPrompt = `قيّم كل عنصر من عناصر المحتوى التالية وفق: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.
-أرجع JSON فقط بصيغة مصفوفة بنفس الترتيب والعدد (${items.length} عنصر):
-[{ "verdict": "pass|review|fail", "scores": { "hook": 0 }, "reasons": [], "suggested_improvements": [] }]
-المحتوى: ${JSON.stringify(items.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
-        const run = await runLLM(intent, AGENTS.quality_engine(), qPrompt, true);
-        tokensIn += run.tokensIn; tokensOut += run.tokensOut;
-        fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
-        const arr = parseJsonLoose<Array<Record<string, unknown>>>(run.content, () => []);
-        return items.map((_, i) => (Array.isArray(arr) ? arr[i] : undefined) ?? { verdict: 'review', scores: {}, reasons: ['تعذر تحليل الجودة'], suggested_improvements: [] });
-      };
-
-      const qualities = await runQuality(slots);
-      const MAX_IMPROVEMENT_ROUNDS = 1;
-      for (let round = 0; round < MAX_IMPROVEMENT_ROUNDS; round++) {
-        const needsWork = slots
-          .map((slot, i) => ({ slot, i, q: qualities[i] as { verdict?: string; reasons?: string[]; suggested_improvements?: string[] } }))
-          .filter(({ q }) => q?.verdict !== 'pass');
-        if (needsWork.length === 0) break;
-
-        const improvePrompt = `حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر.
-أرجع JSON فقط بصيغة مصفوفة بنفس العدد والترتيب (${needsWork.length} عنصر): [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]
-العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
-        const improveRun = await runLLM(intent, AGENTS.content_creator(brandStr, memStr), improvePrompt, true);
-        tokensIn += improveRun.tokensIn; tokensOut += improveRun.tokensOut;
-        fallbackCount += improveRun.fallbackCount; fallbackLog = [...fallbackLog, ...improveRun.fallbackLog];
-        const improved = parseJsonLoose<Array<Record<string, unknown>>>(improveRun.content, () => []);
-
-        needsWork.forEach(({ i }, idx) => {
-          const upd = Array.isArray(improved) ? improved[idx] : undefined;
-          if (upd) {
-            slots[i] = {
-              ...slots[i],
-              title: String(upd.title ?? slots[i].title),
-              content: String(upd.content ?? slots[i].content),
-              hashtags: Array.isArray(upd.hashtags) ? (upd.hashtags as string[]) : slots[i].hashtags,
-              cta: upd.cta ? String(upd.cta) : slots[i].cta,
-            };
-          }
-        });
-
-        const recheck = await runQuality(needsWork.map(({ i }) => slots[i]));
-        needsWork.forEach(({ i }, idx) => { qualities[i] = recheck[idx]; });
-      }
-
-      const finalSlots = slots.map((slot, i) => ({ ...slot, quality: qualities[i] }));
-
-      return {
-        result: { theme: String(parsed.theme ?? message), slots: finalSlots },
-        tokensIn,
-        tokensOut,
-        meta: { provider: r.provider, model: r.model, fallbackCount, fallbackLog },
-      };
-    }
+    case 'create_content_plan': return generateCampaign(message, platforms, runtimeContext, brandStr, memStr, (...args) => runLLM(intent, ...args), AGENTS);
 
     case 'analyze_performance': {
       const sys = AGENTS.analytics_advisor(brandStr);
