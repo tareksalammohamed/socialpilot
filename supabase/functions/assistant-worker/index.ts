@@ -1,3 +1,4 @@
+import { creationDefaults, isSimpleCreation, isSchedulingFollowup, continueCreation } from '../_shared/creation-policy.ts';
 import { aggregateInsights } from '../_shared/analytics-math.ts';
 import { executeBrandMemoryTool, BRAND_MEMORY_TOOLS } from '../ai-gateway/agent/executors-brand.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
@@ -7,7 +8,7 @@ import type { AgentContext, ToolCall } from '../ai-gateway/agent/types.ts';
 const url = Deno.env.get('SUPABASE_URL') ?? '';
 const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const db = createClient(url, key, { auth: { persistSession: false } });
-type Task = { id: string; workspace_id: string; user_id: string; task_kind: string; payload: Record<string, unknown>; checkpoint: Record<string, unknown> | null; attempt_count: number; max_attempts: number };
+type Task = { created_at: string; id: string; workspace_id: string; user_id: string; task_kind: string; payload: Record<string, unknown>; checkpoint: Record<string, unknown> | null; attempt_count: number; max_attempts: number };
 
 async function call(path: string, body: unknown, task?: Task, worker?: string): Promise<Record<string, unknown>> {
   const response = await fetch(`${url}/functions/v1/${path}`, {
@@ -39,6 +40,23 @@ async function execute(task: Task, worker: string): Promise<void> {
       return;
     }
     if (['create','agent'].includes(task.task_kind)) {
+      if(task.task_kind==='create'&&(task.payload.legacyContext as Record<string,unknown>|undefined)?.creation_defaults_applied!==true&&isSchedulingFollowup(String(task.payload.message??''))){
+        const {data:previous,error}=await db.from('assistant_tasks').select('request_text,payload').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('task_kind','create').eq('result_type','clarification').lt('created_at',task.created_at).gte('created_at',new Date(new Date(task.created_at).getTime()-24*60*60_000).toISOString()).order('created_at',{ascending:false}).limit(5);
+        if(error)throw error;
+        for(const item of previous??[]){
+          const combined=continueCreation(String(task.payload.message??''),String(item.payload?.message??item.request_text));
+          if(combined!==task.payload.message){task.payload={...task.payload,message:combined};break;}
+        }
+      }
+      const draft={message:String(task.payload.message??''),platforms:task.payload.platforms as string[]|undefined,context:(task.payload.agentContext??{}) as {currentRoute?:string},legacyContext:task.payload.legacyContext as Record<string,unknown>|undefined};
+      if(isSimpleCreation(draft)&&draft.legacyContext?.creation_defaults_applied!==true){
+        const {data:accounts,error}=await db.from('social_accounts').select('platform').eq('workspace_id',task.workspace_id).eq('status','connected').order('platform');
+        if(error)throw error;
+        const normalized=creationDefaults(draft,[...new Set((accounts??[]).map(account=>String(account.platform)))].filter(platform=>['facebook','instagram','linkedin','x','telegram'].includes(platform)));
+        task.payload={...task.payload,platforms:normalized.platforms,legacyContext:normalized.legacyContext};
+        const {data:saved,error:saveError}=await db.from('assistant_tasks').update({payload:task.payload}).eq('id',task.id).eq('worker_id',worker).eq('status','running').select('id').maybeSingle();
+        if(saveError||!saved)throw new Error('lease_lost');
+      }
       const legacy = (task.payload.legacyContext ?? {}) as Record<string, unknown>;
       if (!Object.hasOwn(legacy, 'performance')) {
         const insights=[];

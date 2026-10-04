@@ -1,3 +1,4 @@
+import { creationDefaults, directCreationPlan, isSimpleCreation } from '../../_shared/creation-policy.ts';
 import type { DurableSteps } from '../../_shared/durable-steps.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { routeAndRun, type CapabilityRequest } from '../router.ts';
@@ -34,7 +35,8 @@ ${listToolsForPrompt()}
 قواعد:
 - لو الطلب بسيط وخطوة واحدة، رجّع خطوة واحدة فقط.
 - لو الطلب متعدد الخطوات (زي حملة كاملة)، رجّع كل الخطوات بالترتيب.
-- لو الطلب غامض وناقص معلومة أساسية (مثلاً مش واضح المنصة أو المدة)، رجّع clarifyingQuestion بدل ما تخمن.
+- ابدأ إنشاء المحتوى فورًا عندما يكون المقصود واضحًا. تاريخ البداية، ساعة النشر، المنصة، المدة، النبرة، الجمهور والهدف تفاصيل اختيارية: استخدم الافتراضات وسياق البراند والحسابات المتصلة، ثم اذكر اختياراتك باختصار. لا تسأل عنها قبل التأليف.
+- اسأل سؤالًا واحدًا فقط لو لا يمكن تحديد المهمة أصلًا أو لو الإجراء يتعلق بعنصر موجود لا يمكن تحديده. لا تخترع معرفات محتوى ولا صلاحيات نشر.
 - استخدم سياق المستخدم الحالي (current_route, current_content_id...) لو الطلب بيشير لعنصر موجود بالفعل ("البوست ده"، "الصورة دي") بدل ما تنشئ عنصر جديد.
 - رجّع JSON فقط بدون أي نص إضافي، بالشكل:
 {"intentLabel": "...", "clarifyingQuestion": "...?" | null, "planSummary": "...", "steps": [{"label": "...", "tool": "...", "input": {...}}]}`;
@@ -49,6 +51,7 @@ function plannerUserPrompt(req: AgentRequest): string {
     ctx.selectedPlatform ? `selected_platform: ${ctx.selectedPlatform}` : null,
     ctx.selectedCampaignId ? `selected_campaign: ${ctx.selectedCampaignId}` : null,
     ctx.selectedMediaId ? `selected_media: ${ctx.selectedMediaId}` : null,
+    req.legacyContext?.creation_assumptions ? `draft_defaults: ${req.legacyContext.creation_assumptions}` : null,
     req.platforms?.length ? `requested_platforms: ${req.platforms.join(', ')}` : null,
   ].filter(Boolean);
 
@@ -163,7 +166,13 @@ export async function runAgentTurn(
   userScope: UserScope | null = null,
   durable?: DurableSteps,
 ): Promise<AgentTurnResult> {
-  const planned = durable ? await durable.run('planner', () => planTurn(supabase, req)) : await planTurn(supabase, req);
+  if(isSimpleCreation(req)&&req.legacyContext?.creation_defaults_applied!==true){
+    const {data,error}=await supabase.from('social_accounts').select('platform').eq('workspace_id',req.context.workspaceId).eq('status','connected').order('platform');
+    if(error)throw error;
+    req=creationDefaults(req,[...new Set((data??[]).map(account=>String(account.platform)))].filter(platform=>['facebook','instagram','linkedin','x','telegram'].includes(platform)));
+  }
+  const direct=directCreationPlan(req) as PlannerOutput|null;
+  const planned = direct ?? (durable ? await durable.run('planner', () => planTurn(supabase, req)) : await planTurn(supabase, req));
 
   if (planned.clarifyingQuestion) {
     return {
@@ -189,6 +198,7 @@ export async function runAgentTurn(
       return result;
     };
     const res = durable ? await durable.run(`tool:${call.id}`, execute, false) : await execute();
+    if(res.ok && res.output && typeof res.output==='object' && req.legacyContext?.creation_assumptions)res.output={...res.output as Record<string,unknown>,creation_assumptions:req.legacyContext.creation_assumptions};
     toolResults.push(res);
     const step = plan.steps.find((s) => s.id === call.id);
     if (step) step.status = res.ok ? 'done' : 'failed';
