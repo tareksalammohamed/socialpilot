@@ -205,6 +205,9 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
         max_tokens: maxOutputTokens,
       };
       if (jsonMode) body.response_format = { type: 'json_object' };
+      // Some reasoning models default to spending almost the entire output
+      // budget on hidden thought, leaving no room for the required JSON.
+      if (opts?.isOpenRouter && jsonMode) body.reasoning = { effort: 'low', exclude: true };
       // Web search (OpenRouter only, §lead-hunter "use the app's own AI models
       // to search, not a separate hosted search engine"): the `web` plugin
       // runs a real search server-side and returns url_citation annotations,

@@ -12,6 +12,10 @@ export function validItems(content: string, key: string, count: number, quality 
     const items = obj?.[key];
     return Array.isArray(items) && items.length === count && items.every(item => {
       if (!item || typeof item !== 'object') return false;
+      if (quality && arabicOnly) {
+        const text = [...(Array.isArray(item.reasons) ? item.reasons : []), ...(Array.isArray(item.suggested_improvements) ? item.suggested_improvements : [])].join(' ');
+        if (/[\p{Script=Han}\p{Script=Cyrillic}\p{Script=Hangul}\p{Script=Devanagari}]/u.test(text) || (text && !/[\p{Script=Arabic}]/u.test(text))) return false;
+      }
       if (quality) return ['pass', 'review', 'fail'].includes(item.verdict)
         && item.scores && typeof item.scores === 'object' && !Array.isArray(item.scores)
         && Object.keys(item.scores).length > 0
