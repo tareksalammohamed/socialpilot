@@ -60,7 +60,8 @@ export interface ProviderAdapter {
     jsonMode: boolean,
     baseUrlOverride?: string | null,
     webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null,
-    maxOutputTokens?: number
+    maxOutputTokens?: number,
+    signal?: AbortSignal
   ): Promise<ChatResult>;
 }
 
@@ -192,7 +193,7 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
       }).filter((m) => m.model_id);
     },
 
-    async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, baseUrlOverride, webSearchOptions, maxOutputTokens = 2000) {
+    async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, baseUrlOverride, webSearchOptions, maxOutputTokens = 2000, signal = AbortSignal.timeout(35_000)) {
       const base = baseUrlOverride || defaultBaseUrl;
       const body: Record<string, unknown> = {
         model: modelId,
@@ -219,6 +220,7 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
       }
 
       const res = await fetch(`${base}/chat/completions`, {
+        signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(body),
@@ -281,9 +283,10 @@ const anthropicAdapter: ProviderAdapter = {
     }).filter((m) => m.model_id);
   },
 
-  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000) {
+  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000, signal = AbortSignal.timeout(35_000)) {
     const sys = jsonMode ? `${systemPrompt}\n\nRespond ONLY with valid JSON, no other text.` : systemPrompt;
     const res = await fetch('https://api.anthropic.com/v1/messages', {
+      signal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -349,12 +352,13 @@ const geminiAdapter: ProviderAdapter = {
       .filter((m): m is DiscoveredModel => m !== null);
   },
 
-  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000) {
+  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000, signal = AbortSignal.timeout(35_000)) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
     const generationConfig: Record<string, unknown> = { temperature: 0.7, maxOutputTokens };
     if (jsonMode) generationConfig.responseMimeType = 'application/json';
 
     const res = await fetch(url, {
+      signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -414,8 +418,9 @@ const cohereAdapter: ProviderAdapter = {
       .filter((m): m is DiscoveredModel => m !== null);
   },
 
-  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000) {
+  async chatComplete(apiKey, modelId, systemPrompt, userPrompt, jsonMode, _baseUrlOverride, _webSearchOptions, maxOutputTokens = 2000, signal = AbortSignal.timeout(35_000)) {
     const res = await fetch('https://api.cohere.com/v2/chat', {
+      signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
