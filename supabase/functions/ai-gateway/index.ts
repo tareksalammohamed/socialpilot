@@ -1,6 +1,6 @@
 import { generateCampaign } from './campaign.ts';
 import { validJson, stableStringify } from '../_shared/structured-output.ts';
-import { DurableSteps } from '../_shared/durable-steps.ts';
+import { DurableSteps, type StepProgress, type ModelAttempt } from '../_shared/durable-steps.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { routeAndRun, withUsageTracking, NoModelAvailableError, NonFailoverError, type CapabilityRequest } from './router.ts';
 import { runAgentTurn, runApprovedCalls } from './agent/pipeline.ts';
@@ -141,7 +141,8 @@ async function callLLM(
   jsonMode = false,
   validate?: (content: string) => boolean,
   maxOutputTokens = 2000,
-  excludedModelIds: string[] = []
+  excludedModelIds: string[] = [],
+  onAttempt?: (attempt: ModelAttempt) => Promise<void>
 ): Promise<{ content: string; tokensIn: number; tokensOut: number; provider: string; model: string; fallbackCount: number; fallbackLog: Array<{ provider: string; model: string; error: string }> }> {
   const result = await routeAndRun(supabase, {
     requiredCapabilities: TASK_CAPABILITIES[intent],
@@ -152,6 +153,7 @@ async function callLLM(
     validate: validate ?? (jsonMode ? validJson : undefined),
     maxOutputTokens,
     excludedModelIds,
+    onAttempt,
   });
   return {
     content: result.content,
@@ -339,9 +341,15 @@ async function executeIntent(
 
   let stage = 0;
   const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["structured-v5",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
-  const runLLM: typeof callLLM = (...args) => durable
-    ? durable.run(`llm:${digest}:${stage++}`, () => callLLM(...args))
-    : callLLM(...args);
+  const runLLM = (kind: Intent, system: string, prompt: string, jsonMode = false,
+    validate?: (content: string) => boolean, maxTokens = 2000, excluded: string[] = [], progress?: StepProgress) => {
+    const index = stage++;
+    const info = progress ?? { phase: kind === 'create_content' && index > 0 ? 'quality' : 'generation',
+      label: kind === 'create_content' ? (index > 0 ? 'مراجعة جودة المنشور' : 'تأليف المنشور ونسخ المنصات') : kind === 'analyze_performance' ? 'تحليل بيانات الأداء' : 'تجهيز الإجابة' };
+    const work = () => callLLM(kind, system, prompt, jsonMode, validate, maxTokens, excluded,
+      durable ? attempt => durable.report(attempt) : undefined);
+    return durable ? durable.run(`llm:${digest}:${index}`, work, true, info) : work();
+  };
 
   switch (intent) {
     case 'agent': {

@@ -1,3 +1,4 @@
+import type { ModelAttempt } from '../_shared/durable-steps.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getAdapter, ProviderCallError, type ChatResult } from './providers.ts';
@@ -326,7 +327,7 @@ async function recordHealth(
  */
 export async function routeAndRun(
   supabase: SupabaseClient,
-  req: CapabilityRequest & { systemPrompt: string; userPrompt: string; jsonMode: boolean; maxOutputTokens?: number; excludedModelIds?: string[]; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
+  req: CapabilityRequest & { onAttempt?: (attempt: ModelAttempt) => Promise<void>; systemPrompt: string; userPrompt: string; jsonMode: boolean; maxOutputTokens?: number; excludedModelIds?: string[]; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
 ): Promise<RunResult> {
   const [{ candidates, providers }, { policy, allowPaidFallback }] = await Promise.all([
     loadCandidates(supabase, req.requiredCapabilities),
@@ -359,6 +360,8 @@ export async function routeAndRun(
       continue;
     }
 
+    // Outside provider catch: a revoked lease must stop the fallback chain.
+    await req.onAttempt?.({ provider: candidate.provider_key, model: candidate.model_id, attempt: fallbackLog.length + 1 });
     const started = Date.now();
     try {
       const result: ChatResult = await adapter.chatComplete(
