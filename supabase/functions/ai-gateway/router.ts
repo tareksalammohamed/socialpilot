@@ -337,8 +337,11 @@ export async function routeAndRun(
   if (ranked.length === 0) throw new NoModelAvailableError();
 
   const fallbackLog: RunResult['fallbackLog'] = [];
+  // Finish within the background worker's 120-second request lease.
+  const deadline = Date.now() + 95_000;
 
   for (const candidate of ranked) {
+    if (Date.now() >= deadline) break;
     const adapter = getAdapter(candidate.provider_key);
     if (!adapter) {
       fallbackLog.push({ provider: candidate.provider_key, model: candidate.model_id, error: 'no adapter for provider' });
@@ -366,7 +369,8 @@ export async function routeAndRun(
         req.jsonMode,
         undefined,
         req.webSearchOptions ?? undefined,
-        req.maxOutputTokens
+        req.maxOutputTokens,
+        AbortSignal.timeout(Math.max(1, Math.min(35_000, deadline - Date.now())))
       );
 
       if (req.validate && !req.validate(result.content)) {

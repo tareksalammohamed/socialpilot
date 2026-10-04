@@ -43,3 +43,21 @@ Deno.test('pass with a ten-point score cannot be mistaken for a valid hundred-po
  assert(!validItems(JSON.stringify({reviews:[q]}),'reviews',1,true));
  assert(validItems(JSON.stringify({reviews:[{...q,scores:{hook:70,overall:80}}]}),'reviews',1,true));
 });
+
+Deno.test('provider call propagates cancellation so fallback does not hang',async()=>{
+ const saved=globalThis.fetch;
+ globalThis.fetch=async(_url,init)=>{
+  if(!init?.signal)throw new Error('missing timeout signal');
+  return await new Promise<Response>((_resolve,reject)=>{
+   const signal=init.signal!;
+   if(signal.aborted)reject(signal.reason);else signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+  });
+ };
+ try {
+  const controller=new AbortController();
+  const request=getAdapter('openai')!.chatComplete('test','model','','',true,undefined,undefined,7000,controller.signal);
+  controller.abort(new Error('test timeout'));
+  let rejected=false;try {await request;}catch(e){rejected=e instanceof Error&&e.message==='test timeout';}
+  assert(rejected);
+ }finally{globalThis.fetch=saved;}
+});
