@@ -10,7 +10,7 @@ Deno.test('whole weekly generation preserves real bodies through quality improve
   const responses=[{theme:'التأمين وإدارة الفريق',slots:dates.map((_,i)=>post(i))},{reviews:dates.map((_,i)=>q(i===2?'review':'pass'))},{posts:[{...post(2),content:'محتوى محسّن عملي يوضح كيف يدرب المدير فريقه على طرح أسئلة العميل قبل تقديم التأمين المناسب.'}]},{reviews:[q('pass')]}];
   const content=JSON.stringify(responses[stage++]);
   if(!validate(content))throw new Error('valid response rejected');
-  if(stage===2&&!prompt.includes('"reviews"'))throw new Error('missing object envelope');
+  if(stage===2&&(!prompt.includes('"reviews"')||!prompt.includes('brand')||!prompt.includes('انشئ حمله')))throw new Error('missing object envelope');
   return {content,tokensIn:10,tokensOut:100,provider:'test',model:'test',fallbackCount:0,fallbackLog:[]};
  };
  const out=await generateCampaign('انشئ حمله اسبوع يبدأ من انهارده عن التامين والادارة',['facebook','instagram','linkedin'],{post_count:7,schedule:{dates}},'brand','mem',llm,agents);

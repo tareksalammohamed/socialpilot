@@ -54,10 +54,12 @@ ${JSON.stringify(skeletons)}
 
       const runQuality = async (items: Slot[]): Promise<Record<string, unknown>[]> => {
         if (items.length === 0) return [];
-        const qPrompt = `قيّم كل عنصر من عناصر المحتوى التالية وفق: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.
+        const qPrompt = `طلب المستخدم الأصلي: ${message}
+سياق العلامة والجمهور الذي يجب أن تقيس عليه الملاءمة: ${brandStr}
+قيّم كل عنصر من عناصر المحتوى التالية وفق: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.
 أرجع كائن JSON فقط يحتوي reviews بنفس الترتيب والعدد (${items.length} عنصر):
 {"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "reasons": [], "suggested_improvements": [] }]}
-تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
+قيّم أيضًا فهم الطلب وتنوع المحاور؛ لا تقبل حملة تختزل كل المحاور في دمج مصطنع متكرر. تحقق من أي منتج أو تغطية أو علاقة سببية يدعيها النص ولا تمررها بدون سند من السياق. تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
 المحتوى: ${JSON.stringify(items.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
         const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", items.length, true), Math.max(4000, items.length * 500));
         tokensIn += run.tokensIn; tokensOut += run.tokensOut;
@@ -74,7 +76,9 @@ ${JSON.stringify(skeletons)}
           .filter(({ q }) => q?.verdict !== 'pass');
         if (needsWork.length === 0) break;
 
-        const improvePrompt = `حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر.
+        const improvePrompt = `الطلب الأصلي: ${message}
+أعد كتابة الموضوع نفسه عند الحاجة لتحقيق الطلب، ولا تكتف بتلميع صياغة فكرة غير مناسبة. اكتب بالعربية الطبيعية بلا كلمات أجنبية دخيلة ولا تخترع تغطيات أو منتجات تأمين.
+حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر.
 أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${needsWork.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
 العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
         const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget);
