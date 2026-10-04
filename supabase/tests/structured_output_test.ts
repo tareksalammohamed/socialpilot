@@ -66,3 +66,13 @@ Deno.test('Arabic quality explanations reject foreign-script contamination too',
  const q={verdict:'pass',scores:{overall:85},reasons:['نص جيد например'],suggested_improvements:[]};
  assert(!validItems(JSON.stringify({reviews:[q]}),'reviews',1,true,true));
 });
+
+Deno.test('structured OpenRouter calls reserve output space with bounded reasoning effort',async()=>{
+ const saved=globalThis.fetch;let effort='';
+ globalThis.fetch=async(_url,init)=>{
+  const body=JSON.parse(String(init?.body));effort=body.reasoning?.effort;
+  return Response.json({choices:[{finish_reason:'stop',message:{content:'{"ok":true}'}}]});
+ };
+ try{await getAdapter('openrouter')!.chatComplete('test','model','','',true);assert(effort==='low');}
+ finally{globalThis.fetch=saved;}
+});
