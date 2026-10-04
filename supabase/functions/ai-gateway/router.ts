@@ -370,7 +370,7 @@ export async function routeAndRun(
         undefined,
         req.webSearchOptions ?? undefined,
         req.maxOutputTokens,
-        AbortSignal.timeout(Math.max(1, Math.min(35_000, deadline - Date.now())))
+        AbortSignal.timeout(Math.max(1, Math.min(60_000, deadline - Date.now())))
       );
 
       if (req.validate && !req.validate(result.content)) {
