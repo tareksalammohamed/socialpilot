@@ -6,7 +6,7 @@ export function parseStructured(content: string): unknown {
 export function validJson(content: string): boolean {
   try { parseStructured(content); return true; } catch { return false; }
 }
-export function validItems(content: string, key: string, count: number, quality = false): boolean {
+export function validItems(content: string, key: string, count: number, quality = false, arabicOnly = false): boolean {
   try {
     const obj = parseStructured(content) as Record<string, unknown>;
     const items = obj?.[key];
@@ -18,6 +18,10 @@ export function validItems(content: string, key: string, count: number, quality 
         && Object.values(item.scores).every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100)
         && Array.isArray(item.reasons) && item.reasons.every((v: unknown) => typeof v === 'string')
         && Array.isArray(item.suggested_improvements);
+      if (arabicOnly) {
+        const text = [item.title, item.content, item.goal, item.cta, ...(Array.isArray(item.hashtags) ? item.hashtags : [])].join(' ');
+        if (/[\p{Script=Han}\p{Script=Cyrillic}\p{Script=Hangul}\p{Script=Devanagari}]/u.test(text) || !/[\p{Script=Arabic}]/u.test(String(item.content))) return false;
+      }
       return typeof item.title === 'string' && item.title.trim().length > 0
         && typeof item.content === 'string' && item.content.trim().length >= 30
         && item.content.trim() !== item.title.trim();

@@ -11,6 +11,7 @@ export async function generateCampaign(message:string, platforms:string[], runti
         : Array.from({ length: requestedCount }, () => today);
       const skeletons = slotDates.map((date, i) => ({ date, platform: plats[i % plats.length] }));
 
+      const arabicOnly = /[\p{Script=Arabic}]/u.test(message) && !/english|french|إنجليزي|انجليزي|بالإنجليزية|بالانجليزية|فرنسي/i.test(message);
       const sys = AGENTS.strategy_planner(brandStr, memStr);
       const prompt = `الطلب: "${message}"
 اكتب محتوى فعلي كامل (وليس عنوانًا فقط) لكل فترة من الفترات التالية، بنفس الترتيب والعدد بالضبط (${skeletons.length} فترة):
@@ -24,10 +25,10 @@ ${JSON.stringify(skeletons)}
     { "date": "YYYY-MM-DD", "platform": "...", "title": "...", "content": "النص الكامل للمنشور", "goal": "...", "hashtags": ["..."], "cta": "..." }
   ]
 }
-كل "content" نص عربي كامل أصلي مخصص لمنصته، ولا تكرر نفس النص بين الفترات. استخدم سياق العلامة والطلب لفهم التأمين والإدارة. لا تخترع أرقامًا أو دراسات أو قصص عملاء أو وعود تغطية أو عوائد. أرجع JSON فقط.`;
+كل "content" نص عربي كامل أصلي مخصص لمنصته، ولا تكرر نفس النص بين الفترات. افهم الموضوع في سياق خبرة صاحب العلامة وجمهوره. إذا طلب أكثر من محور، وزع المنشورات بينها ولا تختزلها كلها في دمج مصطنع واحد. عند ذكر التأمين والإدارة استخدم سياق عمل صاحب العلامة في المبيعات وقيادة الفرق؛ لا تفترض أنه يقصد تأمين الشركات أو إدارة حوادث العمل. لا تعد برابط أو خدمة غير متاحة في سياق العلامة. لا تخلط العربية بلغات غير مطلوبة. لا تخترع أرقامًا أو دراسات أو قصص عملاء أو وعود تغطية أو عوائد. أرجع JSON فقط.`;
       const budget = Math.min(16000, Math.max(4000, skeletons.length * 1000));
-      const r = await runLLM( sys, prompt, true, c => validItems(c, "slots", skeletons.length), budget);
-      if (!validItems(r.content, "slots", skeletons.length)) throw new Error("Incomplete campaign content");
+      const r = await runLLM( sys, prompt, true, c => validItems(c, "slots", skeletons.length, false, arabicOnly), budget);
+      if (!validItems(r.content, "slots", skeletons.length, false, arabicOnly)) throw new Error("Incomplete campaign content");
       const parsed = parseStructured(r.content) as { theme?: string; slots: Array<Record<string, unknown>> };
       const rawSlots = Array.isArray(parsed.slots) ? parsed.slots : [];
 
@@ -76,10 +77,10 @@ ${JSON.stringify(skeletons)}
         const improvePrompt = `حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر.
 أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${needsWork.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
 العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
-        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length), budget);
+        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget);
         tokensIn += improveRun.tokensIn; tokensOut += improveRun.tokensOut;
         fallbackCount += improveRun.fallbackCount; fallbackLog = [...fallbackLog, ...improveRun.fallbackLog];
-        if (!validItems(improveRun.content, "posts", needsWork.length)) throw new Error("Incomplete campaign improvements");
+        if (!validItems(improveRun.content, "posts", needsWork.length, false, arabicOnly)) throw new Error("Incomplete campaign improvements");
         const improved = (parseStructured(improveRun.content) as { posts: Record<string, unknown>[] }).posts;
 
         needsWork.forEach(({ i }, idx) => {

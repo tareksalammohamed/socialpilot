@@ -30,3 +30,10 @@ Deno.test('adapter sends campaign token budget and rejects length-truncated answ
   assert(budget===7000 && rejected);
  } finally {globalThis.fetch=saved;}
 });
+
+Deno.test('Arabic campaigns reject foreign-script contamination while other language requests remain allowed',()=>{
+ const foreign={...post,content:post.content+'记住'};
+ assert(!validItems(JSON.stringify({slots:[foreign]}),'slots',1,false,true));
+ assert(validItems(JSON.stringify({slots:[post]}),'slots',1,false,true));
+ assert(validItems(JSON.stringify({slots:[foreign]}),'slots',1,false,false));
+});
