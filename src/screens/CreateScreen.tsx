@@ -114,7 +114,7 @@ export function CreateScreen() {
       setContent(generated);
       setChat([
         { role: 'user', text: task.request_text },
-        { role: 'ai', text: summarizeResult(payload, 'create_content') },
+        { role: 'ai', text: summarizeResult(payload, 'create_content') + (typeof payload.creation_assumptions==='string'?`\n${payload.creation_assumptions}`:'') },
       ]);
       setMode('content');
       return;
@@ -125,7 +125,7 @@ export function CreateScreen() {
       setPlan(generatedPlan);
       setChat([
         { role: 'user', text: task.request_text },
-        { role: 'ai', text: summarizeResult(payload, 'create_content_plan') },
+        { role: 'ai', text: summarizeResult(payload, 'create_content_plan') + (typeof payload.creation_assumptions==='string'?`\n${payload.creation_assumptions}`:'') },
       ]);
       setMode('plan');
       return;
@@ -216,15 +216,15 @@ export function CreateScreen() {
     // count/dates/platforms — the Universal Agent decides WHICH tool to run,
     // but this data still drives create_content_plan's exact slot count
     // (see the note in agent/types.ts on `legacyContext`).
-    const parsed = parseIntent(message);
     try {
+      const parsed = parseIntent(message);
       const taskId = await enqueueTask(workspace.id, 'create', {
         message: message.trim(), platforms: parsed.platforms,
         agentContext: { currentRoute: 'create' },
         legacyContext: {
           post_count: parsed.postCount, start_date: parsed.startDate, end_date: parsed.endDate,
           frequency: parsed.frequency, schedule: parsed.schedule, content_goal: parsed.contentGoal,
-          content_type: parsed.contentType, platforms: parsed.platforms,
+          content_type: parsed.contentType, platforms: parsed.platforms, timezone: 'Africa/Cairo',
         },
       });
       setActiveTaskId(taskId);
