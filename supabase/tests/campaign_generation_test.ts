@@ -4,18 +4,18 @@ const dates=Array.from({length:7},(_,i)=>`2026-10-${String(i+4).padStart(2,'0')}
 Deno.test('whole weekly generation preserves real bodies through quality improvement and recheck',async()=>{
  let stage=0, qualityCalls=0;
  const q=(verdict:string)=>({verdict,scores:{overall:verdict==='pass'?85:60},reasons:[],suggested_improvements:[]});
- const post=(i:number)=>({title:`التأمين وإدارة الفريق ${i}`,content:`محتوى عربي كامل مخصص لليوم ${i} يوضح أهمية فهم احتياجات العميل وتدريب الفريق على شرح شروط التأمين بوضوح.`});
+ const post=(i:number)=>({title:`التأمين وإدارة الفريق ${i}`,content:`محتوى عربي كامل تقدر تستفيد منه ومخصص لليوم ${i} يوضح أهمية فهم احتياجات العميل وتدريب الفريق على شرح شروط التأمين بوضوح.`});
  const llm: CampaignLLM = async (_s,prompt,_j,validate,budget,excluded)=>{
   if(budget<2000)throw new Error('campaign budget too small');
   let response:unknown;
   if(prompt.includes('"reviews"')) {
    qualityCalls++;
-   if(excluded?.[0]!=='test'||!prompt.includes('brand')||!prompt.includes('انشئ حمله'))throw new Error('independent review context missing');
+   if(!prompt.includes('لا تطلب منه احتواء بقية أيام الحملة')||excluded?.[0]!=='test'||!prompt.includes('brand')||!prompt.includes('انشئ حمله'))throw new Error('independent review context missing');
    const batch=JSON.parse(prompt.split('المحتوى: ')[1]) as {title:string;content:string}[];
    if(batch.length>1)throw new Error('quality batches are too large');
    response={reviews:batch.map(s=>q(s.title.endsWith('2')&&!s.content.startsWith('محتوى محسّن')?'review':'pass'))};
   }else if(prompt.includes('"posts"')){
-   response={posts:[{...post(2),content:'محتوى محسّن عملي يوضح كيف يدرب المدير فريقه على طرح أسئلة العميل قبل تقديم التأمين المناسب.'}]};
+   response={posts:[{...post(2),content:'محتوى محسّن عملي يوضح إزاي كيف يدرب المدير فريقه على طرح أسئلة العميل قبل تقديم التأمين المناسب.'}]};
   }else{
    if(!prompt.includes('"focus":"التامين"')||!prompt.includes('"focus":"الادارة"'))throw new Error('requested topics were merged');
    response={theme:'التأمين وإدارة الفريق',slots:dates.map((_,i)=>post(i))};
@@ -34,4 +34,17 @@ Deno.test('an invalid durable cached generation is rejected before quality or pe
  let failed=false;
  try {await generateCampaign('weekly',['facebook'],{post_count:7,schedule:{dates}},'','',llm,agents);} catch {failed=true;}
  if(!failed||calls!==1)throw new Error('invalid campaign accepted');
+});
+Deno.test('optimistic reviews cannot pass fabricated results; rewriting repeats and retains the corrected body',async()=>{
+ let improvements=0;
+ const llm:CampaignLLM=async(_s,p,_j,validate)=>{
+  let value:unknown;
+  if(p.includes('"reviews"'))value={reviews:[{verdict:'pass',scores:{overall:100},reasons:[],suggested_improvements:[]}]};
+  else if(p.includes('"posts"')){improvements++;value={posts:[{title:'اسأل العميل',content:improvements===1?'حصلت معايا زيادة مبيعات 40% عشان كنت أعمل مع فريق محترف.':'اسأل العميل إيه أهم حاجة بالنسباله، وافهم احتياجه الأول عشان تقدر تشرحله الحل المناسب بوضوح.'}]};}
+  else value={theme:'تأمين',slots:[{title:'قصة حقيقية',content:'حصلت معايا زيادة مبيعات 40% عشان كنت أعمل مع فريق محترف.'}]};
+  const content=JSON.stringify(value);if(!validate(content))throw Error('invalid mock output');
+  return {content,model:p.includes('"reviews"')?'reviewer':'author',provider:'test',tokensIn:1,tokensOut:1,fallbackCount:0,fallbackLog:[]};
+ };
+ const result=await generateCampaign('اكتب بوست تأمين بالمصري',['linkedin'],{post_count:1},'','',llm,agents);
+ if(improvements!==2||result.result.slots[0].quality.verdict!=='pass'||result.result.slots[0].content.includes('40%'))throw Error('unsafe final draft');
 });

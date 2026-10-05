@@ -136,6 +136,8 @@ jobs:
           -f supabase/tests/task_controls.sql
           -f supabase/tests/durable_content.sql
           -f supabase/tests/creation_schedule.sql
+          -f supabase/migrations/20261005123259_editorial_revision_workflow.sql
+          -f supabase/tests/editorial_revision.sql
           -f supabase/tests/analytics_schema_fixture.sql
           -f supabase/migrations/20261003030423_accurate_analytics_snapshots.sql
           -f supabase/tests/analytics.sql

@@ -15,3 +15,21 @@ Deno.test('weekly draft executes the real tool bridge without asking or calling 
  if(calls!==1||result.clarifyingQuestion||result.pendingApproval||!result.toolResults[0].ok)throw new Error('creation blocked');
  if(!result.toolResults[0].output?.creation_assumptions)throw new Error('defaults not disclosed');
 });
+Deno.test('a follow-up edits the existing campaign and removes Instagram in the real tool pipeline',async()=>{
+ let saved=false;
+ const posts=[{id:'post',title:'التأمين'}];
+ const rows=[{id:'li',content_id:'post',platform:'linkedin',text:'النص الموجود',hashtags:[],cta:null,status:'review',updated_at:'2026-10-05T10:00:00Z',scheduled_at:null},{id:'ig',content_id:'post',platform:'instagram',text:'نسخة انستجرام',hashtags:[],cta:null,status:'review',updated_at:'2026-10-05T10:00:00Z',scheduled_at:null}];
+ const db={from:(table:string)=>{
+   const query:Record<string,unknown>={};for(const key of ['select','eq','in'])query[key]=()=>query;
+   query.order=()=>Promise.resolve({data:table==='content'?posts:rows,error:null});return query;
+ },rpc:(name:string,args:Record<string,unknown>)=>{
+  const updates=args.p_updates as Array<Record<string,unknown>>;
+  if(name!=='apply_editorial_revision'||updates.length!==1||updates[0].id!=='li'||updates[0].platform!=='linkedin'||JSON.stringify(args.p_remove_ids)!=='["ig"]')throw Error('wrong existing targets');
+  saved=true;return Promise.resolve({data:{updated:1,removed:1},error:null});
+ }} as unknown as SupabaseClient;
+ const out=await runAgentTurn(db,{message:'خليها لينكد ان بس وامسح نسخه انستقرام',context:{workspaceId:'workspace',userId:'user',selectedCampaignId:'batch'}},async(intent,_message,platforms,context)=>{
+  if(intent!=='create_content_plan'||platforms[0]!=='linkedin'||!(context.existing_slots as unknown[])?.length)throw Error('existing context missing');
+  return {result:{slots:[{title:'التأمين',platform:'linkedin',content:'قبل ما تختار تأمين، اسأل إيه الشروط اللي محتاج تفهمها عشان تاخد قرار مناسب.',quality:{verdict:'pass',scores:{overall:85},reasons:[],suggested_improvements:[]}}]},tokensIn:1,tokensOut:1};
+ });
+ if(!saved||out.pendingApproval||out.clarifyingQuestion||!out.toolResults[0].ok)throw Error('follow-up not executed');
+});

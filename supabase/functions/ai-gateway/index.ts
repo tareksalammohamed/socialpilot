@@ -188,6 +188,7 @@ async function assembleContext(workspaceId: string, intent: Intent): Promise<{
       supabase
         .from('brand_memory')
         .select('key, value, type')
+        .in('type', ['preference','edit_pattern'])
         .eq('workspace_id', workspaceId)
         .order('updated_at', { ascending: false })
         .limit(20)
@@ -340,7 +341,7 @@ async function executeIntent(
   const memStr = memoryContextString(ctx.memory);
 
   let stage = 0;
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["structured-v5",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["editorial-v6",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
   const runLLM = (kind: Intent, system: string, prompt: string, jsonMode = false,
     validate?: (content: string) => boolean, maxTokens = 2000, excluded: string[] = [], progress?: StepProgress) => {
     const index = stage++;
@@ -350,6 +351,7 @@ async function executeIntent(
       durable ? attempt => durable.report(attempt) : undefined);
     return durable ? durable.run(`llm:${digest}:${index}`, work, true, info) : work();
   };
+
 
   switch (intent) {
     case 'agent': {
@@ -377,36 +379,12 @@ preferred_phrases و forbidden_phrases يجب أن تكونا مصفوفتين �
     }
 
     case 'create_content': {
-      const plats = platforms.length > 0 ? platforms.join(', ') : 'لينكدإن, فيسبوك, إنستجرام';
-      const sys = AGENTS.content_creator(brandStr, memStr);
-      const prompt = `اكتب محتوى للطلب التالي: "${message}"
-المنصات المطلوبة: ${plats}
-بيانات الأداء السابقة التي يجب التعلم منها إن وُجدت: ${JSON.stringify(runtimeContext.performance ?? {})}
-أرجع JSON بصيغة:
-{
-  "title": "...",
-  "goal": "...",
-  "topic": "...",
-  "audience": "...",
-  "master_text": "...",
-  "platforms": ["linkedin", "facebook"],
-  "variants": [
-    { "platform": "linkedin", "text": "...", "hashtags": ["..."], "cta": "...", "media_brief": {} }
-  ]
-}
-أرجع JSON فقط. كل نسخة منصة يجب أن تكون مخصصة وغير مكررة.`;
-      const r = await runLLM(intent, sys, prompt, true);
-      const parsed = parseJsonLoose<Record<string, unknown>>(r.content, (raw) => ({ master_text: raw, variants: [] }));
-
-      const qualityPrompt = `قيّم المحتوى التالي وفق المعايير: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.\nأرجع JSON فقط بصيغة { "verdict": "pass|review|fail", "scores": { "hook": 0 }, "reasons": [], "suggested_improvements": [] }.\nالمحتوى: ${JSON.stringify(parsed)}`;
-      const qualityRun = await runLLM(intent, AGENTS.quality_engine(), qualityPrompt, true);
-      const quality = parseJsonLoose<Record<string, unknown>>(qualityRun.content, () => ({ verdict: 'review', scores: {}, reasons: ['تعذر تحليل الجودة'], suggested_improvements: [] }));
-      return {
-        result: { ...parsed, quality },
-        tokensIn: r.tokensIn + qualityRun.tokensIn,
-        tokensOut: r.tokensOut + qualityRun.tokensOut,
-        meta: { ...r, fallbackCount: r.fallbackCount + qualityRun.fallbackCount, fallbackLog: [...r.fallbackLog, ...qualityRun.fallbackLog] },
-      };
+      const selected = platforms.length ? platforms : ['linkedin'];
+      const generated = await generateCampaign(message, selected, {...runtimeContext, post_count:selected.length, schedule:{dates:selected.map(()=>new Date().toISOString().slice(0,10))}}, brandStr, memStr, (...args) => runLLM(intent,...args), AGENTS);
+      const slots=generated.result.slots;
+      const rank=(q:Record<string,unknown>)=>q.verdict==='fail'?0:q.verdict==='review'?1:2;
+      const worst=slots.map(s=>s.quality).sort((a,b)=>rank(a)-rank(b)||Number((a.scores as Record<string,number>).overall)-Number((b.scores as Record<string,number>).overall))[0];
+      return {...generated,result:{title:slots[0].title,master_text:slots[0].content,platforms:selected,quality:worst,variants:slots.map(s=>({platform:s.platform,text:s.content,hashtags:s.hashtags,cta:s.cta,quality:s.quality}))}};
     }
 
     case 'create_content_plan': return generateCampaign(message, platforms, runtimeContext, brandStr, memStr, (...args) => runLLM(intent, ...args), AGENTS);

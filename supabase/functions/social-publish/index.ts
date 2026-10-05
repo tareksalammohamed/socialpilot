@@ -435,7 +435,7 @@ Deno.serve(async (req: Request) => {
   if (variant.status === 'rejected') {
     return jsonRes(409, { error: 'النسخة دي مرفوضة — مينفعش تتنشر.' });
   }
-  if (variant.quality_status === 'needs_improvement' || variant.quality_status === 'failed') {
+  if (variant.quality_status !== 'passed') {
     return jsonRes(409, { error: 'مراجعة الجودة لسه مطلوبة — حسّن النسخة قبل النشر.' });
   }
 
@@ -550,6 +550,10 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // A draft can change between the initial read and the job claim. The
+    // database claim locks edits; compare again before any external request.
+    const {data: currentVariant,error: currentError}=await supabase.from('content_variants').select('*').eq('id',variant.id).eq('workspace_id',variant.workspace_id).maybeSingle();
+    if(currentError||!currentVariant||['text','platform','cta','hashtags','media_brief','updated_at'].some(field=>JSON.stringify(currentVariant[field])!==JSON.stringify(variant[field])))throw new Error('المحتوى اتغير قبل بدء النشر؛ راجع النسخة الحالية وأعد الموافقة.');
     const media = await resolveVariantMedia(variant as Variant);
     const result = platform === 'telegram'
       ? await publishToTelegram(variant as Variant, account, media)

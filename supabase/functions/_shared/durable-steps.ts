@@ -9,6 +9,8 @@ export type ModelAttempt = { provider: string; model: string; attempt: number };
 export class DurableSteps {
   private progress: Record<string, unknown> = {};
   constructor(private db: SupabaseClient, private taskId: string, private workerId: string, private cache: Record<string, unknown>) {}
+  get taskKey():string { return this.taskId; }
+  get workerKey():string { return this.workerId; }
   async assertActive(): Promise<void> {
     const { data, error } = await this.db.from('assistant_tasks').select('id')
       .eq('id', this.taskId).eq('worker_id', this.workerId).eq('status', 'running').maybeSingle();
@@ -36,3 +38,4 @@ export class DurableSteps {
     return result;
   }
 }
+

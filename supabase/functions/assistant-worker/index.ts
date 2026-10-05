@@ -1,3 +1,4 @@
+import { isEditorialFollowup } from '../_shared/editorial-followup.ts';
 import { DurableSteps } from '../_shared/durable-steps.ts';
 import { creationDefaults, isSimpleCreation, isSchedulingFollowup, continueRecentCreation } from '../_shared/creation-policy.ts';
 import { aggregateInsights } from '../_shared/analytics-math.ts';
@@ -44,6 +45,14 @@ async function execute(task: Task, worker: string): Promise<void> {
       return;
     }
     if (['create','agent'].includes(task.task_kind)) {
+      const editorContext=(task.payload.agentContext??{}) as Record<string,unknown>;
+      if(isEditorialFollowup(String(task.payload.message??''))&&!editorContext.currentContentId&&!editorContext.selectedCampaignId){
+        const {data:previous,error}=await db.from('assistant_tasks').select('batch_id,content_id').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('status','completed').lt('created_at',task.created_at).or('batch_id.not.is.null,content_id.not.is.null').order('created_at',{ascending:false}).limit(1).maybeSingle();
+        if(error)throw error;
+        if(previous){task.payload={...task.payload,agentContext:{...editorContext,currentContentId:previous.content_id??undefined,selectedCampaignId:previous.batch_id??undefined}};
+          const {data:saved,error:err}=await db.from('assistant_tasks').update({payload:task.payload}).eq('id',task.id).eq('worker_id',worker).eq('status','running').select('id').maybeSingle();if(err||!saved)throw new Error('lease_lost');}
+      }
+
       if(task.task_kind==='create'&&(task.payload.legacyContext as Record<string,unknown>|undefined)?.creation_defaults_applied!==true&&isSchedulingFollowup(String(task.payload.message??''))){
         const {data:previous,error}=await db.from('assistant_tasks').select('request_text,payload,result_type').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('task_kind','create').eq('status','completed').lt('created_at',task.created_at).gte('created_at',new Date(new Date(task.created_at).getTime()-24*60*60_000).toISOString()).order('created_at',{ascending:false}).limit(5);
         if(error)throw error;
