@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { TaskProgress } from './TaskProgress';
 import type { DurableTask } from '@/lib/tasks';
 
-const labels = { queued: 'في الانتظار', running: 'جارٍ التنفيذ على السيرفر', completed: 'اكتملت', failed: 'تحتاج مراجعة' };
 
 // Poll on mount and while visible: status/results restore even when realtime
 // disconnected while the app was closed. The worker never depends on this UI.
@@ -37,11 +37,11 @@ export function TaskActivity({ workspaceId, onChange, onTasks }: { workspaceId?:
   if (!tasks.length) return null;
   return <section className="mb-4 rounded-xl border border-ink-800 p-4" aria-live="polite">
     <p className="text-sm text-ink-300 mb-2">المهام المحفوظة — تكمل حتى لو قفلت التطبيق</p>
-    {tasks.slice(0, 5).map(task => <div key={task.id} className="text-sm mb-2">
-      <span className={task.status === 'failed' ? 'text-danger-300' : 'text-brand-300'}>{labels[task.status]}</span>
-      <span className="text-ink-400"> · {task.request_text.slice(0, 90)}</span>
-      {task.error && <p className="text-danger-300">{task.error}</p>}
-      {Boolean(task.result?.pendingApproval) && <p className="text-warning-300">تنتظر موافقتك؛ افتح المنشور وراجع الإجراء المقترح.</p>}
-    </div>)}
+    <div className="space-y-3">{[...tasks.filter(task => task.status === 'running' || task.status === 'queued'), ...tasks.filter(task => task.status !== 'running' && task.status !== 'queued').slice(0, 3)].map(task => <TaskProgress key={task.id} task={task} onUpdate={next => {
+      const updated = [next, ...tasks.filter(item => item.id !== next.id).map(item => item.id === task.id && next.id !== task.id && (item.status === 'running' || item.status === 'queued') ? { ...item, status: 'cancelled' as const } : item)];
+      setTasks(updated);
+      restore.current(updated);
+      void refresh.current((next.payload.agentContext as { currentContentId?: string } | undefined)?.currentContentId ?? '');
+    }} />)}</div>
   </section>;
 }

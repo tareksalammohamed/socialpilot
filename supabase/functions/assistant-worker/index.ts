@@ -1,4 +1,5 @@
 import { isEditorialFollowup } from '../_shared/editorial-followup.ts';
+import { DurableSteps } from '../_shared/durable-steps.ts';
 import { creationDefaults, isSimpleCreation, isSchedulingFollowup, continueRecentCreation } from '../_shared/creation-policy.ts';
 import { aggregateInsights } from '../_shared/analytics-math.ts';
 import { executeBrandMemoryTool, BRAND_MEMORY_TOOLS } from '../ai-gateway/agent/executors-brand.ts';
@@ -23,11 +24,14 @@ async function call(path: string, body: unknown, task?: Task, worker?: string): 
 }
 
 async function execute(task: Task, worker: string): Promise<void> {
+  const progress = new DurableSteps(db, task.id, worker, {});
   try {
+    await progress.report({ phase: 'preparing', label: 'التحقق من الطلب وتجهيز بيانات التنفيذ' });
     const { data: member } = await db.from('workspace_members').select('role').eq('workspace_id', task.workspace_id).eq('user_id', task.user_id).maybeSingle();
     if (!member) throw new Error('workspace_access_denied');
     if (task.task_kind === 'analytics') {
       const previous = task.checkpoint ?? { cursor: 0, synced: 0, attempted: 0, errors: [], unsupportedPlatforms: [] };
+      await progress.report({ phase: 'analytics', label: 'قراءة مؤشرات المنصات', detail: `تمت مزامنة ${previous.synced ?? 0} منشورات` });
       const part = await call('analytics-sync', { workspaceId: task.workspace_id, cursor: previous.cursor }, task, worker);
       const result = { cursor: part.nextCursor, synced: Number(previous.synced ?? 0)+Number(part.synced ?? 0), attempted: Number(previous.attempted ?? 0)+Number(part.attempted ?? 0),
         errors: [...previous.errors as unknown[], ...part.errors as unknown[]], unsupportedPlatforms: [...new Set([...previous.unsupportedPlatforms as string[], ...part.unsupportedPlatforms as string[]])] };
@@ -85,6 +89,7 @@ async function execute(task: Task, worker: string): Promise<void> {
         if (error) throw error;
         turn = { ...data, advice: 'تم تنفيذ الإجراء.' };
       } else if (task.task_kind === 'publish') {
+        await progress.report({ phase: 'publishing', label: 'إرسال المنشور إلى المنصة' });
         turn = await call('social-publish', { ...task.payload, workspaceId: task.workspace_id }, task, worker);
       } else if (task.task_kind === 'approved') {
         const scope: UserScope = { token: key, supabaseUrl: url, anonKey: key, taskId: task.id, workerId: worker,
@@ -92,6 +97,7 @@ async function execute(task: Task, worker: string): Promise<void> {
         const context = { ...(task.payload.agentContext as object ?? {}), workspaceId: task.workspace_id, userId: task.user_id } as AgentContext;
         const toolResults = [];
         for (const c of task.payload.toolCalls as ToolCall[]) {
+          await progress.report({ phase: 'approval', label: 'تنفيذ الإجراء المعتمد' });
           if (PUBLISHING_TOOLS.has(c.name)) toolResults.push(await executePublishingTool(c, context, db, scope));
           else if (BRAND_MEMORY_TOOLS.has(c.name)) toolResults.push(await executeBrandMemoryTool(c, context, db));
           else throw new Error(`Unsupported approved tool: ${c.name}`);
@@ -105,6 +111,7 @@ async function execute(task: Task, worker: string): Promise<void> {
       const { data: saved, error } = await db.from('assistant_tasks').update({ checkpoint: turn }).eq('id', task.id).eq('worker_id', worker).eq('status', 'running').select('id').maybeSingle();
       if (error || !saved) throw new Error('lease_lost');
     }
+    await progress.report({ phase: 'saving', label: task.task_kind === 'create' ? 'حفظ المحتوى وتطبيق الجدولة وفق نتيجة الجودة' : 'حفظ نتيجة الطلب' });
     const { error } = await db.rpc('complete_assistant_task', { p_task_id: task.id, p_worker_id: worker, p_turn: turn });
     if (error) throw error;
   } catch (error) {

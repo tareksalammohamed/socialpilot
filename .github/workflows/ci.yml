@@ -132,6 +132,8 @@ jobs:
           -f supabase/migrations/20261003010435_persist_assistant_approval_decisions.sql
           -f supabase/migrations/20261004124316_creation_schedule_defaults.sql
           -f supabase/migrations/20261004134634_validate_campaign_completion.sql
+          -f supabase/migrations/20261004145939_assistant_task_controls.sql
+          -f supabase/tests/task_controls.sql
           -f supabase/tests/durable_content.sql
           -f supabase/tests/creation_schedule.sql
           -f supabase/migrations/20261005123259_editorial_revision_workflow.sql

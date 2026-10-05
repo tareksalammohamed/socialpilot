@@ -1,7 +1,9 @@
 import { editorialRules, enforceEditorialReview, cleanGeneratedText } from '../_shared/editorial-policy.ts';
+import type { StepProgress } from '../_shared/durable-steps.ts';
+
 import { parseStructured, validItems } from '../_shared/structured-output.ts';
 export type CampaignLLMResult = { content: string; tokensIn: number; tokensOut: number; provider: string; model: string; fallbackCount: number; fallbackLog: Array<{provider:string;model:string;error:string}> };
-export type CampaignLLM = (system: string, prompt: string, jsonMode: boolean, validate: (content:string)=>boolean, maxOutputTokens: number, excludedModelIds?: string[]) => Promise<CampaignLLMResult>;
+export type CampaignLLM = (system: string, prompt: string, jsonMode: boolean, validate: (content:string)=>boolean, maxOutputTokens: number, excludedModelIds?: string[], progress?: StepProgress) => Promise<CampaignLLMResult>;
 export async function generateCampaign(message:string, platforms:string[], runtimeContext:Record<string,unknown>, brandStr:string, memStr:string, runLLM:CampaignLLM, AGENTS: {strategy_planner:(brand:string,mem:string)=>string;content_creator:(brand:string,mem:string)=>string;quality_engine:()=>string}) {
       const scheduleDates = (runtimeContext.schedule as { dates?: string[] } | undefined)?.dates ?? [];
       const requestedCount = Math.max(1, Number(runtimeContext.post_count ?? scheduleDates.length) || scheduleDates.length || 1);
@@ -35,7 +37,7 @@ ${JSON.stringify(skeletons)}
 }
 كل "content" نص عربي كامل أصلي مخصص لمنصته، ولا تكرر نفس النص بين الفترات. افهم الموضوع في سياق خبرة صاحب العلامة وجمهوره. إذا طلب أكثر من محور، وزع المنشورات بينها ولا تختزلها كلها في دمج مصطنع واحد. عند ذكر التأمين والإدارة استخدم سياق عمل صاحب العلامة في المبيعات وقيادة الفرق؛ لا تفترض أنه يقصد تأمين الشركات أو إدارة حوادث العمل. لا تعد برابط أو خدمة غير متاحة في سياق العلامة. لا تخلط العربية بلغات غير مطلوبة. لا تخترع أرقامًا أو دراسات أو قصص عملاء أو وعود تغطية أو عوائد. أرجع JSON فقط.`;
       const budget = Math.min(16000, Math.max(4000, skeletons.length * 1000));
-      const r = await runLLM( sys, prompt, true, c => validItems(c, "slots", skeletons.length, false, arabicOnly), budget);
+      const r = await runLLM( sys, prompt, true, c => validItems(c, "slots", skeletons.length, false, arabicOnly), budget, [], { phase: 'generation', label: 'تأليف منشورات الحملة', detail: `كتابة ${skeletons.length} منشورات للمنصات المحددة` });
       if (!validItems(r.content, "slots", skeletons.length, false, arabicOnly)) throw new Error("Incomplete campaign content");
       const parsed = parseStructured(r.content) as { theme?: string; slots: Array<Record<string, unknown>> };
       const rawSlots = Array.isArray(parsed.slots) ? parsed.slots : [];
@@ -61,7 +63,7 @@ ${JSON.stringify(skeletons)}
       let fallbackLog = r.fallbackLog;
       const authorModels = new Set([r.model]);
 
-      const runQuality = async (items: Slot[]): Promise<Record<string, unknown>[]> => {
+      const runQuality = async (items: Slot[], recheck = false): Promise<Record<string, unknown>[]> => {
         if (items.length === 0) return [];
         const reviews: Record<string, unknown>[] = [];
         for (let offset = 0; offset < items.length; offset += 1) {
@@ -78,7 +80,8 @@ ${JSON.stringify(skeletons)}
 {"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "reasons": [], "suggested_improvements": [] }]}
 قيّم أيضًا فهم الطلب وتنوع المحاور؛ لا تقبل حملة تختزل كل المحاور في دمج مصطنع متكرر. تحقق من أي منتج أو تغطية أو علاقة سببية يدعيها النص ولا تمررها بدون سند من السياق. تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
 المحتوى: ${JSON.stringify(batch.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
-        const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 2500, [...authorModels]);
+        const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 2500, [...authorModels], { phase: 'quality', label: recheck ? 'إعادة مراجعة المنشورات المحسّنة' : 'مراجعة جودة منشورات الحملة', current: offset + 1, total: items.length });
+
         tokensIn += run.tokensIn; tokensOut += run.tokensOut;
         fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
         if (!validItems(run.content, "reviews", batch.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
@@ -102,8 +105,9 @@ ${JSON.stringify(skeletons)}
 حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر.
 أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${needsWork.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
 العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
-        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget);
+        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget, [], { phase: 'improvement', label: 'تحسين المنشورات وفق ملاحظات الجودة', detail: `تحسين ${needsWork.length} منشورات` });
         authorModels.add(improveRun.model);
+
         tokensIn += improveRun.tokensIn; tokensOut += improveRun.tokensOut;
         fallbackCount += improveRun.fallbackCount; fallbackLog = [...fallbackLog, ...improveRun.fallbackLog];
         if (!validItems(improveRun.content, "posts", needsWork.length, false, arabicOnly)) throw new Error("Incomplete campaign improvements");
@@ -122,7 +126,7 @@ ${JSON.stringify(skeletons)}
           }
         });
 
-        const recheck = await runQuality(needsWork.map(({ i }) => slots[i]));
+        const recheck = await runQuality(needsWork.map(({ i }) => slots[i]), true);
         needsWork.forEach(({ i }, idx) => { qualities[i] = recheck[idx]; });
       }
 
