@@ -1,0 +1,31 @@
+BEGIN;
+INSERT INTO auth.users VALUES('10000000-0000-0000-0000-000000000011'),('10000000-0000-0000-0000-000000000012');
+INSERT INTO public.workspaces VALUES('20000000-0000-0000-0000-000000000011');
+INSERT INTO public.workspace_members VALUES('20000000-0000-0000-0000-000000000011','10000000-0000-0000-0000-000000000011','owner'),('20000000-0000-0000-0000-000000000011','10000000-0000-0000-0000-000000000012','editor');
+SELECT set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000011',true);
+DO $$
+DECLARE wid uuid:='20000000-0000-0000-0000-000000000011'; tid uuid; cancelled public.assistant_tasks; fresh public.assistant_tasks; retry public.assistant_tasks; turn jsonb:='{"advice":"late"}';
+BEGIN
+ IF has_function_privilege('anon','public.cancel_assistant_task(uuid)','EXECUTE') OR has_function_privilege('anon','public.restart_assistant_task(uuid)','EXECUTE') THEN RAISE EXCEPTION 'anonymous_controls'; END IF;
+ tid:=public.enqueue_assistant_task(wid,'create','{"message":"original","legacyContext":{"timezone":"Africa/Cairo"}}',gen_random_uuid());
+ PERFORM public.claim_assistant_task('old-worker',tid);
+ UPDATE public.assistant_tasks SET ai_steps='{"llm:old:0":"old-result"}',checkpoint='{"advice":"old"}',payload='{"message":"worker-normalized"}',progress='{"label":"working"}' WHERE id=tid;
+ PERFORM set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000012',true);
+ BEGIN PERFORM public.cancel_assistant_task(tid); RAISE EXCEPTION 'other_user_cancelled'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_access_denied' THEN RAISE; END IF; END;
+ PERFORM set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000011',true);
+ SELECT * INTO cancelled FROM public.cancel_assistant_task(tid);
+ IF cancelled.status<>'cancelled' OR cancelled.worker_id IS NOT NULL OR cancelled.locked_at IS NOT NULL THEN RAISE EXCEPTION 'cancel_not_fenced'; END IF;
+ BEGIN PERFORM public.complete_assistant_task(tid,'old-worker',turn); RAISE EXCEPTION 'late_result_saved'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'lease_lost' THEN RAISE; END IF; END;
+ IF EXISTS(SELECT 1 FROM public.claim_assistant_task('another-worker',tid)) THEN RAISE EXCEPTION 'cancelled_claimed'; END IF;
+ SELECT * INTO fresh FROM public.restart_assistant_task(tid);
+ IF fresh.status<>'queued' OR fresh.id=tid OR fresh.checkpoint IS NOT NULL OR fresh.ai_steps<>'{}'::jsonb OR fresh.progress<>'{}'::jsonb OR fresh.payload->>'message'<>'original' THEN RAISE EXCEPTION 'restart_not_fresh'; END IF;
+ SELECT * INTO retry FROM public.restart_assistant_task(tid);
+ IF retry.id<>fresh.id OR (SELECT count(*) FROM public.assistant_tasks WHERE restarted_from=tid)<>1 THEN RAISE EXCEPTION 'duplicate_restart'; END IF;
+ tid:=public.enqueue_assistant_task(wid,'publish','{"message":"publish"}',gen_random_uuid());
+ PERFORM public.claim_assistant_task('publisher',tid);
+ BEGIN PERFORM public.restart_assistant_task(tid); RAISE EXCEPTION 'publish_replayed'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_restart_not_supported' THEN RAISE; END IF; END;
+ BEGIN PERFORM public.cancel_assistant_task(tid); RAISE EXCEPTION 'inflight_publish_cancelled'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'action_already_started' THEN RAISE; END IF; END;
+ DELETE FROM public.workspace_members WHERE workspace_id=wid AND user_id=auth.uid();
+ BEGIN PERFORM public.restart_assistant_task(fresh.id); RAISE EXCEPTION 'former_member_restarted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_access_denied' THEN RAISE; END IF; END;
+END $$;
+ROLLBACK;

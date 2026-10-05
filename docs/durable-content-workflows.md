@@ -45,3 +45,19 @@ database and are visible after reconnecting.
 CI runs Deno checks and checkpoint tests, plus real PostgreSQL transactions for
 idempotent enqueue/save, stale leases, retry exhaustion, atomic plan rollback,
 quality gates, revoked membership and worker permissions.
+
+## Live progress and task controls
+
+The global monitor persists across pages, subscribes to task events, and polls
+when visible with focus recovery. It shows server-written stages and actual
+provider/model attempts, not a timer-based percentage. Campaign quality reports
+the current reviewed item; delayed worker retries and stale updates are explicit.
+
+Cancellation atomically revokes the lease. Checkpoints, progress updates, fallback
+attempts and final content commits verify it. An already submitted model request
+may finish remotely, but its cancelled task cannot persist a late result.
+Restart cancels outstanding draft/agent/analytics work and enqueues one new task
+from the original payload with empty checkpoints. A unique source link and row
+lock prevent duplicate clicks from creating multiple replacements. Completed
+content is retained. Immediate publishing/approved side effects cannot be
+replayed, and already running publishing/approval/RPC tasks cannot be cancelled.

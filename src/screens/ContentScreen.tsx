@@ -238,6 +238,7 @@ export function ContentScreen() {
       if (!id || seen.has(id)) continue;
       seen.add(id);
       if (task.status === 'queued' || task.status === 'running') messages[id] = 'المهمة محفوظة وتعمل على السيرفر.';
+      if (task.status === 'cancelled') messages[id] = 'تم إيقاف الطلب.';
       if (task.status === 'failed') messages[id] = task.error ?? 'فشل تنفيذ المهمة';
       if (task.result?.pendingApproval) pending[id] = task.result.pendingApproval as typeof pending[string];
       if (task.result?.clarifyingQuestion) messages[id] = String(task.result.clarifyingQuestion);

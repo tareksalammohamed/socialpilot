@@ -7,6 +7,7 @@ import { CreateScreen } from '@/screens/CreateScreen';
 import { ContentScreen } from '@/screens/ContentScreen';
 import { InboxScreen } from '@/screens/InboxScreen';
 import { MoreScreen } from '@/screens/MoreScreen';
+import { TaskMonitor } from './TaskMonitor';
 import { AnalyticsScreen } from '@/screens/AnalyticsScreen';
 
 type Tab = 'home' | 'create' | 'content' | 'analytics' | 'inbox' | 'more';
@@ -51,7 +52,7 @@ export type AppShellProps = {
 export function AppShell() {
   const { workspace, user } = useAuth();
   const [tab, setTab] = useState<Tab>(() => tabFromPath(window.location.pathname));
-  const [assistantTaskStatus, setAssistantTaskStatus] = useState<'queued' | 'running' | 'completed' | 'failed' | null>(null);
+  const [assistantTaskStatus, setAssistantTaskStatus] = useState<'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | null>(null);
   const [unreadInboxCount, setUnreadInboxCount] = useState(0);
 
   useEffect(() => {
@@ -70,7 +71,7 @@ export function AppShell() {
       .limit(1)
       .maybeSingle()
       .then(({ data }) => {
-        if (!cancelled) setAssistantTaskStatus((data?.status as 'queued' | 'running' | 'completed' | 'failed' | undefined) ?? null);
+        if (!cancelled) setAssistantTaskStatus((data?.status as 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | undefined) ?? null);
       });
 
     const channel = supabase
@@ -79,7 +80,7 @@ export function AppShell() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'assistant_tasks', filter: `user_id=eq.${user.id}` },
         (payload) => {
-          const row = payload.new as { workspace_id?: string; status?: 'queued' | 'running' | 'completed' | 'failed' };
+          const row = payload.new as { workspace_id?: string; status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' };
           if (row.workspace_id === workspace.id && row.status) setAssistantTaskStatus(row.status);
         },
       )
@@ -149,6 +150,7 @@ export function AppShell() {
 
   return (
     <div className="min-h-screen flex flex-col">
+      <TaskMonitor />
       <div className="flex-1 overflow-y-auto no-scrollbar pb-28">
         <div key={`${tab}-${workspace?.id ?? 'no-ws'}`} className="animate-fade-in">
           {screens[tab]}

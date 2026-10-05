@@ -2,7 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { enqueueTask } from '@/lib/tasks';
+import { TaskProgress } from '@/components/TaskProgress';
+import { enqueueTask, type DurableTask } from '@/lib/tasks';
 import { Button, Card, ErrorBanner, Spinner, Badge } from '@/components/ui';
 import { PLATFORM_META } from '@/lib/constants';
 import { parseIntent, scheduleDates, DEFAULT_SCHEDULE_HOUR } from '@/lib/intent';
@@ -12,12 +13,12 @@ type Mode = 'idle' | 'thinking' | 'content' | 'plan' | 'advice' | 'error';
 
 type ChatTurn = { role: 'user' | 'ai'; text: string };
 
-type AssistantTask = {
+type AssistantTask = DurableTask & {
   id: string;
   workspace_id: string;
   user_id: string;
   request_text: string;
-  status: 'queued' | 'running' | 'completed' | 'failed';
+  status: DurableTask['status'];
   result_type: 'content' | 'plan' | 'advice' | 'clarification' | null;
   result: Record<string, unknown> | null;
   error: string | null;
@@ -65,6 +66,10 @@ export function CreateScreen() {
   const [savingPlan, setSavingPlan] = useState(false);
   const [planSaved, setPlanSaved] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [activeTask, setActiveTask] = useState<AssistantTask | null>(null);
+  const submitting = useRef(false);
+  const taskVersion = useRef('');
+  const latestTask = useRef<AssistantTask | null>(null);
   const [restoringTask, setRestoringTask] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -73,6 +78,14 @@ export function CreateScreen() {
   }, [chat, mode]);
 
   const applyTask = useCallback((task: AssistantTask) => {
+    if (submitting.current) return;
+    const latest = latestTask.current;
+    if (latest && ((task.id !== latest.id && task.created_at < latest.created_at) || (task.id === latest.id && task.updated_at < latest.updated_at))) return;
+    latestTask.current = task;
+    const version = JSON.stringify([task.id, task.status, task.updated_at, task.progress]);
+    if (taskVersion.current === version) return;
+    taskVersion.current = version;
+    setActiveTask(task);
     setActiveTaskId(task.id);
     setError(null);
     setContent(null);
@@ -84,6 +97,12 @@ export function CreateScreen() {
     if (task.status === 'running' || task.status === 'queued') {
       setChat([{ role: 'user', text: task.request_text }]);
       setMode('thinking');
+      return;
+    }
+
+    if (task.status === 'cancelled') {
+      setChat([{ role: 'user', text: task.request_text }, { role: 'ai', text: 'تم إيقاف الطلب. تقدر تعدّل طلبك وترسله أو تبدأ من جديد.' }]);
+      setMode('idle');
       return;
     }
 
@@ -200,7 +219,8 @@ export function CreateScreen() {
 
   async function handleSubmit(text?: string) {
     const message = text ?? input;
-    if (!message.trim() || !workspace || !user) return;
+    if (!message.trim() || !workspace || !user || mode === 'thinking' || restoringTask || submitting.current) return;
+    submitting.current = true;
 
     setInput('');
     setError(null);
@@ -227,11 +247,15 @@ export function CreateScreen() {
           content_type: parsed.contentType, platforms: parsed.platforms, timezone: 'Africa/Cairo',
         },
       });
+      const { data, error: loadError } = await supabase.from('assistant_tasks').select('*').eq('id', taskId).single();
+      submitting.current = false;
       setActiveTaskId(taskId);
+      if (loadError) throw loadError;
+      applyTask(data as AssistantTask);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'تعذّر إرسال المهمة';
       setError(msg); setMode('error');
-    }
+    } finally { submitting.current = false; }
   }
 
   async function saveContent(targetContent?: GeneratedContent, sourceMessage?: string): Promise<string | null> {
@@ -439,6 +463,8 @@ export function CreateScreen() {
         </div>
       </section>
 
+      {activeTask && <div className="mb-4"><TaskProgress task={activeTask} onUpdate={task => applyTask(task as AssistantTask)} /></div>}
+
       {/* Chat + results */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar rounded-2xl border border-ink-800 bg-ink-950/40 p-4 sm:p-5">
         {restoringTask ? (
@@ -458,6 +484,7 @@ export function CreateScreen() {
               {SUGGESTIONS.map((s) => (
                 <button
                   key={s}
+                  disabled={mode === 'thinking' || restoringTask}
                   onClick={() => handleSubmit(s)}
                   className="text-right px-4 py-3.5 rounded-xl bg-ink-900/80 border border-ink-800 text-ink-200 text-sm hover:border-brand-500/30 hover:bg-ink-800/70 transition-all active:scale-[0.98]"
                 >
@@ -623,7 +650,8 @@ export function CreateScreen() {
           />
           <button
             onClick={() => handleSubmit()}
-            disabled={!input.trim() || mode === 'thinking'}
+            aria-label="إرسال الطلب"
+            disabled={!input.trim() || mode === 'thinking' || restoringTask}
             className="w-11 h-11 rounded-xl bg-brand-500 text-ink-950 flex items-center justify-center disabled:opacity-30 active:scale-95 transition-all shadow-lg shadow-brand-500/15"
           >
             <Send size={18} />
