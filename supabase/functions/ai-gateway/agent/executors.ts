@@ -1,6 +1,8 @@
+import { executeRevision } from './executors-revision.ts';
+import type { DurableSteps } from '../../_shared/durable-steps.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 import type { ToolCall, ToolResult, AgentContext } from './types.ts';
-import { executeContentTool, CONTENT_EDIT_TOOLS } from './executors-content.ts';
+import { CONTENT_EDIT_TOOLS } from './executors-content.ts';
 import { executeBrandMemoryTool, BRAND_MEMORY_TOOLS } from './executors-brand.ts';
 import { executeAccountsTool, ACCOUNTS_TOOLS } from './executors-accounts.ts';
 import { executeMediaLlmTool, MEDIA_LLM_TOOLS } from './executors-media.ts';
@@ -37,6 +39,7 @@ export type LegacyRunner = (
 // Tools that map 1:1 onto an existing, working legacy intent.
 const LEGACY_BRIDGE: Partial<Record<ToolCall['name'], LegacyIntent>> = {
   create_content: 'create_content',
+  create_campaign: 'create_content_plan',
   create_content_plan: 'create_content_plan',
   analyze_performance: 'analyze_performance',
   // NOTE: read_brand_dna used to be bridged to 'generate_brand_dna', which
@@ -67,12 +70,13 @@ export async function executeTool(
   supabase: SupabaseClient,
   legacyContext: Record<string, unknown> = {},
   userScope: UserScope | null = null,
+  durable?: DurableSteps,
 ): Promise<ToolResult> {
   const legacyIntent = LEGACY_BRIDGE[call.name];
 
   if (legacyIntent) {
     try {
-      const message = String(call.input.message ?? call.input.topic ?? call.input.goal ?? '');
+      const message = String(call.input.message ?? call.input.topic ?? call.input.goal ?? call.input.objective ?? '');
       const platforms = Array.isArray(call.input.platforms) ? (call.input.platforms as string[]) : [];
       // legacyContext (parseIntent output: post_count/schedule/performance/
       // content_goal) takes precedence — this is the deterministic data the
@@ -88,8 +92,8 @@ export async function executeTool(
     return executePublishingTool(call, context, supabase, userScope);
   }
 
-  if (CONTENT_EDIT_TOOLS.has(call.name)) {
-    return executeContentTool(call, context, supabase);
+  if (CONTENT_EDIT_TOOLS.has(call.name)||call.name==='revise_existing_content') {
+    return executeRevision(call, context, supabase, runLegacy, durable);
   }
 
   if (BRAND_MEMORY_TOOLS.has(call.name)) {

@@ -13,6 +13,11 @@ import type { ToolDefinition, ToolName } from './types.ts';
 // ---------------------------------------------------------------------------
 
 export const TOOL_REGISTRY: Record<ToolName, ToolDefinition> = {
+  revise_existing_content: {
+    name:'revise_existing_content',domain:'content',sideEffect:false,
+    description:'Edit an existing post or campaign, rewrite and recheck quality, learn user corrections, optionally keep only one platform and remove other unpublished draft variants. Never create a new campaign for an edit.',
+    paramsSchema:{contentId:'string?',batchId:'string?',variantId:'string?',instructions:'string',onlyPlatform:'string?'},
+  },
   // ---- Content ----
   create_content: {
     name: 'create_content', domain: 'content', sideEffect: false,

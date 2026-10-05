@@ -395,7 +395,7 @@ async function publishCalendarItem(item: CalendarItem): Promise<'published' | 's
     throw new Error('النسخة (variant) المرتبطة بهذا الموعد لم تعد موجودة');
   }
 
-  if (variant.status !== 'approved' || ['needs_improvement','failed'].includes(variant.quality_status)) {
+  if (variant.status !== 'approved' || variant.quality_status !== 'passed') {
     await supabase.from('calendar_items').update({ status: 'failed' }).eq('id', item.id);
     throw new Error('مراجعة الجودة والموافقة مطلوبة قبل النشر');
   }
@@ -524,6 +524,10 @@ async function publishCalendarItem(item: CalendarItem): Promise<'published' | 's
   await supabase.from('calendar_items').update({ status: 'publishing' }).eq('id', item.id);
 
   try {
+    // A draft can change between the initial read and the job claim. The
+    // database claim locks edits; compare again before any external request.
+    const {data: currentVariant,error: currentError}=await supabase.from('content_variants').select('*').eq('id',variant.id).eq('workspace_id',variant.workspace_id).maybeSingle();
+    if(currentError||!currentVariant||['text','platform','cta','hashtags','media_brief','updated_at'].some(field=>JSON.stringify(currentVariant[field])!==JSON.stringify(variant[field])))throw new Error('المحتوى اتغير قبل بدء النشر؛ راجع النسخة الحالية وأعد الموافقة.');
     const media = await resolveVariantMedia(variant as Variant);
     const result = platform === 'telegram'
       ? await publishToTelegram(variant as Variant, account, media)

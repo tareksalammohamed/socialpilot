@@ -1,0 +1,30 @@
+BEGIN;
+DO $$
+DECLARE w uuid:=gen_random_uuid();u uuid:=gen_random_uuid();other_u uuid:=gen_random_uuid();c uuid:=gen_random_uuid();v1 uuid:=gen_random_uuid();v2 uuid:=gen_random_uuid();snap jsonb;edits jsonb;r jsonb;failed boolean;
+BEGIN
+ INSERT INTO auth.users(id) VALUES(u),(other_u);INSERT INTO public.workspaces(id) VALUES(w);INSERT INTO public.workspace_members VALUES(w,u,'owner');
+ INSERT INTO public.content(id,workspace_id,title,master_text,platforms,status)VALUES(c,w,'عنوان','نص قديم', '["linkedin","instagram"]','scheduled');
+ INSERT INTO public.content_variants(id,content_id,workspace_id,platform,text,status,quality_status)VALUES(v1,c,w,'linkedin','نسخة لينكدإن قديمة','approved','passed'),(v2,c,w,'instagram','نسخة إنستجرام قديمة','approved','passed');
+ INSERT INTO public.publishing_jobs(workspace_id,variant_id,idempotency_key,status)VALUES(w,v1,'editorial-test-1','queued'),(w,v2,'editorial-test-2','queued');
+ INSERT INTO public.calendar_items(workspace_id,content_id,variant_id,platform,scheduled_for,status)VALUES(w,c,v1,'linkedin',now()+interval '1 day','scheduled'),(w,c,v2,'instagram',now()+interval '1 day','scheduled');
+ SELECT jsonb_agg(to_jsonb(v)) INTO snap FROM public.content_variants v WHERE content_id=c;
+ edits:=jsonb_build_array(jsonb_build_object('id',v1,'title','عنوان بالمصري','content','قبل ما تعرض على العميل حل، اسأله إيه اللي محتاجه عشان تقدر تساعده صح.','platform','linkedin','hashtags','[]'::jsonb,'quality',jsonb_build_object('verdict','pass','scores',jsonb_build_object('overall',85),'reasons','[]'::jsonb,'suggested_improvements','[]'::jsonb)));
+ failed:=false;BEGIN PERFORM public.apply_editorial_revision(w,other_u,'test',NULL,NULL,snap,edits,ARRAY[v2],'اكتب بالمصري');EXCEPTION WHEN OTHERS THEN failed:=true;END;IF NOT failed THEN RAISE EXCEPTION 'unauthorized editor';END IF;
+ failed:=false;BEGIN PERFORM public.apply_editorial_revision(w,u,'test',gen_random_uuid(),'lost',snap,edits,ARRAY[v2],'اكتب بالمصري');EXCEPTION WHEN OTHERS THEN failed:=true;END;IF NOT failed THEN RAISE EXCEPTION 'stale worker accepted';END IF;
+ UPDATE public.publishing_jobs SET status='running' WHERE variant_id=v1;
+ failed:=false;BEGIN PERFORM public.apply_editorial_revision(w,u,'test',NULL,NULL,snap,edits,ARRAY[v2],'اكتب بالمصري');EXCEPTION WHEN OTHERS THEN failed:=true;END;IF NOT failed THEN RAISE EXCEPTION 'editing active publish allowed';END IF;
+ UPDATE public.publishing_jobs SET status='queued' WHERE variant_id=v1;
+ r:=public.apply_editorial_revision(w,u,'test',NULL,NULL,snap,edits,ARRAY[v2],'اكتب بالمصري');
+ IF r->>'updated'<>'1' OR r->>'removed'<>'1' THEN RAISE EXCEPTION 'wrong revision result';END IF;
+ IF EXISTS(SELECT 1 FROM public.content_variants WHERE id=v2) OR EXISTS(SELECT 1 FROM public.calendar_items WHERE variant_id=v2) THEN RAISE EXCEPTION 'obsolete Instagram variant remains';END IF;
+ IF EXISTS(SELECT 1 FROM public.publishing_jobs WHERE workspace_id=w AND status<>'cancelled') THEN RAISE EXCEPTION 'old publish job active';END IF;
+ IF (SELECT platforms FROM public.content WHERE id=c)<>'["linkedin"]' THEN RAISE EXCEPTION 'platform list stale';END IF;
+ IF (SELECT status FROM public.content_variants WHERE id=v1)<>'review' THEN RAISE EXCEPTION 'edited content automatically approved';END IF;
+ IF (SELECT value FROM public.brand_memory WHERE workspace_id=w)<>'اكتب بالمصري' THEN RAISE EXCEPTION 'correction not learned';END IF;
+ PERFORM public.apply_editorial_revision(w,u,'test',NULL,NULL,snap,edits,ARRAY[v2],'اكتب بالمصري');
+ IF (SELECT evidence_count FROM public.brand_memory WHERE workspace_id=w)<>1 THEN RAISE EXCEPTION 'retry duplicated learning';END IF;
+ failed:=false;BEGIN PERFORM public.apply_editorial_revision(w,u,'changed',NULL,NULL,snap,edits,ARRAY[v2],'اكتب بالمصري');EXCEPTION WHEN OTHERS THEN failed:=true;END;IF NOT failed THEN RAISE EXCEPTION 'stale snapshot overwrote edits';END IF;
+ UPDATE public.content_variants SET quality_status='pending' WHERE id=v1;
+ failed:=false;BEGIN INSERT INTO public.publishing_jobs(workspace_id,variant_id,idempotency_key,status)VALUES(w,v1,'pending-must-not-publish','running');EXCEPTION WHEN OTHERS THEN failed:=true;END;IF NOT failed THEN RAISE EXCEPTION 'unreviewed text published';END IF;
+END $$;
+ROLLBACK;

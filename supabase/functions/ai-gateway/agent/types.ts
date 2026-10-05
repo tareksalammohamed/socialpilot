@@ -104,7 +104,7 @@ export type ToolDomain = 'content' | 'media' | 'publishing' | 'analytics' | 'bra
 
 export type ToolName =
   // Content
-  | 'create_content' | 'rewrite_content' | 'improve_hook' | 'generate_cta'
+  | 'revise_existing_content' | 'create_content' | 'rewrite_content' | 'improve_hook' | 'generate_cta'
   | 'generate_hashtags' | 'create_content_plan' | 'create_campaign'
   | 'repurpose_content' | 'translate_content' | 'adapt_for_platform'
   | 'suggest_ideas'

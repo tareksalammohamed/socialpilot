@@ -1,3 +1,4 @@
+import { directEditorialPlan } from '../../_shared/editorial-followup.ts';
 import { creationDefaults, directCreationPlan, isSimpleCreation } from '../../_shared/creation-policy.ts';
 import type { DurableSteps } from '../../_shared/durable-steps.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
@@ -171,7 +172,7 @@ export async function runAgentTurn(
     if(error)throw error;
     req=creationDefaults(req,[...new Set((data??[]).map(account=>String(account.platform)))].filter(platform=>['facebook','instagram','linkedin','x','telegram'].includes(platform)));
   }
-  const direct=directCreationPlan(req) as PlannerOutput|null;
+  const direct=(directEditorialPlan(req.message,req.context) ?? directCreationPlan(req)) as PlannerOutput|null;
   const planned = direct ?? (durable ? await durable.run('planner', () => planTurn(supabase, req)) : await planTurn(supabase, req));
 
   if (planned.clarifyingQuestion) {
@@ -193,7 +194,7 @@ export async function runAgentTurn(
   const toolResults: ToolResult[] = [];
   for (const call of safeCalls) {
     const execute = async () => {
-      const result = await executeTool(call, req.context, runLegacy, supabase, req.legacyContext ?? {}, userScope);
+      const result = await executeTool(call, req.context, runLegacy, supabase, req.legacyContext ?? {}, userScope, durable);
       if (durable && !result.ok) throw new Error(result.error ?? 'agent_execution_failed');
       return result;
     };

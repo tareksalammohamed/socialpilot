@@ -6,6 +6,8 @@ export const CHECKPOINT_YIELD = 'background_checkpoint';
  * advances to the next stage, keeping long plans within free runtime limits. */
 export class DurableSteps {
   constructor(private db: SupabaseClient, private taskId: string, private workerId: string, private cache: Record<string, unknown>) {}
+  get taskKey():string { return this.taskId; }
+  get workerKey():string { return this.workerId; }
   async run<T>(key: string, work: () => Promise<T>, yieldAfterSave = true): Promise<T> {
     if (Object.hasOwn(this.cache, key)) return this.cache[key] as T;
     const result = await work();

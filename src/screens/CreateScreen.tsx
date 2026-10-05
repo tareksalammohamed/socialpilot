@@ -120,18 +120,19 @@ export function CreateScreen() {
       return;
     }
 
-    if (task.result_type === 'plan') {
+    if (task.result_type === 'plan' || (payload.revision === true && Array.isArray(payload.slots))) {
       const generatedPlan = payload as unknown as ContentPlan;
       setPlan(generatedPlan);
+      if(payload.revision===true)setPlanSaved(true);
       setChat([
         { role: 'user', text: task.request_text },
-        { role: 'ai', text: summarizeResult(payload, 'create_content_plan') + (typeof payload.creation_assumptions==='string'?`\n${payload.creation_assumptions}`:'') },
+        { role: 'ai', text: payload.revision === true ? String(payload.advice ?? 'تم تعديل المحتوى الموجود.') : summarizeResult(payload, 'create_content_plan') + (typeof payload.creation_assumptions==='string'?`\n${payload.creation_assumptions}`:'') },
       ]);
       setMode('plan');
       return;
     }
 
-    const answer = typeof payload.advice === 'string' ? payload.advice : 'تم';
+    const answer = typeof payload.advice === 'string' ? payload.advice : typeof payload.reply === 'string' ? payload.reply : 'تم';
     setAdvice(answer);
     setChat([
       { role: 'user', text: task.request_text },

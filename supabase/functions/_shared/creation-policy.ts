@@ -11,7 +11,7 @@ type DraftRequest = {
 export function isSimpleCreation(req: DraftRequest): boolean {
   const ctx=req.context;
   if(ctx.currentContentId||ctx.currentVariantId||ctx.selectedCampaignId||ctx.selectedMediaId)return false;
-  if(/انشر|نشرها|تنشر|publish|احذف|حذف|delete|اربط|افصل|connect|cancel|الغ|ألغي|جدول المنشور|schedule the|عدّل|عدل|rewrite|أعد صياغة|مش عايز|مش عاوز|متعملش|لا تنشئ|don't|do not/i.test(req.message))return false;
+  if(/انشر|نشرها|تنشر|publish|احذف|حذف|delete|اربط|افصل|connect|cancel|الغ|ألغي|جدول المنشور|schedule the|عدّل|عدل|خلي|خلّي|خلى|امسح|شيل|راجع|دقق|rewrite|أعد صياغة|مش عايز|مش عاوز|متعملش|لا تنشئ|don't|do not/i.test(req.message))return false;
   if(/ازاي|إزاي|كيف|how to|what is|ما هي|يعني ايه/i.test(req.message))return false;
   return (req.context.currentRoute==='create' || /اشتغل|جهز|جهّز|نفذ|اكتب|أكتب|اعمل|أعمل|أنشئ|انشئ|إنشاء|انشاء|ألّف|الف|تأليف|create|write|draft|build/i.test(req.message))
     && /بوست|منشور|محتوى|حملة|حمله|خطة|خطة|post|content|campaign|plan/i.test(req.message)
