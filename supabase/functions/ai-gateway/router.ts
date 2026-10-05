@@ -334,7 +334,7 @@ export async function routeAndRun(
     loadPolicy(supabase),
   ]);
 
-  const ranked = rankCandidates(candidates.filter(m => !req.excludedModelIds?.includes(m.model_id)), providers, policy, allowPaidFallback, req.preferredCapabilities ?? []).slice(0, MAX_ATTEMPTS);
+  const ranked = rankCandidates(candidates.filter(m => !req.excludedModelIds?.includes(m.model_id) && !(req.excludedModelIds?.length && ['openrouter/free','openrouter/auto'].includes(m.model_id))), providers, policy, allowPaidFallback, req.preferredCapabilities ?? []).slice(0, MAX_ATTEMPTS);
   if (ranked.length === 0) throw new NoModelAvailableError();
 
   const fallbackLog: RunResult['fallbackLog'] = [];
@@ -376,6 +376,7 @@ export async function routeAndRun(
         AbortSignal.timeout(Math.max(1, Math.min(60_000, deadline - Date.now())))
       );
 
+      if (result.resolvedModel && req.excludedModelIds?.includes(result.resolvedModel)) throw new Error('Reviewer resolved to the author model');
       if (req.validate && !req.validate(result.content)) {
         throw new Error('Structured output validation failed');
       }
@@ -389,7 +390,7 @@ export async function routeAndRun(
         tokensIn: result.tokensIn,
         tokensOut: result.tokensOut,
         providerUsed: candidate.provider_key,
-        modelUsed: candidate.model_id,
+        modelUsed: result.resolvedModel ?? candidate.model_id,
         fallbackCount: fallbackLog.length,
         fallbackLog,
         citations: result.citations,

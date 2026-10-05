@@ -37,6 +37,7 @@ export type DiscoveredModel = {
 
 export type ChatResult = {
   content: string;
+  resolvedModel?: string;
   tokensIn: number;
   tokensOut: number;
   // Populated only when webSearchOptions was requested and the provider
@@ -247,6 +248,7 @@ function makeOpenAICompatibleAdapter(defaultBaseUrl: string, opts?: { isOpenRout
 
       return {
         content,
+        resolvedModel: typeof data.model === 'string' ? data.model : undefined,
         tokensIn: data.usage?.prompt_tokens ?? 0,
         tokensOut: data.usage?.completion_tokens ?? 0,
         ...(citations ? { citations } : {}),

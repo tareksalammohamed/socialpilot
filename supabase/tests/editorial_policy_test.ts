@@ -19,3 +19,10 @@ Deno.test('existing campaign platform corrections execute directly without draft
  if(plan?.steps[0].tool!=='revise_existing_content'||plan.steps[0].input.onlyPlatform!=='linkedin'||plan.steps[0].input.batchId!=='existing')throw Error('existing campaign not targeted');
  if(directEditorialPlan('اعمل حملة جديدة', {selectedCampaignId:'existing'}))throw Error('new campaign treated as edit');
 });
+
+Deno.test('unrequested Hebrew and Greek scripts cannot pass an Egyptian editorial review',()=>{
+ for(const word of ['ולמה','γιατί']) {
+  const q=enforceEditorialReview(pass,{title:'إدارة الفريق',content:`الفريق محتاج يفهم الهدف ${word} عشان يعرف المطلوب منه بوضوح.`},'اكتب بالمصري',editorialRules('اكتب بالمصري',''));
+  if(q.verdict==='pass')throw Error('foreign script accepted');
+ }
+});

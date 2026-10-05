@@ -76,3 +76,11 @@ Deno.test('structured OpenRouter calls reserve output space with bounded reasoni
  try{await getAdapter('openrouter')!.chatComplete('test','model','','',true);assert(effort==='low');}
  finally{globalThis.fetch=saved;}
 });
+Deno.test('OpenRouter aliases expose the actual author model for independent review',async()=>{
+ const saved=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({model:'actual/author-model',choices:[{finish_reason:'stop',message:{content:'{"ok":true}'}}],usage:{prompt_tokens:1,completion_tokens:1}});
+ try {
+  const result=await getAdapter('openrouter')!.chatComplete('test','openrouter/free','sys','user',true);
+  assert(result.resolvedModel==='actual/author-model');
+ }finally{globalThis.fetch=saved;}
+});
