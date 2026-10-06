@@ -63,7 +63,7 @@ Deno.test('provider call propagates cancellation so fallback does not hang',asyn
 });
 
 Deno.test('Arabic quality explanations reject foreign-script contamination too',()=>{
- const q={verdict:'pass',scores:{overall:85},reasons:['نص جيد например'],suggested_improvements:[]};
+const q={verdict:'pass',scores:{overall:85},reasons:['نص جيد например'],suggested_improvements:[]};
  assert(!validItems(JSON.stringify({reviews:[q]}),'reviews',1,true,true));
 });
 
@@ -83,4 +83,11 @@ Deno.test('OpenRouter aliases expose the actual author model for independent rev
   const result=await getAdapter('openrouter')!.chatComplete('test','openrouter/free','sys','user',true);
   assert(result.resolvedModel==='actual/author-model');
  }finally{globalThis.fetch=saved;}
+});
+
+Deno.test('Arabic reviewer explanations reject Hebrew, Greek and glued foreign fragments',()=>{
+ for(const reason of ['النص جيد ולמה','النص جيد γιατί','وضوح ويighest']){
+  const q={reviews:[{verdict:'pass',scores:{overall:90},reasons:[reason],suggested_improvements:[]}]};
+  if(validItems(JSON.stringify(q),'reviews',1,true,true))throw Error('broken review explanation accepted');
+ }
 });
