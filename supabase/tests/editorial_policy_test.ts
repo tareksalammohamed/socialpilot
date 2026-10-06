@@ -1,6 +1,15 @@
 import { editorialRules,enforceEditorialReview,enforceEditorialChecklist,EDITORIAL_CHECKS,cleanGeneratedText } from '../functions/_shared/editorial-policy.ts';
 import { directEditorialPlan,exclusivePlatform,isEditorialFollowup } from '../functions/_shared/editorial-followup.ts';
 const pass={verdict:'pass',scores:{overall:100},reasons:[],suggested_improvements:[]};
+Deno.test('default medium posts reject article length while explicit word counts override it',()=>{
+ const content='العميل محتاج يفهم الفكرة عشان يقدر يختار بهدوء. '.repeat(24);
+ const post={title:'فكرة واضحة',content};
+ if(!editorialRules('اكتب بوست','').includes('80 إلى 140'))throw Error('medium default missing');
+ if(enforceEditorialReview(pass,post,'اكتب بوست',editorialRules('اكتب بوست','')).verdict==='pass')throw Error('article length passed');
+ if(enforceEditorialReview(pass,post,'اكتب بوست في 300 كلمة',editorialRules('اكتب بوست في 300 كلمة','')).verdict!=='pass')throw Error('explicit length ignored');
+ if(enforceEditorialReview(pass,post,'اكتب بوست مش طويل',editorialRules('اكتب بوست مش طويل','')).verdict==='pass')throw Error('negative request treated as long override');
+ if(editorialRules('اكتب بوست قصير','').includes('80 إلى 140'))throw Error('explicit short request ignored');
+});
 Deno.test('fabricated experiences and percentages override optimistic model scores',()=>{
  const post={title:'قصة حقيقية',content:'كنت أعمل مع فريق مبيعات وارتفع معدل إغلاقه بنسبة 40%.'};
  const q=enforceEditorialReview(pass,post,'اكتب بوست عن المبيعات',editorialRules('اكتب',''));
