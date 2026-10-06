@@ -92,7 +92,10 @@ Deno.test('a second independent critic can reject an optimistic first review and
   if(p.includes('"reviews"')){
    if(!excluded?.includes('author'))throw Error('author not excluded');
    value={reviews:[{verdict:'pass',checks:{...checks,grammar:!second||rewrites>0},scores:{overall:95},reasons:second&&!rewrites?['الجملة محتاجة ضبط المعنى']:[],suggested_improvements:[]}]};
-  }else if(p.includes('"posts"')){rewrites++;value={posts:[post]};}
+  }else if(p.includes('"posts"')){
+   if(!excluded?.includes('reviewer-a')||!excluded?.includes('reviewer-b'))throw Error('critics can be consumed as rewrite authors');
+   rewrites++;value={posts:[post]};
+  }
   else value={slots:[post]};
   const content=JSON.stringify(value);if(!validate(content))throw Error('invalid output');
   return {content,model:p.includes('"reviews"')?(second?'reviewer-b':'reviewer-a'):'author',provider:'test',tokensIn:1,tokensOut:1,fallbackCount:0,fallbackLog:[]};
