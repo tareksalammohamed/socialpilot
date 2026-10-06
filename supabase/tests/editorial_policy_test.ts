@@ -60,3 +60,13 @@ Deno.test('new sales stories saved for review do not target an old campaign',()=
  }
  if(!isEditorialFollowup('راجع الحملة دي تاني بالمصري'))throw Error('real revision missed');
 });
+
+Deno.test('hypothetical stories cannot launder unsupported insurance coverage',()=>{
+ const rules=editorialRules('اكتب بالمصري','');
+ const unsafe={title:'تخيل الموقف',content:'تخيل عميل محتار، عشان كده المستشار بيشرح إزاي البوليصة دي بتغطي القلق ده تحديدًا.'};
+ if(enforceEditorialReview(pass,unsafe,'اكتب قصة افتراضية بدون وعود تغطية',rules).verdict==='pass')throw Error('unsupported coverage passed');
+ const safe={...unsafe,content:'تخيل عميل محتار، عشان كده المستشار بيراجع معاه الشروط والاستثناءات عشان يفهم إيه المناسب ليه.'};
+ if(enforceEditorialReview(pass,safe,'اكتب قصة افتراضية',rules).verdict!=='pass')throw Error('safe story rejected');
+ const checks=Object.fromEntries(EDITORIAL_CHECKS.map(key=>[key,true]));
+ if(enforceEditorialChecklist({...pass,checks,scores:{overall:79}}).verdict==='pass')throw Error('weak review passed');
+});

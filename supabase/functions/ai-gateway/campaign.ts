@@ -75,18 +75,29 @@ ${JSON.stringify(skeletons)}
 طلب المستخدم الأصلي: ${message}
 سياق العلامة والجمهور الذي يجب أن تقيس عليه الملاءمة: ${brandStr}
 قيّم كل عنصر من عناصر المحتوى التالية وفق: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.
-اكتب الأسباب والمقترحات بالعربية. الدرجات من 0 إلى 100 حصراً، وليس من 0 إلى 10. لا تعط pass إذا overall أقل من 70 أو النص بعيد عن الطلب أو يحتوي ادعاءات غير مدعومة.
+اكتب الأسباب والمقترحات بالعربية. الدرجات من 0 إلى 100 حصراً، وليس من 0 إلى 10. لا تعط pass إذا overall أقل من 85 أو النص بعيد عن الطلب أو يحتوي ادعاءات غير مدعومة.
 أرجع كائن JSON فقط يحتوي reviews بنفس الترتيب والعدد (${batch.length} عنصر):
 {"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "checks": {"spelling": false, "grammar": false, "dialect": false, "request_fit": false, "brand_voice": false, "factual_support": false, "story_integrity": false, "safe_promises": false}, "reasons": [], "suggested_improvements": [] }]}
 كل بند checks فحص إلزامي للنسخة الحالية كلها، بما فيها العنوان والهاشتاجات والدعوة للتفاعل. true فقط إذا تحققت من سلامته؛ false عند الخطأ أو الشك أو عدم وجود سند. factual_support ينجح للنصيحة العامة وللافتراض الواضح، لكنه يفشل لادعاء واقعي أو إحصاء أو تفاصيل منتج لا دليل عليها. story_integrity ينجح لقصة المستخدم الأصلية دون إضافات مختلقة أو قصة افتراضية واضحة؛ لا ترفض Sales Story لمجرد كونها قصة. لا تعتبر الذاكرة أو النص السابق دليلًا على قصة حقيقية. راجع الإملاء والنحو بما يناسب اللهجة المصرية، ولا تستبدل المصري السليم بفصحى متكلفة. عند فشل أي بند اذكر الخطأ المحدد والتصحيح المطلوب في reasons وsuggested_improvements، ولا تعط pass. اكتب شرح المراجعة بعربية سليمة دون كلمات أجنبية عشوائية.
 قيّم أيضًا فهم الطلب وتنوع المحاور؛ لا تقبل حملة تختزل كل المحاور في دمج مصطنع متكرر. تحقق من أي منتج أو تغطية أو علاقة سببية يدعيها النص ولا تمررها بدون سند من السياق. تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
 المحتوى: ${JSON.stringify(batch.map((s) => ({ platform: s.platform, title: s.title, content: s.content, cta: s.cta, hashtags: s.hashtags })))}`;
-        const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 2500, [...authorModels], { phase: 'quality', label: recheck ? 'إعادة مراجعة المنشورات المحسّنة' : 'مراجعة جودة منشورات الحملة', current: offset + 1, total: items.length });
-
-        tokensIn += run.tokensIn; tokensOut += run.tokensOut;
-        fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
-        if (!validItems(run.content, "reviews", batch.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
-        reviews.push(...(parseStructured(run.content) as { reviews: Record<string, unknown>[] }).reviews.map((q,i) => enforceEditorialReview(enforceEditorialChecklist(q), batch[i], message, rules)));
+        const reviewModels:string[]=[];
+        const audits:Record<string,unknown>[]=[];
+        for(let reviewer=0;reviewer<2;reviewer++) {
+          const excluded=[...authorModels,...reviewModels];
+          const critic=reviewer===1 ? '\nأنت المدقق النهائي المستقل. افحص النص من الصفر دون افتراض أن أحدًا راجعه. اقرأ كل جملة بصوت مصري طبيعي: هل الفاعل واضح، والفعل مناسب، والمعنى مفهوم؟ ارفض الجمل المكسرة والانتقال بين المخاطب والغائب بلا سبب، والعبارات التي توحي بتغطية تأمينية غير محددة أو خدمة لم يقدمها المستخدم. اذكر موضع الخطأ واقتراح صياغته. لا تعط pass بأقل من 85 ولا تكافئ النص لمجرد أنه يبدو تسويقيًا.' : '';
+          const run = await runLLM( AGENTS.quality_engine(), critic+qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 2500, excluded, { phase: 'quality', label: reviewer===1 ? 'تدقيق نهائي مستقل للغة والمعنى والادعاءات' : recheck ? 'إعادة مراجعة المنشورات المحسّنة' : 'مراجعة جودة منشورات الحملة', current: offset + 1, total: items.length });
+          if(excluded.includes(run.model))throw new Error('Independent editorial reviewer unavailable');
+          reviewModels.push(run.model);
+          tokensIn += run.tokensIn; tokensOut += run.tokensOut;
+          fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
+          if (!validItems(run.content, "reviews", batch.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
+          const audit=enforceEditorialReview(enforceEditorialChecklist((parseStructured(run.content) as {reviews:Record<string,unknown>[]}).reviews[0]),batch[0],message,rules);
+          audits.push(audit);
+          if(audit.verdict!=='pass')break;
+        }
+        const worst=[...audits].sort((a,b)=>Number(a.verdict==='pass')-Number(b.verdict==='pass')||Number((a.scores as Record<string,number>).overall)-Number((b.scores as Record<string,number>).overall))[0];
+        reviews.push({...worst,reasons:audits.flatMap(q=>q.reasons as string[]),suggested_improvements:audits.flatMap(q=>q.suggested_improvements as string[]),review_models:reviewModels});
         }
         return reviews;
       };
