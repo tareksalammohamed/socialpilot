@@ -3,6 +3,7 @@ import { CheckCircle2, CircleStop, RotateCcw, Clock3, Activity } from 'lucide-re
 import { Button, ErrorBanner, Spinner } from './ui';
 import { cancelTask, restartTask, type DurableTask } from '@/lib/tasks';
 import { useAuth } from '@/lib/auth';
+import { taskErrorMessage } from '../../supabase/functions/_shared/model-failure';
 
 const labels = { queued: 'في الانتظار', running: 'جارٍ التنفيذ', completed: 'اكتملت', failed: 'تحتاج مراجعة', cancelled: 'تم إيقاف الطلب' };
 
@@ -47,7 +48,7 @@ export function TaskProgress({ task, onUpdate }: { task: DurableTask; onUpdate: 
         {task.status === 'queued' && waitSeconds > 0 && <p className="text-xs text-ink-400 mt-1" aria-live="off">إعادة المحاولة متاحة خلال {waitSeconds} ثانية.</p>}
       </div>
     </div>
-    {task.error && <p className="mt-2 text-xs text-warning-300 break-words">{task.error}</p>}
+    {task.error && <p className="mt-2 text-xs text-warning-300 break-words">{task.status === 'running' ? 'سبب تعذر المحاولة السابقة: ' : ''}{taskErrorMessage(task.error)}</p>}
     {own && (stoppable || restartable) && <div className="flex flex-wrap gap-2 mt-4">
       {stoppable && <Button variant="danger" size="sm" disabled={Boolean(busy)} onClick={() => void control('cancel')} className="flex gap-2 items-center">{busy === 'cancel' ? <Spinner size={14} /> : <CircleStop size={14} />}إيقاف الطلب</Button>}
       {restartable && <Button variant="secondary" size="sm" disabled={Boolean(busy)} onClick={() => void control('restart')} className="flex gap-2 items-center">{busy === 'restart' ? <Spinner size={14} /> : <RotateCcw size={14} />}البدء من جديد</Button>}

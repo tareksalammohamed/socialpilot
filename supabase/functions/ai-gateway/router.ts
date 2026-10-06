@@ -1,4 +1,5 @@
 import type { ModelAttempt } from '../_shared/durable-steps.ts';
+import { modelFailureMessage } from '../_shared/model-failure.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getAdapter, ProviderCallError, type ChatResult } from './providers.ts';
@@ -106,7 +107,7 @@ export type RunResult = {
 
 export class NoModelAvailableError extends Error {
   constructor() {
-    super('لا يوجد Model متاح ومناسب لهذه المهمة. تأكد أن Super Admin أضّاف Provider واحد على الأقل وفعّله.');
+    super('لا يوجد نموذج مناسب متاح ضمن إعدادات التكلفة والصلاحيات الحالية؛ قد تكون النماذج مستبعدة بسبب التكلفة أو حد الاستخدام أو شروط المراجعة المستقلة.');
   }
 }
 
@@ -116,11 +117,10 @@ export class NoModelAvailableError extends Error {
 // "no model configured" message.
 export class AllModelsFailedError extends NoModelAvailableError {
   attempts: Array<{ provider: string; model: string; error: string }>;
-  constructor(attempts: Array<{ provider: string; model: string; error: string }>) {
+  constructor(attempts: Array<{ provider: string; model: string; error: string }>, deadlineReached = false) {
     super();
     this.attempts = attempts;
-    const summary = attempts.slice(-3).map((a) => `${a.provider}/${a.model}: ${a.error}`).join(' | ');
-    this.message = `فشلت كل محاولات الـAI Providers المتاحة (${attempts.length}). آخر الأخطاء: ${summary.slice(0, 500)}`;
+    this.message = modelFailureMessage(attempts, deadlineReached);
   }
 }
 
@@ -411,5 +411,5 @@ export async function routeAndRun(
     }
   }
 
-  throw fallbackLog.length > 0 ? new AllModelsFailedError(fallbackLog) : new NoModelAvailableError();
+  throw fallbackLog.length > 0 ? new AllModelsFailedError(fallbackLog, Date.now() >= deadline) : new NoModelAvailableError();
 }
