@@ -14,7 +14,7 @@ export function validItems(content: string, key: string, count: number, quality 
       if (!item || typeof item !== 'object') return false;
       if (quality && arabicOnly) {
         const text = [...(Array.isArray(item.reasons) ? item.reasons : []), ...(Array.isArray(item.suggested_improvements) ? item.suggested_improvements : [])].join(' ');
-        if (/[\p{Script=Han}\p{Script=Cyrillic}\p{Script=Hangul}\p{Script=Devanagari}]/u.test(text) || (text && !/[\p{Script=Arabic}]/u.test(text))) return false;
+        if ([...text].some(char => /\p{Letter}/u.test(char) && !/[\p{Script=Arabic}\p{Script=Latin}]/u.test(char)) || /[\p{Script=Arabic}][A-Za-z]|[A-Za-z][\p{Script=Arabic}]/u.test(text) || (text && !/[\p{Script=Arabic}]/u.test(text))) return false;
       }
       if (quality) return ['pass', 'review', 'fail'].includes(item.verdict)
         && item.scores && typeof item.scores === 'object' && !Array.isArray(item.scores)

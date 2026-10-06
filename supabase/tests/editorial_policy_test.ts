@@ -1,4 +1,4 @@
-import { editorialRules,enforceEditorialReview,cleanGeneratedText } from '../functions/_shared/editorial-policy.ts';
+import { editorialRules,enforceEditorialReview,enforceEditorialChecklist,EDITORIAL_CHECKS,cleanGeneratedText } from '../functions/_shared/editorial-policy.ts';
 import { directEditorialPlan,exclusivePlatform } from '../functions/_shared/editorial-followup.ts';
 const pass={verdict:'pass',scores:{overall:100},reasons:[],suggested_improvements:[]};
 Deno.test('fabricated experiences and percentages override optimistic model scores',()=>{
@@ -25,4 +25,31 @@ Deno.test('unrequested Hebrew and Greek scripts cannot pass an Egyptian editoria
   const q=enforceEditorialReview(pass,{title:'إدارة الفريق',content:`الفريق محتاج يفهم الهدف ${word} عشان يعرف المطلوب منه بوضوح.`},'اكتب بالمصري',editorialRules('اكتب بالمصري',''));
   if(q.verdict==='pass')throw Error('foreign script accepted');
  }
+});
+
+Deno.test('sales stories preserve supplied true stories and clearly hypothetical narratives',()=>{
+ const rules=editorialRules('اكتب Sales Story بالمصري','');
+ if(!rules.includes('حافظ على السرد')||!rules.includes('قصة حقيقية بالتفاصيل'))throw Error('storytelling disabled');
+ const fictional={title:'اسمع قبل ما تعرض',content:'تخيل عميل محتار بين اختيارين، عشان تقدر تساعده اسأله إيه اللي محتاجه الأول. مثال افتراضي: ميزانيته 1000 جنيه مش رقم حقيقي لعميل.'};
+ if(enforceEditorialReview(pass,fictional,'اكتب قصة بيعية بالمصري',rules).verdict!=='pass')throw Error('fictional sales story blocked');
+ const trueStory={title:'اسأل الأول',content:'حصلت معايا مرة إن العميل كان محتاج يفهم الشروط، عشان كده شرحتله الاستثناءات قبل ما ياخد قراره.'};
+ if(enforceEditorialReview(pass,trueStory,trueStory.content,rules).verdict!=='pass')throw Error('supplied story blocked');
+ if(enforceEditorialReview(pass,trueStory,'اكتب قصة بيعية',rules).verdict==='pass')throw Error('fabrication attributed to user');
+ const mixed={...fictional,content:fictional.content+' حققنا زيادة 40% في المبيعات.'};
+ if(enforceEditorialReview(pass,mixed,'اكتب قصة بيعية',rules).verdict==='pass')throw Error('fictional label laundered real claim');
+});
+Deno.test('every editorial check is required even for a perfect overall score',()=>{
+ const checks=Object.fromEntries(EDITORIAL_CHECKS.map(key=>[key,true]));
+ if(enforceEditorialChecklist({...pass,checks}).verdict!=='pass')throw Error('complete audit rejected');
+ for(const key of EDITORIAL_CHECKS){
+  for(const bad of [false,undefined,'true']){
+   const q=enforceEditorialChecklist({...pass,checks:{...checks,[key]:bad}});
+   if(q.verdict==='pass')throw Error('missing or failed audit accepted '+key);
+  }
+ }
+ if(enforceEditorialChecklist(pass).verdict==='pass')throw Error('legacy review accepted without checks');
+});
+Deno.test('hashtags and calls to action are included in the deterministic language gate',()=>{
+ const q=enforceEditorialReview(pass,{title:'اختيار التأمين',content:'اسأل العميل إيه اللي محتاجه عشان تقدر تساعده يفهم الشروط.',hashtags:['#ולמה']},'اكتب بالمصري',editorialRules('اكتب',''));
+ if(q.verdict==='pass')throw Error('unsafe hashtag accepted');
 });

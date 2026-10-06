@@ -1,4 +1,4 @@
-import { editorialRules, enforceEditorialReview, cleanGeneratedText } from '../_shared/editorial-policy.ts';
+import { editorialRules, enforceEditorialReview, enforceEditorialChecklist, cleanGeneratedText } from '../_shared/editorial-policy.ts';
 import type { StepProgress } from '../_shared/durable-steps.ts';
 
 import { parseStructured, validItems } from '../_shared/structured-output.ts';
@@ -77,15 +77,16 @@ ${JSON.stringify(skeletons)}
 قيّم كل عنصر من عناصر المحتوى التالية وفق: Hook, Clarity, Brand Fit, Brand Voice, Platform Fit, Engagement Potential, CTA, Readability, Structure, Originality, Overall Score.
 اكتب الأسباب والمقترحات بالعربية. الدرجات من 0 إلى 100 حصراً، وليس من 0 إلى 10. لا تعط pass إذا overall أقل من 70 أو النص بعيد عن الطلب أو يحتوي ادعاءات غير مدعومة.
 أرجع كائن JSON فقط يحتوي reviews بنفس الترتيب والعدد (${batch.length} عنصر):
-{"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "reasons": [], "suggested_improvements": [] }]}
+{"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "checks": {"spelling": false, "grammar": false, "dialect": false, "request_fit": false, "brand_voice": false, "factual_support": false, "story_integrity": false, "safe_promises": false}, "reasons": [], "suggested_improvements": [] }]}
+كل بند checks فحص إلزامي للنسخة الحالية كلها، بما فيها العنوان والهاشتاجات والدعوة للتفاعل. true فقط إذا تحققت من سلامته؛ false عند الخطأ أو الشك أو عدم وجود سند. factual_support ينجح للنصيحة العامة وللافتراض الواضح، لكنه يفشل لادعاء واقعي أو إحصاء أو تفاصيل منتج لا دليل عليها. story_integrity ينجح لقصة المستخدم الأصلية دون إضافات مختلقة أو قصة افتراضية واضحة؛ لا ترفض Sales Story لمجرد كونها قصة. لا تعتبر الذاكرة أو النص السابق دليلًا على قصة حقيقية. راجع الإملاء والنحو بما يناسب اللهجة المصرية، ولا تستبدل المصري السليم بفصحى متكلفة. عند فشل أي بند اذكر الخطأ المحدد والتصحيح المطلوب في reasons وsuggested_improvements، ولا تعط pass. اكتب شرح المراجعة بعربية سليمة دون كلمات أجنبية عشوائية.
 قيّم أيضًا فهم الطلب وتنوع المحاور؛ لا تقبل حملة تختزل كل المحاور في دمج مصطنع متكرر. تحقق من أي منتج أو تغطية أو علاقة سببية يدعيها النص ولا تمررها بدون سند من السياق. تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
-المحتوى: ${JSON.stringify(batch.map((s) => ({ platform: s.platform, title: s.title, content: s.content })))}`;
+المحتوى: ${JSON.stringify(batch.map((s) => ({ platform: s.platform, title: s.title, content: s.content, cta: s.cta, hashtags: s.hashtags })))}`;
         const run = await runLLM( AGENTS.quality_engine(), qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 2500, [...authorModels], { phase: 'quality', label: recheck ? 'إعادة مراجعة المنشورات المحسّنة' : 'مراجعة جودة منشورات الحملة', current: offset + 1, total: items.length });
 
         tokensIn += run.tokensIn; tokensOut += run.tokensOut;
         fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
         if (!validItems(run.content, "reviews", batch.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
-        reviews.push(...(parseStructured(run.content) as { reviews: Record<string, unknown>[] }).reviews.map((q,i) => enforceEditorialReview(q, batch[i], message, rules)));
+        reviews.push(...(parseStructured(run.content) as { reviews: Record<string, unknown>[] }).reviews.map((q,i) => enforceEditorialReview(enforceEditorialChecklist(q), batch[i], message, rules)));
         }
         return reviews;
       };
@@ -102,7 +103,7 @@ ${JSON.stringify(skeletons)}
 المراجعة هنا لإعادة الكتابة فعليًا: أصلح كل ملاحظة وأرجع النص النهائي، لا تكتب تقريرًا أو خطة. كل عنصر منشور منفصل داخل حملة، لا تحوله لحملة جديدة ولا تضف عناوين اليوم الأول أو وعودًا بمنشورات مستقبلية.
 الطلب الأصلي: ${message}
 أعد كتابة الموضوع نفسه عند الحاجة لتحقيق الطلب، ولا تكتف بتلميع صياغة فكرة غير مناسبة. اكتب بالعربية الطبيعية بلا كلمات أجنبية دخيلة ولا تخترع تغطيات أو منتجات تأمين.
-حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر.
+حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر. إذا طلب قصة بيعية فاحتفظ بالسرد وأصلح صدق نسبتها بدل حذف القصة وتحويلها لنصائح.
 أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${needsWork.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
 العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
         const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget, [], { phase: 'improvement', label: 'تحسين المنشورات وفق ملاحظات الجودة', detail: `تحسين ${needsWork.length} منشورات` });
@@ -121,7 +122,7 @@ ${JSON.stringify(skeletons)}
               title: String(upd.title ?? slots[i].title),
               content: cleanGeneratedText(String(upd.content ?? slots[i].content)),
               hashtags: Array.isArray(upd.hashtags) ? (upd.hashtags as string[]) : slots[i].hashtags,
-              cta: upd.cta ? String(upd.cta) : slots[i].cta,
+              cta: typeof upd.cta === 'string' ? cleanGeneratedText(upd.cta) : slots[i].cta,
             };
           }
         });
