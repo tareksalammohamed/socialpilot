@@ -10,6 +10,7 @@ Deno.test('whole weekly generation preserves real bodies through quality improve
   if(budget<2000)throw new Error('campaign budget too small');
   let response:unknown;
   if(prompt.includes('"reviews"')) {
+   if(budget<6000)throw Error('review reasoning/output budget too small');
    qualityCalls++;
    if(!prompt.includes('لا تطلب منه احتواء بقية أيام الحملة')||excluded?.[0]!=='author'||!prompt.includes('brand')||!prompt.includes('انشئ حمله'))throw new Error('independent review context missing');
    const batch=JSON.parse(prompt.split('المحتوى: ')[1]) as {title:string;content:string}[];
