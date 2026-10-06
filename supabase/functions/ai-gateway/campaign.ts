@@ -62,6 +62,7 @@ ${JSON.stringify(skeletons)}
       let fallbackCount = r.fallbackCount;
       let fallbackLog = r.fallbackLog;
       const authorModels = new Set([r.model]);
+      const editorialReviewerModels = new Set<string>();
 
       const runQuality = async (items: Slot[], recheck = false): Promise<Record<string, unknown>[]> => {
         if (items.length === 0) return [];
@@ -86,9 +87,10 @@ ${JSON.stringify(skeletons)}
         for(let reviewer=0;reviewer<2;reviewer++) {
           const excluded=[...authorModels,...reviewModels];
           const critic=reviewer===1 ? '\nأنت المدقق النهائي المستقل. افحص النص من الصفر دون افتراض أن أحدًا راجعه. اقرأ كل جملة بصوت مصري طبيعي: هل الفاعل واضح، والفعل مناسب، والمعنى مفهوم؟ ارفض الجمل المكسرة والانتقال بين المخاطب والغائب بلا سبب، والعبارات التي توحي بتغطية تأمينية غير محددة أو خدمة لم يقدمها المستخدم. اذكر موضع الخطأ واقتراح صياغته. لا تعط pass بأقل من 85 ولا تكافئ النص لمجرد أنه يبدو تسويقيًا.' : '';
-          const run = await runLLM( AGENTS.quality_engine(), critic+qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 2500, excluded, { phase: 'quality', label: reviewer===1 ? 'تدقيق نهائي مستقل للغة والمعنى والادعاءات' : recheck ? 'إعادة مراجعة المنشورات المحسّنة' : 'مراجعة جودة منشورات الحملة', current: offset + 1, total: items.length });
+          const run = await runLLM( AGENTS.quality_engine(), critic+qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 6000, excluded, { phase: 'quality', label: reviewer===1 ? 'تدقيق نهائي مستقل للغة والمعنى والادعاءات' : recheck ? 'إعادة مراجعة المنشورات المحسّنة' : 'مراجعة جودة منشورات الحملة', current: offset + 1, total: items.length });
           if(excluded.includes(run.model))throw new Error('Independent editorial reviewer unavailable');
           reviewModels.push(run.model);
+          editorialReviewerModels.add(run.model);
           tokensIn += run.tokensIn; tokensOut += run.tokensOut;
           fallbackCount += run.fallbackCount; fallbackLog = [...fallbackLog, ...run.fallbackLog];
           if (!validItems(run.content, "reviews", batch.length, true, arabicOnly)) throw new Error("Incomplete campaign quality review");
@@ -117,7 +119,7 @@ ${JSON.stringify(skeletons)}
 حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر. إذا طلب قصة بيعية فاحتفظ بالسرد وأصلح صدق نسبتها بدل حذف القصة وتحويلها لنصائح.
 أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${needsWork.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
 العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
-        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget, [], { phase: 'improvement', label: 'تحسين المنشورات وفق ملاحظات الجودة', detail: `تحسين ${needsWork.length} منشورات` });
+        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget, [...editorialReviewerModels], { phase: 'improvement', label: 'تحسين المنشورات وفق ملاحظات الجودة', detail: `تحسين ${needsWork.length} منشورات` });
         authorModels.add(improveRun.model);
 
         tokensIn += improveRun.tokensIn; tokensOut += improveRun.tokensOut;
