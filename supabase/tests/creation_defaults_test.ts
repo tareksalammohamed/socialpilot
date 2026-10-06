@@ -59,3 +59,15 @@ Deno.test('the reported Egyptian today command starts today at a future local ho
   equal((request.legacyContext.schedule as {time:string}).time,'16:00');
  }
 });
+
+Deno.test('draft-only wording keeps a new single sales story on the deterministic creation path',()=>{
+ const message='اكتب بوست واحد لينكدإن بالمصري بصيغة Sales Story افتراضية. احفظه مسودة للمراجعة فقط، ولا تنشره.';
+ const request=creationDefaults(req(message),['linkedin'],now);
+ equal(request.legacyContext.post_count,1);
+ equal(request.legacyContext.draft_only,true);
+ equal(directCreationPlan(request)?.steps[0].tool,'create_content');
+ const campaign=creationDefaults(req('اكتب حملة اسبوع احفظها للمراجعة فقط ولا تنشرها'),['linkedin'],now);
+ equal(campaign.legacyContext.draft_only,true);
+ equal(campaign.legacyContext.post_count,7);
+ if(isSimpleCreation(req('اكتب بوست وانشره دلوقتي')))throw Error('actual publication treated as draft');
+});

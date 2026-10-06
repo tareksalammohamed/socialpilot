@@ -1,5 +1,6 @@
 export function isEditorialFollowup(message:string):boolean {
-  return /عد[ّل]|عدل|غي[ّر]|غير|خلي|خلّي|خلى|امسح|احذف|شيل|أعد صياغ|اعد صياغ|صياغه|راجع|دقق|rewrite|revise|remove|only/i.test(message) && !/حملة جديدة|حمله جديده|بوست جديد|منشور جديد/i.test(message);
+  if(/(?:اكتب|أكتب|اعمل|أعمل|أنشئ|انشئ|ألّف|الف)\s+(?:لي\s+|ليا\s+)?(?:بوست|منشور|حملة|حمله|محتوى)|\b(?:write|create|draft)\s+(?:a\s+)?(?:post|campaign)\b/i.test(message))return false;
+  return /(?:^|\s)(?:عد[ّل]|عدل|غي[ّر]|غير|خلي|خلّي|خلى|امسح|احذف|شيل|أعد صياغ|اعد صياغ|صياغه|راجع|دقق|rewrite|revise|remove|only)/i.test(message) && !/حملة جديدة|حمله جديده|بوست جديد|منشور جديد/i.test(message);
 }
 export function exclusivePlatform(message:string):string|undefined {
   if(!/بس|فقط|only/i.test(message))return;

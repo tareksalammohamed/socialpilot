@@ -11,7 +11,8 @@ type DraftRequest = {
 export function isSimpleCreation(req: DraftRequest): boolean {
   const ctx=req.context;
   if(ctx.currentContentId||ctx.currentVariantId||ctx.selectedCampaignId||ctx.selectedMediaId)return false;
-  if(/انشر|نشرها|تنشر|publish|احذف|حذف|delete|اربط|افصل|connect|cancel|الغ|ألغي|جدول المنشور|schedule the|عدّل|عدل|خلي|خلّي|خلى|امسح|شيل|راجع|دقق|rewrite|أعد صياغة|مش عايز|مش عاوز|متعملش|لا تنشئ|don't|do not/i.test(req.message))return false;
+  const actions=req.message.replace(/(?:ولا|لا)\s+تنشر[\p{Script=Arabic}]*|(?:متنشر|ما\s*تنشر)[\p{Script=Arabic}]*|\b(?:don't|do not)\s+publish\b/giu,'');
+  if(/انشر|نشرها|تنشر|publish|احذف|حذف|delete|اربط|افصل|connect|cancel|الغ|ألغي|جدول المنشور|schedule the|عدّل|عدل|خلي|خلّي|خلى|امسح|شيل|(?:^|\s)(?:راجع|دقق)|rewrite|أعد صياغة|مش عايز|مش عاوز|متعملش|لا تنشئ|don't|do not/i.test(actions))return false;
   if(/ازاي|إزاي|كيف|how to|what is|ما هي|يعني ايه/i.test(req.message))return false;
   return (req.context.currentRoute==='create' || /اشتغل|جهز|جهّز|نفذ|اكتب|أكتب|اعمل|أعمل|أنشئ|انشئ|إنشاء|انشاء|ألّف|الف|تأليف|create|write|draft|build/i.test(req.message))
     && /بوست|منشور|محتوى|حملة|حمله|خطة|خطة|post|content|campaign|plan/i.test(req.message)
@@ -30,7 +31,8 @@ export function creationDefaults<T extends DraftRequest>(req:T, connectedPlatfor
   const summary=parsed.intent==='create_content_plan'
     ? `${parsed.postCount} منشورات من ${parsed.startDate} إلى ${parsed.endDate}، الساعة ${parsed.schedule.time} (${timezone})، على ${platforms.join('، ')}. المواعيد قابلة للتعديل.`
     : `مسودة على ${platforms.join('، ')} باستخدام سياق البراند المتاح.`;
-  return {...req,platforms,legacyContext:{...previous,post_count:parsed.postCount,start_date:parsed.startDate,end_date:parsed.endDate,frequency:parsed.frequency,schedule:parsed.schedule,content_goal:parsed.contentGoal??previous.content_goal,content_type:parsed.contentType??previous.content_type,platforms,timezone,creation_intent:parsed.intent,creation_assumptions:summary,creation_defaults_applied:true}};
+  const draftOnly=previous.draft_only===true||/(?:ولا|لا)\s+تنشر|متنشر|ما\s*تنشر|\b(?:don't|do not)\s+publish\b|مسودة\s+فقط|للمراجعة\s+فقط|draft\s+only/iu.test(req.message);
+  return {...req,platforms,legacyContext:{...previous,draft_only:draftOnly,post_count:parsed.postCount,start_date:parsed.startDate,end_date:parsed.endDate,frequency:parsed.frequency,schedule:parsed.schedule,content_goal:parsed.contentGoal??previous.content_goal,content_type:parsed.contentType??previous.content_type,platforms,timezone,creation_intent:parsed.intent,creation_assumptions:summary,creation_defaults_applied:true}};
 }
 
 export function directCreationPlan(req:DraftRequest){

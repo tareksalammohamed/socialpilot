@@ -1,5 +1,5 @@
 import { editorialRules,enforceEditorialReview,enforceEditorialChecklist,EDITORIAL_CHECKS,cleanGeneratedText } from '../functions/_shared/editorial-policy.ts';
-import { directEditorialPlan,exclusivePlatform } from '../functions/_shared/editorial-followup.ts';
+import { directEditorialPlan,exclusivePlatform,isEditorialFollowup } from '../functions/_shared/editorial-followup.ts';
 const pass={verdict:'pass',scores:{overall:100},reasons:[],suggested_improvements:[]};
 Deno.test('fabricated experiences and percentages override optimistic model scores',()=>{
  const post={title:'قصة حقيقية',content:'كنت أعمل مع فريق مبيعات وارتفع معدل إغلاقه بنسبة 40%.'};
@@ -52,4 +52,11 @@ Deno.test('every editorial check is required even for a perfect overall score',(
 Deno.test('hashtags and calls to action are included in the deterministic language gate',()=>{
  const q=enforceEditorialReview(pass,{title:'اختيار التأمين',content:'اسأل العميل إيه اللي محتاجه عشان تقدر تساعده يفهم الشروط.',hashtags:['#ולמה']},'اكتب بالمصري',editorialRules('اكتب',''));
  if(q.verdict==='pass')throw Error('unsafe hashtag accepted');
+});
+
+Deno.test('new sales stories saved for review do not target an old campaign',()=>{
+ for(const message of ['اكتب بوست واحد بصيغة Sales Story افتراضية، احفظه مسودة للمراجعة فقط ولا تنشره','اكتب بوست جديد فيه أرقام غير مختلقة']){
+  if(isEditorialFollowup(message)||directEditorialPlan(message,{selectedCampaignId:'old'}))throw Error('new post targeted old campaign');
+ }
+ if(!isEditorialFollowup('راجع الحملة دي تاني بالمصري'))throw Error('real revision missed');
 });
