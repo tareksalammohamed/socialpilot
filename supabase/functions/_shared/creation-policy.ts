@@ -19,7 +19,7 @@ export function isSimpleCreation(req: DraftRequest): boolean {
     && !/أفكار|افكار|ideas|اقترح|suggest/i.test(req.message);
 }
 
-export function creationDefaults<T extends DraftRequest>(req:T, connectedPlatforms:string[]=[],now=new Date()):T {
+export function creationDefaults<T extends DraftRequest>(req:T, connectedPlatforms:string[]=[],now=new Date()):T & { platforms?: string[] } {
   if(!isSimpleCreation(req))return req;
   const previous=req.legacyContext??{};
   // Freeze dates and choices for durable retries, even after midnight.
