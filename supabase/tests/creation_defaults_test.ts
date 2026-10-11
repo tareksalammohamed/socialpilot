@@ -12,6 +12,14 @@ Deno.test('a week campaign starts without questions and yields seven future Cair
  equal(directCreationPlan(request)?.steps[0].tool,'create_content_plan');
  equal(directCreationPlan(request)?.steps[0].input.platforms,['facebook','linkedin']);
 });
+
+Deno.test('excluded platforms never become creation destinations, including Egyptian aliases',()=>{
+ equal(parseIntent('اكتب بوست على لينكدين بدون انستقرام وفيس بوك',now).platforms,['linkedin']);
+ equal(parseIntent('اكتب بوست على لينكدين بدون انستقرام وفيس بوك',now).excludedPlatforms,['instagram','facebook']);
+ equal(creationDefaults(req('اكتب حملة أسبوع بدون إنستجرام'),['instagram','linkedin','facebook'],now).platforms,['linkedin','facebook']);
+ equal(creationDefaults(req('write a post on linkedin without instagram and facebook'),['instagram'],now).platforms,['linkedin']);
+ equal(parseIntent('اكتب بوست على فيس بوك ولينكدين',now).platforms,['facebook','linkedin']);
+});
 Deno.test('explicit count, date, platform and posting time override defaults',()=>{
  const request=creationDefaults(req('اعمل ٣ بوستات لمدة أسبوع على فيسبوك من 2026-10-10 الساعة ٨ مساء'),['linkedin'],now);
  equal(request.legacyContext.post_count,3);

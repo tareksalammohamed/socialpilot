@@ -89,7 +89,7 @@ type ProviderRow = {
 
 // Statuses that mean "try the next candidate" rather than "stop and report
 // the error" — matches spec's Failover vs Non-Failover error classes.
-const FAILOVER_STATUSES = new Set([400, 401, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504]);
+const FAILOVER_STATUSES = new Set([400, 401, 402, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504]);
 const CIRCUIT_OPEN_COOLDOWN_MS = 5 * 60 * 1000;
 const CONSECUTIVE_FAILURES_TO_OPEN = 5;
 const MAX_ATTEMPTS = 12;
@@ -155,6 +155,8 @@ async function loadCandidates(
   ]);
 
   const providers = new Map<string, ProviderRow>();
+  if (providersRes.error) throw providersRes.error;
+  if (modelsRes.error) throw modelsRes.error;
   for (const p of (providersRes.data ?? []) as ProviderRow[]) {
     if (p.enabled) providers.set(p.provider_key, p);
   }
@@ -338,11 +340,14 @@ export async function routeAndRun(
   if (ranked.length === 0) throw new NoModelAvailableError();
 
   const fallbackLog: RunResult['fallbackLog'] = [];
+  const exhaustedPaidProviders = new Set<string>();
   // Finish within the background worker's 120-second request lease.
   const deadline = Date.now() + 95_000;
 
   for (const candidate of ranked) {
     if (Date.now() >= deadline) break;
+    // Keep this provider's free models and other providers available.
+    if (!candidate.is_free && exhaustedPaidProviders.has(candidate.provider_key)) continue;
     const adapter = getAdapter(candidate.provider_key);
     if (!adapter) {
       fallbackLog.push({ provider: candidate.provider_key, model: candidate.model_id, error: 'no adapter for provider' });
@@ -398,6 +403,7 @@ export async function routeAndRun(
     } catch (err) {
       const latencyMs = Date.now() - started;
       const message = err instanceof Error ? err.message : 'Unknown provider error';
+      if (err instanceof ProviderCallError && err.status === 402) exhaustedPaidProviders.add(candidate.provider_key);
       await recordHealth(supabase, candidate.provider_key, candidate.model_id, false, latencyMs, message);
       fallbackLog.push({ provider: candidate.provider_key, model: candidate.model_id, error: message });
 

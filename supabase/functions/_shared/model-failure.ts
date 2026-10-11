@@ -3,6 +3,7 @@ export type ModelFailure = { provider: string; model: string; error: string };
 function failureReasons(errors: string[]): string {
   const reasons = new Set<string>();
   for (const error of errors) {
+    if (/402|more credits|insufficient.{0,20}(?:credit|balance)|openrouter_credits/i.test(error)) reasons.add('رصيد المزود غير كافٍ لهذه الخطوة (402)');
     if (/429|rate[ -]?limit/i.test(error)) reasons.add('حد الاستخدام مؤقتًا (429)');
     if (/Structured output validation|truncated|JSON parse/i.test(error)) reasons.add('رد وصل لكنه لم يجتز فحص الصيغة أو الجودة');
     if (/timeout|timed out|aborted/i.test(error)) reasons.add('انتهاء مهلة الرد');
@@ -20,6 +21,9 @@ export function modelFailureMessage(attempts: ModelFailure[], deadlineReached = 
 
 /** Old persisted errors contain raw upstream JSON and call models providers. */
 export function taskErrorMessage(error: string): string {
+  if (/"code"\s*:\s*402|requires more credits|openrouter_credits/i.test(error)) {
+    return 'رصيد أحد مزودي الذكاء الاصطناعي غير كافٍ لهذه الخطوة (402). أعد المحاولة بعد تثبيت تحديث البدائل؛ لن يُنشر محتوى لم يجتز المراجعة.';
+  }
   if (!error.startsWith('فشلت كل محاولات الـAI Providers')) return error;
   const count = error.match(/المتاحة \((\d+)\)/)?.[1];
   return `لم تنجح ${count ? `${count} محاولات` : 'المحاولات'} لهذه الخطوة. الأسباب: ${failureReasons([error])}.`;

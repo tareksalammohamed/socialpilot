@@ -1,7 +1,26 @@
-import { validJson, validItems, stableStringify } from '../functions/_shared/structured-output.ts';
+import { validJson, validItems, stableStringify, validPlannerOutput } from '../functions/_shared/structured-output.ts';
 import { getAdapter } from '../functions/ai-gateway/providers.ts';
 function assert(v: unknown) { if (!v) throw new Error('assertion failed'); }
+Deno.test('planner rejects incomplete and invented actions instead of reporting empty success',()=>{
+ const steps=[{label:'كتابة منشور',tool:'create_content',input:{}}];
+ const plan={intentLabel:'create_content',steps};
+ assert(validPlannerOutput(JSON.stringify(plan),['create_content']));
+ assert(validPlannerOutput('```json\n'+JSON.stringify(plan)+'\n```',['create_content']));
+ for(const bad of [{...plan,steps:[]},{...plan,steps:[{...steps[0],tool:'invented_tool'}]},{...plan,steps:[{...steps[0],input:['invalid']}]},{...plan,clarifyingQuestion:'أي منشور؟'}]){
+  assert(!validPlannerOutput(JSON.stringify(bad),['create_content']));
+ }
+ assert(!validPlannerOutput('{"steps":['+JSON.stringify(steps[0])+',', ['create_content']));
+ assert(validPlannerOutput(JSON.stringify({intentLabel:'other',clarifyingQuestion:'أي منشور؟',steps:[]}),['create_content']));
+});
 const post={title:'كيف تختار التأمين',content:'اختيار التأمين يبدأ بفهم احتياجاتك ومراجعة الشروط والاستثناءات قبل التوقيع.'};
+Deno.test('malformed CTA, hashtags and improvement objects trigger fallback before persistence',()=>{
+ for(const metadata of [{cta:{text:'تواصل'}},{hashtags:'تأمين'},{hashtags:[123]}]) {
+  assert(!validItems(JSON.stringify({slots:[{...post,...metadata}]}),'slots',1));
+ }
+ assert(validItems(JSON.stringify({slots:[{...post,cta:'',hashtags:[]}]}),'slots',1));
+ assert(validItems(JSON.stringify({slots:[{...post,cta:null,hashtags:null}]}),'slots',1));
+ assert(!validItems(JSON.stringify({reviews:[{verdict:'review',scores:{overall:60},reasons:[],suggested_improvements:[{text:'أصلح النص'}]}]}),'reviews',1,true));
+});
 Deno.test('truncated campaign cannot be salvaged from its complete inner slots',()=>{
  assert(!validJson('{"theme":"test","slots":['+JSON.stringify(post)+',{"content":"قطع'));
  assert(!validItems(JSON.stringify({slots:[post]}),'slots',7));

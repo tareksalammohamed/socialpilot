@@ -4,6 +4,7 @@ export type ParsedIntent = {
   intent: AiIntent;
   postCount: number;
   platforms: string[];
+  excludedPlatforms: string[];
   startDate: string | null;
   endDate: string | null;
   frequency: 'once' | 'daily' | 'weekly' | 'custom';
@@ -16,11 +17,34 @@ export const DEFAULT_SCHEDULE_HOUR = 9; // single source of truth for the defaul
 
 const PLATFORM_ALIASES: Record<string, string> = {
   facebook: 'facebook', فيسبوك: 'facebook',
+  'فيس بوك': 'facebook',
   instagram: 'instagram', انستجرام: 'instagram', إنستجرام: 'instagram',
+  انستقرام: 'instagram', إنستقرام: 'instagram', انستغرام: 'instagram',
   linkedin: 'linkedin', 'لينكد ان': 'linkedin', 'لينكد إن': 'linkedin', لينكدإن: 'linkedin', لينكدان: 'linkedin', لينكد_إن: 'linkedin',
+  لينكدين: 'linkedin',
   x: 'x', تويتر: 'x', twitter: 'x',
   telegram: 'telegram', تيليجرام: 'telegram',
 };
+
+/** Negated platform mentions are constraints, never requested destinations. */
+export function platformSelection(message: string): { platforms: string[]; excludedPlatforms: string[] } {
+  const text = message.toLowerCase();
+  const mentions = Object.entries(PLATFORM_ALIASES).flatMap(([alias, platform]) => {
+    const pattern = /^[a-z]+$/.test(alias) ? `\\b${alias}\\b` : alias;
+    return [...text.matchAll(new RegExp(pattern, 'gu'))].map(match => ({ platform, start: match.index!, end: match.index! + match[0].length }));
+  }).sort((a,b) => a.start - b.start);
+  const included = new Set<string>(), excluded = new Set<string>();
+  const negative = /(?:بدون|من غير|باستثناء|عدا|إلا|الا|مش عايز|مش عاوز|مش على|امسح|احذف|شيل|without|except|exclude|excluding|not on|no|remove)\s*(?:نسخ[ةه]\s+|على\s+|الـ?\s*)?$/iu;
+  let last: typeof mentions[number] | undefined;
+  for (const mention of mentions) {
+    const before = text.slice(Math.max(0, mention.start - 60), mention.start);
+    const linkedExclusion = last && excluded.has(last.platform) && /^\s*(?:و|and|,|،|&|or|أو|او)\s*$/iu.test(text.slice(last.end, mention.start));
+    if (negative.test(before) || linkedExclusion) excluded.add(mention.platform);
+    else included.add(mention.platform);
+    last = mention;
+  }
+  return { platforms: [...included].filter(p => !excluded.has(p)), excludedPlatforms: [...excluded] };
+}
 
 // Spelled-out Arabic numbers commonly used in requests ("خمس بوستات", "عشرة بوستات")
 const ARABIC_NUMBER_WORDS: Record<string, number> = {
@@ -99,10 +123,7 @@ function spreadDates(start: Date, count: number, spanDays: number): string[] {
 export function parseIntent(message: string, now = new Date(), timezone = 'Africa/Cairo'): ParsedIntent {
   const text = message.toLowerCase().replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
 
-  const platforms = Object.entries(PLATFORM_ALIASES)
-    .filter(([alias]) => /^[a-z]+$/.test(alias) ? new RegExp(`\\b${alias}\\b`).test(text) : text.includes(alias))
-    .map(([, platform]) => platform)
-    .filter((value, index, values) => values.indexOf(value) === index);
+  const { platforms, excludedPlatforms } = platformSelection(text);
 
   const daily = /كل يوم|يوميًا|يوميا|daily/.test(text);
   const week = /أسبوع|اسبوع|week/.test(text);
@@ -177,6 +198,7 @@ export function parseIntent(message: string, now = new Date(), timezone = 'Afric
     intent,
     postCount: intent === 'create_content_plan' ? count : 1,
     platforms,
+    excludedPlatforms,
     startDate: dates[0] ?? null,
     endDate,
     frequency: daily ? 'daily' : durationMatch || week || month ? 'custom' : 'once',

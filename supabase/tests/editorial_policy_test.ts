@@ -19,6 +19,8 @@ Deno.test('fabricated experiences and percentages override optimistic model scor
 Deno.test('Egyptian preference is explicit and user language overrides defaults',()=>{
  if(!editorialRules('اكتب بوست','').includes('اكتب باللهجة المصرية'))throw Error('Egyptian default missing');
  if(editorialRules('اكتب بالفصحى','').includes('اكتب باللهجة المصرية'))throw Error('explicit language ignored');
+ if(editorialRules('اكتب بالإنجليزية','').includes('اكتب باللهجة المصرية'))throw Error('formal English alias ignored');
+ if(!editorialRules('اكتب بالمصري مش بالإنجليزي','').includes('اكتب باللهجة المصرية'))throw Error('negated English selected');
  if(cleanGeneratedText('أول سطر\\nتاني سطر')!=='أول سطر\nتاني سطر')throw Error('escaped newline leaked');
 });
 Deno.test('existing campaign platform corrections execute directly without drafting or questions',()=>{

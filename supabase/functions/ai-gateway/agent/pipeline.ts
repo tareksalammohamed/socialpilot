@@ -1,4 +1,5 @@
 import { directEditorialPlan } from '../../_shared/editorial-followup.ts';
+import { parseStructured, validPlannerOutput } from '../../_shared/structured-output.ts';
 import { creationDefaults, directCreationPlan, isSimpleCreation } from '../../_shared/creation-policy.ts';
 import type { DurableSteps } from '../../_shared/durable-steps.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
@@ -62,28 +63,9 @@ function plannerUserPrompt(req: AgentRequest): string {
   return `طلب المستخدم:\n"${req.message}"\n\nسياق الجلسة الحالية:\n${contextLines.join('\n') || 'لا يوجد سياق محدد'}\n\nآخر إجراءات المستخدم:\n${recent || 'لا يوجد'}`;
 }
 
-function looksLikeJsonObject(content: string): boolean {
-  const trimmed = content.trim();
-  if (!trimmed) return false;
-  try {
-    JSON.parse(trimmed);
-    return true;
-  } catch {
-    return /\{[\s\S]*\}/.test(trimmed);
-  }
-}
-
 function parsePlannerOutput(raw: string): PlannerOutput {
-  try {
-    return JSON.parse(raw) as PlannerOutput;
-  } catch {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) {
-      try { return JSON.parse(match[0]) as PlannerOutput; } catch { /* fall through */ }
-    }
-    // Fail safe: treat as a single general_advice step rather than crash the turn.
-    return { intentLabel: 'other', planSummary: raw, steps: [] };
-  }
+  if (!validPlannerOutput(raw, Object.keys(TOOL_REGISTRY))) throw new Error('Invalid agent execution plan');
+  return parseStructured(raw) as PlannerOutput;
 }
 
 async function planTurn(supabase: SupabaseClient, req: AgentRequest): Promise<PlannerOutput> {
@@ -96,7 +78,7 @@ async function planTurn(supabase: SupabaseClient, req: AgentRequest): Promise<Pl
     systemPrompt: plannerSystemPrompt(),
     userPrompt: plannerUserPrompt(req),
     jsonMode: true,
-    validate: looksLikeJsonObject,
+    validate: content => validPlannerOutput(content, Object.keys(TOOL_REGISTRY)),
   });
   return parsePlannerOutput(result.content);
 }
@@ -112,7 +94,7 @@ function buildPlan(output: PlannerOutput): { plan: AgentPlan; toolCalls: ToolCal
   // of surfacing them as "Unknown tool" failures or, worse, as pending
   // approvals the user can never complete.
   const rawSteps = (Array.isArray(output.steps) ? output.steps : [])
-    .filter((s) => s && typeof s.tool === 'string' && s.tool in TOOL_REGISTRY);
+    .filter((s) => s && typeof s.tool === 'string' && Object.hasOwn(TOOL_REGISTRY, s.tool));
   const steps: PlanStep[] = rawSteps.map((s, i) => ({
     id: `step-${i + 1}`,
     label: s.label,

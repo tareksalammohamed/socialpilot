@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
+import { buildPostText } from '../_shared/published-text.ts';
 
 // ---------------------------------------------------------------------------
 // scheduler-tick
@@ -96,15 +97,6 @@ type CalendarItem = {
   status: string;
 };
 
-function buildPostText(variant: Variant, maxLen?: number): string {
-  const parts = [variant.text.trim()];
-  if (variant.cta && variant.cta.trim()) parts.push(variant.cta.trim());
-  if (variant.hashtags?.length) parts.push(variant.hashtags.join(' '));
-  let text = parts.filter(Boolean).join('\n\n');
-  if (maxLen && text.length > maxLen) text = text.slice(0, maxLen - 1) + '…';
-  return text;
-}
-
 // ---------------------------------------------------------------------------
 // Media resolution. The UI/Agent attach media through content_variants.media_id
 // (media table + public `media` bucket, migration 0033). Publishing used to
@@ -166,10 +158,10 @@ async function publishToTelegram(variant: Variant, account: Record<string, unkno
   const chatId = metadata.chat_id ?? account.handle;
   if (!chatId) throw new Error('تعذّر تحديد قناة تيليجرام المربوطة');
 
-  const text = buildPostText(variant, 4096);
+  const text = buildPostText(variant, media ? 1024 : 4096);
   const method = media ? (media.kind === 'video' ? 'sendVideo' : 'sendPhoto') : 'sendMessage';
   const params: Record<string, string> = media
-    ? { chat_id: String(chatId), [media.kind === 'video' ? 'video' : 'photo']: media.url, caption: text.slice(0, 1024) }
+    ? { chat_id: String(chatId), [media.kind === 'video' ? 'video' : 'photo']: media.url, caption: text }
     : { chat_id: String(chatId), text };
 
   const res = await fetchWithRetry(`https://api.telegram.org/bot${botToken}/${method}`, {
