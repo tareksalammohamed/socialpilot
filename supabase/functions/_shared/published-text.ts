@@ -1,4 +1,4 @@
-type PostText = { text: string; cta?: string | null; hashtags?: string[] };
+type PostText = { text: string; cta?: string | null; hashtags?: readonly string[] };
 
 /** Publish the reviewed copy exactly; never silently cut its meaning or CTA. */
 export function buildPostText(variant: PostText, maxLen?: number): string {
