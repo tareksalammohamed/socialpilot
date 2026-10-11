@@ -6,6 +6,20 @@ export function parseStructured(content: string): unknown {
 export function validJson(content: string): boolean {
   try { parseStructured(content); return true; } catch { return false; }
 }
+export function validPlannerOutput(content: string, tools: readonly string[]): boolean {
+  try {
+    const plan = parseStructured(content) as Record<string, unknown>;
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan) || typeof plan.intentLabel !== 'string') return false;
+    if (typeof plan.clarifyingQuestion === 'string' && plan.clarifyingQuestion.trim()) {
+      return plan.steps == null || (Array.isArray(plan.steps) && plan.steps.length === 0);
+    }
+    return Array.isArray(plan.steps) && plan.steps.length > 0 && plan.steps.length <= 12 && plan.steps.every(step =>
+      step && typeof step === 'object' && !Array.isArray(step)
+      && typeof step.label === 'string' && step.label.trim()
+      && tools.includes(step.tool)
+      && (step.input == null || (typeof step.input === 'object' && !Array.isArray(step.input))));
+  } catch { return false; }
+}
 export function validItems(content: string, key: string, count: number, quality = false, arabicOnly = false): boolean {
   try {
     const obj = parseStructured(content) as Record<string, unknown>;
@@ -23,14 +37,16 @@ export function validItems(content: string, key: string, count: number, quality 
         && typeof item.scores.overall === 'number'
         && (item.verdict !== 'pass' || item.scores.overall >= 70)
         && Array.isArray(item.reasons) && item.reasons.every((v: unknown) => typeof v === 'string')
-        && Array.isArray(item.suggested_improvements);
+        && Array.isArray(item.suggested_improvements) && item.suggested_improvements.every((v: unknown) => typeof v === 'string');
       if (arabicOnly) {
         const text = [item.title, item.content, item.goal, item.cta, ...(Array.isArray(item.hashtags) ? item.hashtags : [])].join(' ');
         if (/[\p{Script=Han}\p{Script=Cyrillic}\p{Script=Hangul}\p{Script=Devanagari}]/u.test(text) || !/[\p{Script=Arabic}]/u.test(String(item.content))) return false;
       }
       return typeof item.title === 'string' && item.title.trim().length > 0
         && typeof item.content === 'string' && item.content.trim().length >= 30
-        && item.content.trim() !== item.title.trim();
+        && item.content.trim() !== item.title.trim()
+        && (item.hashtags == null || (Array.isArray(item.hashtags) && item.hashtags.every((v: unknown) => typeof v === 'string')))
+        && (item.cta == null || typeof item.cta === 'string');
     });
   } catch { return false; }
 }

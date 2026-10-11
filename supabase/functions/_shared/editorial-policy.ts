@@ -3,8 +3,13 @@ function explicitPostLength(message: string): boolean {
   return /(?:بوست|منشور|نص|قصة|قصه).{0,24}(?:طويل[ةه]?|قصير[ةه]?|مختصر|مفصل)|(?:اكتب|اعمل|اعملي|اعمللي|أنشئ|انشئ)\s+(?:لي\s+)?مقال(?:ة)?|(?:خليه|خليها|خلّيه|اجعله)\s+(?:أطول|اطول|أقصر|اقصر|مختصر)|[0-9٠-٩]+\s*(?:كلمة|كلمه|words)|(?:long|short)\s+post|(?:detailed\s+article)/iu.test(request);
 }
 
+export function requestedNonArabic(message: string): boolean {
+  const request = message.replace(/(?:مش|موش|بدون|لا|not|no)\s+(?:بال?|in\s+)?(?:english|french|[إا]نجليز[\p{Script=Arabic}]*|فرنس[\p{Script=Arabic}]*)/giu, '');
+  return /\b(?:english|french)\b|[إا]نجليز|فرنس/iu.test(request);
+}
+
 export function editorialRules(message: string, memory: string): string {
-  const otherLanguage = /english|french|بالإنجليزي|بالانجليزي|بالفصحى|فصحى|بالفرنسي/i.test(message);
+  const otherLanguage = requestedNonArabic(message) || /بالفصحى|فصحى/i.test(message);
   return `قواعد التحرير الملزمة:
 ${otherLanguage ? 'التزم باللغة أو اللهجة التي طلبها المستخدم صراحة.' : 'اكتب باللهجة المصرية المهنية الطبيعية: مش، إزاي، عشان، ده، دي، خلّي. تجنب الفصحى المتكلفة والخليجي مثل وش، مو، هذي. لا تحشر كلمات مصرية بلا داعي.'}
 تصحيح المستخدم الحالي مقدم على تفضيلات الذاكرة القديمة. استخدم العبارات المفضلة طبيعيًا، وتجنب الممنوعة.

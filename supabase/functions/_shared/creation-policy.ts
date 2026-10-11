@@ -19,7 +19,7 @@ export function isSimpleCreation(req: DraftRequest): boolean {
     && !/أفكار|افكار|ideas|اقترح|suggest/i.test(req.message);
 }
 
-export function creationDefaults<T extends DraftRequest>(req:T, connectedPlatforms:string[]=[],now=new Date()):T {
+export function creationDefaults<T extends DraftRequest>(req:T, connectedPlatforms:string[]=[],now=new Date()):T & { platforms?: string[] } {
   if(!isSimpleCreation(req))return req;
   const previous=req.legacyContext??{};
   // Freeze dates and choices for durable retries, even after midnight.
@@ -27,7 +27,13 @@ export function creationDefaults<T extends DraftRequest>(req:T, connectedPlatfor
   const timezone=typeof previous.timezone==='string'?previous.timezone:'Africa/Cairo';
   const parsed=parseIntent(req.message,now,timezone);
   if(!['create_content','create_content_plan'].includes(parsed.intent))return req;
-  const platforms=parsed.platforms.length?parsed.platforms:req.platforms?.length?req.platforms:req.context.selectedPlatform?[req.context.selectedPlatform]:connectedPlatforms.length?connectedPlatforms:['facebook'];
+  const choices=parsed.platforms.length?parsed.platforms:req.platforms?.length?req.platforms:req.context.selectedPlatform?[req.context.selectedPlatform]:connectedPlatforms.length?connectedPlatforms:['facebook'];
+  const platforms=[...new Set(choices)].filter(platform=>!parsed.excludedPlatforms.includes(platform));
+  if(!platforms.length) {
+    const fallback=['facebook','linkedin','instagram','x','telegram'].find(platform=>!parsed.excludedPlatforms.includes(platform));
+    if(!fallback)throw new Error('تم استبعاد كل المنصات؛ حدد منصة واحدة للمسودة.');
+    platforms.push(fallback);
+  }
   const summary=parsed.intent==='create_content_plan'
     ? `${parsed.postCount} منشورات من ${parsed.startDate} إلى ${parsed.endDate}، الساعة ${parsed.schedule.time} (${timezone})، على ${platforms.join('، ')}. المواعيد قابلة للتعديل.`
     : `مسودة على ${platforms.join('، ')} باستخدام سياق البراند المتاح.`;

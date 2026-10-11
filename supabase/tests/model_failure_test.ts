@@ -1,5 +1,9 @@
 import { modelFailureMessage, taskErrorMessage } from '../functions/_shared/model-failure.ts';
 function assert(value: unknown) { if (!value) throw new Error('assertion failed'); }
+Deno.test('persisted credit errors have a readable cause without upstream billing JSON',()=>{
+ const message=taskErrorMessage('{"error":{"message":"This request requires more credits","code":402,"metadata":{"limit_source":"openrouter_credits"}}}');
+ assert(message.includes('رصيد')&&message.includes('402')&&!message.includes('metadata'));
+});
 Deno.test('model attempts do not claim multiple providers or absent responses', () => {
   const message = modelFailureMessage([
     { provider: 'openrouter', model: 'a', error: 'Structured output validation failed' },

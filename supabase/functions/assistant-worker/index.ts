@@ -123,7 +123,7 @@ async function execute(task: Task, worker: string): Promise<void> {
     const yielded = message.includes('background_checkpoint');
     const retry = yielded || (!['publish', 'approved'].includes(task.task_kind) && task.attempt_count < task.max_attempts && !message.includes('workspace_access_denied'));
     await db.from('assistant_tasks').update({ status: retry ? 'queued' : 'failed', error: yielded ? null : message, ...(yielded ? { attempt_count: task.attempt_count - 1 } : {}), locked_at: null, worker_id: null,
-      available_at: new Date(Date.now() + task.attempt_count * 60_000).toISOString() }).eq('id', task.id).eq('worker_id', worker).eq('status', 'running');
+      available_at: new Date(Date.now() + (yielded ? 0 : task.attempt_count * 60_000)).toISOString() }).eq('id', task.id).eq('worker_id', worker).eq('status', 'running');
   }
 }
 

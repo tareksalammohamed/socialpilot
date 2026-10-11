@@ -2,6 +2,55 @@ import { generateCampaign, type CampaignLLM } from '../functions/ai-gateway/camp
 const checks={spelling:true,grammar:true,dialect:true,request_fit:true,brand_voice:true,factual_support:true,story_integrity:true,safe_promises:true};
 const agents={strategy_planner:()=>'',content_creator:()=>'',quality_engine:()=>''};
 const dates=Array.from({length:7},(_,i)=>`2026-10-${String(i+4).padStart(2,'0')}`);
+Deno.test('monthly generation and repair use bounded batches and preserve every date and metadata',async()=>{
+ const generatedCounts:number[]=[],repairedCounts:number[]=[];
+ const month=Array.from({length:30},(_,i)=>`2026-11-${String(i+1).padStart(2,'0')}`);
+ const corrected=new Set<string>();
+ const llm:CampaignLLM=async(_s,p,_j,validate,budget,excluded)=>{
+  let value:unknown;
+  if(p.includes('"reviews"')){
+   const [post]=JSON.parse(p.split('المحتوى: ')[1]);
+   value={reviews:[{verdict:corrected.has(post.title)?'pass':'review',checks,scores:{overall:corrected.has(post.title)?90:60},reasons:['راجع النص'],suggested_improvements:[]}]};
+  }else if(p.includes('"posts"')){
+   const work=JSON.parse(p.split('العناصر وملاحظاتها: ')[1]);
+   repairedCounts.push(work.length);
+   value={posts:work.map((s:{title:string;content:string;cta:string;hashtags:string[]})=>{
+    if(s.cta!=='اسألنا' || s.hashtags[0]!=='#تأمين')throw Error('metadata omitted from rewrite');
+    corrected.add(s.title);return {...s,content:s.content+' اسأل عن الشروط.'};
+   })};
+  }else{
+   const skeletons=JSON.parse(p.split('فترة):\n')[1].split('\nعند')[0]);
+   generatedCounts.push(skeletons.length);
+   value={theme:'حملة شهرية',slots:skeletons.map((s:{date:string})=>({title:s.date,content:`العميل محتاج يفهم اختياراته عشان يقدر يسأل الأسئلة المناسبة قبل القرار. موعد الفكرة ${s.date}`,cta:'اسألنا',hashtags:['#تأمين']}))};
+  }
+  const content=JSON.stringify(value);if(!validate(content)||budget>8000)throw Error('invalid batch');
+  return {content,model:p.includes('"reviews"')?(excluded?.includes('reviewer-a')?'reviewer-b':'reviewer-a'):'author',provider:'test',tokensIn:1,tokensOut:1,fallbackCount:0,fallbackLog:[]};
+ };
+ const out=await generateCampaign('اعمل حملة شهر',['facebook'],{post_count:30,schedule:{dates:month}},'','',llm,agents);
+ if(generatedCounts.join(',')!=='8,8,8,6'||repairedCounts.join(',')!=='8,8,8,6')throw Error('campaign not batched');
+ if(out.result.slots.length!==30||out.result.slots.some((s,i)=>s.date!==month[i]||s.quality.verdict!=='pass'||s.cta!=='اسألنا'))throw Error('month incomplete');
+ if(out.tokensIn!==98||out.tokensOut!==98)throw Error('usage from batches lost');
+});
+
+Deno.test('English requests retain their requested language through real improvement and independent review',async()=>{
+ let repaired=false;
+ const llm:CampaignLLM=async(_s,p,_j,validate,_budget,excluded)=>{
+  let value:unknown;
+  const post={title:'Ask first',content:'Ask your client what matters most before recommending a suitable product. Explain the available terms clearly.',cta:'Ask a question',hashtags:['#Insurance']};
+  if(p.includes('"reviews"'))value={reviews:[{verdict:repaired?'pass':'review',checks,scores:{overall:repaired?90:60},reasons:[],suggested_improvements:[]}]};
+  else if(p.includes('"posts"')){
+   if(p.includes('اكتب بالعربية الطبيعية')||!p.includes('اللغة التي طلبها المستخدم'))throw Error('rewrite forced Arabic');
+   repaired=true;value={posts:[post]};
+  }else {
+   if(p.includes('نص عربي كامل')||!p.includes('اللغة التي طلبها المستخدم'))throw Error('generation forced Arabic');
+   value={slots:[post]};
+  }
+  const content=JSON.stringify(value);if(!validate(content))throw Error('English rejected');
+  return {content,model:p.includes('"reviews"')?(excluded?.includes('reviewer-a')?'reviewer-b':'reviewer-a'):'author',provider:'test',tokensIn:1,tokensOut:1,fallbackCount:0,fallbackLog:[]};
+ };
+ const out=await generateCampaign('اكتب بوست بالإنجليزية',['linkedin'],{post_count:1},'','',llm,agents);
+ if(!repaired||out.result.slots[0].quality.verdict!=='pass')throw Error('English repair failed');
+});
 Deno.test('whole weekly generation preserves real bodies through quality improvement and recheck',async()=>{
  let stage=0, qualityCalls=0;
  const q=(verdict:string)=>({verdict,checks,scores:{overall:verdict==='pass'?85:60},reasons:[],suggested_improvements:[]});

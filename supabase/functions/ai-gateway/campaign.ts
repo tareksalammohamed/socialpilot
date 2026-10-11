@@ -1,4 +1,4 @@
-import { editorialRules, enforceEditorialReview, enforceEditorialChecklist, cleanGeneratedText } from '../_shared/editorial-policy.ts';
+import { editorialRules, enforceEditorialReview, enforceEditorialChecklist, cleanGeneratedText, requestedNonArabic } from '../_shared/editorial-policy.ts';
 import type { StepProgress } from '../_shared/durable-steps.ts';
 
 import { parseStructured, validItems } from '../_shared/structured-output.ts';
@@ -18,13 +18,16 @@ export async function generateCampaign(message:string, platforms:string[], runti
       const rules = editorialRules(message, memStr);
       const skeletons = slotDates.map((date, i) => ({ date, platform: existing?.[i]?.platform ? String(existing[i].platform) : plats[i % plats.length], ...(topics.length > 1 ? { focus: topics[i % topics.length] } : {}) }));
 
-      const arabicOnly = /[\p{Script=Arabic}]/u.test(message) && !/english|french|إنجليزي|انجليزي|بالإنجليزية|بالانجليزية|فرنسي/i.test(message);
+      const arabicOnly = !requestedNonArabic(message);
+      const languageInstruction = arabicOnly ? 'اكتب بالعربية المطلوبة، وباللهجة المصرية المهنية افتراضيًا.' : 'اكتب النص باللغة التي طلبها المستخدم صراحة، بما فيها العنوان والدعوة للتفاعل والهاشتاجات.';
       const sys = AGENTS.strategy_planner(brandStr, memStr);
-      const prompt = `${rules}
-${existing ? `عدّل هذه النصوص الموجودة حسب طلب المستخدم، حافظ على موضوع كل نص وهويته، ولا تنشئ حملة مختلفة: ${JSON.stringify(existing)}` : ""}
+      const generationPrompt = (batch: typeof skeletons, offset: number) => `${rules}
+${existing ? `عدّل هذه النصوص الموجودة حسب طلب المستخدم، حافظ على موضوع كل نص وهويته، ولا تنشئ حملة مختلفة: ${JSON.stringify(existing.slice(offset,offset+batch.length))}` : ""}
 الطلب: "${message}"
-اكتب محتوى فعلي كامل (وليس عنوانًا فقط) لكل فترة من الفترات التالية، بنفس الترتيب والعدد بالضبط (${skeletons.length} فترة):
-${JSON.stringify(skeletons)}
+هذه الدفعة من المنشور ${offset+1} إلى ${offset+batch.length} ضمن ${skeletons.length} منشورًا في الحملة. أرجع هذه الدفعة فقط.
+خريطة المحاور والمنصات للحملة كاملة للاطلاع: ${JSON.stringify(skeletons)}
+اكتب محتوى فعلي كامل (وليس عنوانًا فقط) لكل فترة من الفترات التالية، بنفس الترتيب والعدد بالضبط (${batch.length} فترة):
+${JSON.stringify(batch)}
 عند وجود focus في الفترة، اجعله محور هذا المنشور تحديدًا؛ لا تدمج باقي المحاور فيه قسرًا.
 بيانات الأداء السابقة التي يجب أن تؤثر على اختيار المحاور: ${JSON.stringify(runtimeContext.performance ?? {})}
 هدف المحتوى (إن وُجد): ${runtimeContext.content_goal ?? 'غير محدد'}
@@ -35,12 +38,23 @@ ${JSON.stringify(skeletons)}
     { "date": "YYYY-MM-DD", "platform": "...", "title": "...", "content": "النص الكامل للمنشور", "goal": "...", "hashtags": ["..."], "cta": "..." }
   ]
 }
-كل "content" نص عربي كامل أصلي مخصص لمنصته، ولا تكرر نفس النص بين الفترات. افهم الموضوع في سياق خبرة صاحب العلامة وجمهوره. إذا طلب أكثر من محور، وزع المنشورات بينها ولا تختزلها كلها في دمج مصطنع واحد. عند ذكر التأمين والإدارة استخدم سياق عمل صاحب العلامة في المبيعات وقيادة الفرق؛ لا تفترض أنه يقصد تأمين الشركات أو إدارة حوادث العمل. لا تعد برابط أو خدمة غير متاحة في سياق العلامة. لا تخلط العربية بلغات غير مطلوبة. لا تخترع أرقامًا أو دراسات أو قصص عملاء أو وعود تغطية أو عوائد. أرجع JSON فقط.`;
-      const budget = Math.min(16000, Math.max(4000, skeletons.length * 1000));
-      const r = await runLLM( sys, prompt, true, c => validItems(c, "slots", skeletons.length, false, arabicOnly), budget, [], { phase: 'generation', label: 'تأليف منشورات الحملة', detail: `كتابة ${skeletons.length} منشورات للمنصات المحددة` });
-      if (!validItems(r.content, "slots", skeletons.length, false, arabicOnly)) throw new Error("Incomplete campaign content");
-      const parsed = parseStructured(r.content) as { theme?: string; slots: Array<Record<string, unknown>> };
-      const rawSlots = Array.isArray(parsed.slots) ? parsed.slots : [];
+${languageInstruction} كل "content" نص كامل أصلي مخصص لمنصته، ولا تكرر نفس النص بين الفترات. افهم الموضوع في سياق خبرة صاحب العلامة وجمهوره. إذا طلب أكثر من محور، وزع المنشورات بينها ولا تختزلها كلها في دمج مصطنع واحد. عند ذكر التأمين والإدارة استخدم سياق عمل صاحب العلامة في المبيعات وقيادة الفرق؛ لا تفترض أنه يقصد تأمين الشركات أو إدارة حوادث العمل. لا تعد برابط أو خدمة غير متاحة في سياق العلامة. لا تخلط النص بلغات غير مطلوبة. لا تخترع أرقامًا أو دراسات أو قصص عملاء أو وعود تغطية أو عوائد. أرجع JSON فقط.`;
+      const BATCH_SIZE = 8;
+      const budgetFor = (count: number) => Math.max(4000, count * 1000);
+      const generations: CampaignLLMResult[] = [];
+      const rawSlots: Array<Record<string, unknown>> = [];
+      let theme = message;
+      for (let offset=0; offset<skeletons.length; offset+=BATCH_SIZE) {
+        const batch=skeletons.slice(offset,offset+BATCH_SIZE);
+        const run=await runLLM(sys,generationPrompt(batch,offset),true,c=>validItems(c,'slots',batch.length,false,arabicOnly),budgetFor(batch.length),[],
+          {phase:'generation',label:'تأليف منشورات الحملة',detail:`كتابة المنشورات ${offset+1} إلى ${offset+batch.length}`,current:offset+batch.length,total:skeletons.length});
+        if(!validItems(run.content,'slots',batch.length,false,arabicOnly))throw new Error('Incomplete campaign content');
+        const parsed=parseStructured(run.content) as {theme?:string;slots:Array<Record<string,unknown>>};
+        if(offset===0 && typeof parsed.theme==='string')theme=parsed.theme;
+        rawSlots.push(...parsed.slots);
+        generations.push(run);
+      }
+      const r=generations[0];
 
       type Slot = { date: string; platform: string; title: string; content: string; goal?: string; content_type?: string; hashtags: string[]; cta?: string };
       const slots: Slot[] = skeletons.map((skeleton, i) => {
@@ -48,20 +62,20 @@ ${JSON.stringify(skeletons)}
         return {
           date: skeleton.date,
           platform: skeleton.platform,
-          title: String(s.title),
+          title: cleanGeneratedText(String(s.title)),
           content: cleanGeneratedText(String(s.content)),
           goal: s.goal ? String(s.goal) : (runtimeContext.content_goal as string | undefined),
           content_type: runtimeContext.content_type as string | undefined,
           hashtags: Array.isArray(s.hashtags) ? (s.hashtags as string[]) : [],
-          cta: s.cta ? String(s.cta) : undefined,
+          cta: typeof s.cta === 'string' ? cleanGeneratedText(s.cta) : undefined,
         };
       });
 
-      let tokensIn = r.tokensIn;
-      let tokensOut = r.tokensOut;
-      let fallbackCount = r.fallbackCount;
-      let fallbackLog = r.fallbackLog;
-      const authorModels = new Set([r.model]);
+      let tokensIn = generations.reduce((sum,run)=>sum+run.tokensIn,0);
+      let tokensOut = generations.reduce((sum,run)=>sum+run.tokensOut,0);
+      let fallbackCount = generations.reduce((sum,run)=>sum+run.fallbackCount,0);
+      let fallbackLog = generations.flatMap(run=>run.fallbackLog);
+      const authorModels = new Set(generations.map(run=>run.model));
       const editorialReviewerModels = new Set<string>();
 
       const runQuality = async (items: Slot[], recheck = false): Promise<Record<string, unknown>[]> => {
@@ -79,14 +93,14 @@ ${JSON.stringify(skeletons)}
 اكتب الأسباب والمقترحات بالعربية. الدرجات من 0 إلى 100 حصراً، وليس من 0 إلى 10. لا تعط pass إذا overall أقل من 85 أو النص بعيد عن الطلب أو يحتوي ادعاءات غير مدعومة.
 أرجع كائن JSON فقط يحتوي reviews بنفس الترتيب والعدد (${batch.length} عنصر):
 {"reviews": [{ "verdict": "pass|review|fail", "scores": { "hook": 0, "overall": 0 }, "checks": {"spelling": false, "grammar": false, "dialect": false, "request_fit": false, "brand_voice": false, "factual_support": false, "story_integrity": false, "safe_promises": false}, "reasons": [], "suggested_improvements": [] }]}
-كل بند checks فحص إلزامي للنسخة الحالية كلها، بما فيها العنوان والهاشتاجات والدعوة للتفاعل. true فقط إذا تحققت من سلامته؛ false عند الخطأ أو الشك أو عدم وجود سند. factual_support ينجح للنصيحة العامة وللافتراض الواضح، لكنه يفشل لادعاء واقعي أو إحصاء أو تفاصيل منتج لا دليل عليها. story_integrity ينجح لقصة المستخدم الأصلية دون إضافات مختلقة أو قصة افتراضية واضحة؛ لا ترفض Sales Story لمجرد كونها قصة. لا تعتبر الذاكرة أو النص السابق دليلًا على قصة حقيقية. راجع الإملاء والنحو بما يناسب اللهجة المصرية، ولا تستبدل المصري السليم بفصحى متكلفة. عند فشل أي بند اذكر الخطأ المحدد والتصحيح المطلوب في reasons وsuggested_improvements، ولا تعط pass. اكتب شرح المراجعة بعربية سليمة دون كلمات أجنبية عشوائية.
+كل بند checks فحص إلزامي للنسخة الحالية كلها، بما فيها العنوان والهاشتاجات والدعوة للتفاعل. true فقط إذا تحققت من سلامته؛ false عند الخطأ أو الشك أو عدم وجود سند. factual_support ينجح للنصيحة العامة وللافتراض الواضح، لكنه يفشل لادعاء واقعي أو إحصاء أو تفاصيل منتج لا دليل عليها. story_integrity ينجح لقصة المستخدم الأصلية دون إضافات مختلقة أو قصة افتراضية واضحة؛ لا ترفض Sales Story لمجرد كونها قصة. لا تعتبر الذاكرة أو النص السابق دليلًا على قصة حقيقية. راجع الإملاء والنحو باللغة أو اللهجة المطلوبة صراحة، وبالمصري المهني افتراضيًا؛ لا تستبدل المصري السليم بفصحى متكلفة ولا تترجم طلب الإنجليزية إلى العربية. عند فشل أي بند اذكر الخطأ المحدد والتصحيح المطلوب في reasons وsuggested_improvements، ولا تعط pass. اكتب شرح المراجعة بعربية سليمة دون كلمات أجنبية عشوائية.
 قيّم أيضًا فهم الطلب وتنوع المحاور؛ لا تقبل حملة تختزل كل المحاور في دمج مصطنع متكرر. تحقق من أي منتج أو تغطية أو علاقة سببية يدعيها النص ولا تمررها بدون سند من السياق. تحقق من ملاءمة العلامة ودقة الادعاءات، وارفض القصص أو الإحصاءات المختلقة والنص المختلط بلغات غير مطلوبة.
 المحتوى: ${JSON.stringify(batch.map((s) => ({ platform: s.platform, title: s.title, content: s.content, cta: s.cta, hashtags: s.hashtags })))}`;
         const reviewModels:string[]=[];
         const audits:Record<string,unknown>[]=[];
         for(let reviewer=0;reviewer<2;reviewer++) {
           const excluded=[...authorModels,...reviewModels];
-          const critic=reviewer===1 ? '\nأنت المدقق النهائي المستقل. افحص النص من الصفر دون افتراض أن أحدًا راجعه. اقرأ كل جملة بصوت مصري طبيعي: هل الفاعل واضح، والفعل مناسب، والمعنى مفهوم؟ ارفض الجمل المكسرة والانتقال بين المخاطب والغائب بلا سبب، والعبارات التي توحي بتغطية تأمينية غير محددة أو خدمة لم يقدمها المستخدم. اذكر موضع الخطأ واقتراح صياغته. لا تعط pass بأقل من 85 ولا تكافئ النص لمجرد أنه يبدو تسويقيًا.' : '';
+          const critic=reviewer===1 ? '\nأنت المدقق النهائي المستقل. افحص النص من الصفر دون افتراض أن أحدًا راجعه. اقرأ كل جملة باللغة أو اللهجة المطلوبة: هل الفاعل واضح، والفعل مناسب، والمعنى مفهوم؟ ارفض الجمل المكسرة والانتقال بين المخاطب والغائب بلا سبب، والعبارات التي توحي بتغطية تأمينية غير محددة أو خدمة لم يقدمها المستخدم. اذكر موضع الخطأ واقتراح صياغته. لا تعط pass بأقل من 85 ولا تكافئ النص لمجرد أنه يبدو تسويقيًا.' : '';
           const run = await runLLM( AGENTS.quality_engine(), critic+qPrompt, true, c => validItems(c, "reviews", batch.length, true, arabicOnly), 6000, excluded, { phase: 'quality', label: reviewer===1 ? 'تدقيق نهائي مستقل للغة والمعنى والادعاءات' : recheck ? 'إعادة مراجعة المنشورات المحسّنة' : 'مراجعة جودة منشورات الحملة', current: offset + 1, total: items.length });
           if(excluded.includes(run.model))throw new Error('Independent editorial reviewer unavailable');
           reviewModels.push(run.model);
@@ -112,33 +126,37 @@ ${JSON.stringify(skeletons)}
           .filter(({ q }) => q?.verdict !== 'pass');
         if (needsWork.length === 0) break;
 
+        for(let offset=0;offset<needsWork.length;offset+=BATCH_SIZE){
+        const workBatch=needsWork.slice(offset,offset+BATCH_SIZE);
+
         const improvePrompt = `${rules}
 المراجعة هنا لإعادة الكتابة فعليًا: أصلح كل ملاحظة وأرجع النص النهائي، لا تكتب تقريرًا أو خطة. كل عنصر منشور منفصل داخل حملة، لا تحوله لحملة جديدة ولا تضف عناوين اليوم الأول أو وعودًا بمنشورات مستقبلية.
 الطلب الأصلي: ${message}
-أعد كتابة الموضوع نفسه عند الحاجة لتحقيق الطلب، ولا تكتف بتلميع صياغة فكرة غير مناسبة. اكتب بالعربية الطبيعية بلا كلمات أجنبية دخيلة ولا تخترع تغطيات أو منتجات تأمين.
+أعد كتابة الموضوع نفسه عند الحاجة لتحقيق الطلب، ولا تكتف بتلميع صياغة فكرة غير مناسبة. ${languageInstruction} لا تخلط النص بلغات غير مطلوبة ولا تخترع تغطيات أو منتجات تأمين.
 حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر. إذا طلب قصة بيعية فاحتفظ بالسرد وأصلح صدق نسبتها بدل حذف القصة وتحويلها لنصائح.
-أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${needsWork.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
-العناصر وملاحظاتها: ${JSON.stringify(needsWork.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
-        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", needsWork.length, false, arabicOnly), budget, [...editorialReviewerModels], { phase: 'improvement', label: 'تحسين المنشورات وفق ملاحظات الجودة', detail: `تحسين ${needsWork.length} منشورات` });
+أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${workBatch.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
+العناصر وملاحظاتها: ${JSON.stringify(workBatch.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, cta: slot.cta, hashtags: slot.hashtags, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
+        const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", workBatch.length, false, arabicOnly), budgetFor(workBatch.length), [...editorialReviewerModels], { phase: 'improvement', label: 'تحسين المنشورات وفق ملاحظات الجودة', current:offset+workBatch.length,total:needsWork.length });
         authorModels.add(improveRun.model);
 
         tokensIn += improveRun.tokensIn; tokensOut += improveRun.tokensOut;
         fallbackCount += improveRun.fallbackCount; fallbackLog = [...fallbackLog, ...improveRun.fallbackLog];
-        if (!validItems(improveRun.content, "posts", needsWork.length, false, arabicOnly)) throw new Error("Incomplete campaign improvements");
+        if (!validItems(improveRun.content, "posts", workBatch.length, false, arabicOnly)) throw new Error("Incomplete campaign improvements");
         const improved = (parseStructured(improveRun.content) as { posts: Record<string, unknown>[] }).posts;
 
-        needsWork.forEach(({ i }, idx) => {
+        workBatch.forEach(({ i }, idx) => {
           const upd = Array.isArray(improved) ? improved[idx] : undefined;
           if (upd) {
             slots[i] = {
               ...slots[i],
-              title: String(upd.title ?? slots[i].title),
+              title: cleanGeneratedText(String(upd.title ?? slots[i].title)),
               content: cleanGeneratedText(String(upd.content ?? slots[i].content)),
-              hashtags: Array.isArray(upd.hashtags) ? (upd.hashtags as string[]) : slots[i].hashtags,
-              cta: typeof upd.cta === 'string' ? cleanGeneratedText(upd.cta) : slots[i].cta,
+              hashtags: upd.hashtags === null ? [] : Array.isArray(upd.hashtags) ? (upd.hashtags as string[]) : slots[i].hashtags,
+              cta: upd.cta === null ? '' : typeof upd.cta === 'string' ? cleanGeneratedText(upd.cta) : slots[i].cta,
             };
           }
         });
+        }
 
         const recheck = await runQuality(needsWork.map(({ i }) => slots[i]), true);
         needsWork.forEach(({ i }, idx) => { qualities[i] = recheck[idx]; });
@@ -147,7 +165,7 @@ ${JSON.stringify(skeletons)}
       const finalSlots = slots.map((slot, i) => ({ ...slot, quality: qualities[i] }));
 
       return {
-        result: { theme: String(parsed.theme ?? message), slots: finalSlots },
+        result: { theme, slots: finalSlots },
         tokensIn,
         tokensOut,
         meta: { provider: r.provider, model: r.model, fallbackCount, fallbackLog },
