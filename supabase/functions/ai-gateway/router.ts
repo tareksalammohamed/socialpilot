@@ -336,16 +336,18 @@ export async function routeAndRun(
     loadPolicy(supabase),
   ]);
 
-  const ranked = rankCandidates(candidates.filter(m => !req.excludedModelIds?.includes(m.model_id) && !(req.excludedModelIds?.length && ['openrouter/free','openrouter/auto'].includes(m.model_id))), providers, policy, allowPaidFallback, req.preferredCapabilities ?? []).slice(0, MAX_ATTEMPTS);
+  const ranked = rankCandidates(candidates.filter(m => !req.excludedModelIds?.includes(m.model_id) && !(req.excludedModelIds?.length && ['openrouter/free','openrouter/auto'].includes(m.model_id))), providers, policy, allowPaidFallback, req.preferredCapabilities ?? []);
   if (ranked.length === 0) throw new NoModelAvailableError();
 
   const fallbackLog: RunResult['fallbackLog'] = [];
   const exhaustedPaidProviders = new Set<string>();
+  const providerKeys = new Map<string, string | null>();
+  let attempts = 0;
   // Finish within the background worker's 120-second request lease.
   const deadline = Date.now() + 95_000;
 
   for (const candidate of ranked) {
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= deadline || attempts >= MAX_ATTEMPTS) break;
     // Keep this provider's free models and other providers available.
     if (!candidate.is_free && exhaustedPaidProviders.has(candidate.provider_key)) continue;
     const adapter = getAdapter(candidate.provider_key);
@@ -354,19 +356,24 @@ export async function routeAndRun(
       continue;
     }
 
-    const apiKeyRes = await supabase
-      .from('ai_provider_secrets')
-      .select('api_key')
-      .eq('provider_key', candidate.provider_key)
-      .maybeSingle();
-    const apiKey = apiKeyRes.data?.api_key;
+    if (!providerKeys.has(candidate.provider_key)) {
+      const { data, error } = await supabase.from('ai_provider_secrets')
+        .select('api_key').eq('provider_key', candidate.provider_key).maybeSingle();
+      if (error) throw error;
+      providerKeys.set(candidate.provider_key, data?.api_key ?? null);
+    }
+    const apiKey = providerKeys.get(candidate.provider_key);
     if (!apiKey) {
-      fallbackLog.push({ provider: candidate.provider_key, model: candidate.model_id, error: 'provider API key not configured' });
+      // Log once per provider, without consuming the actual model-call budget.
+      if (!fallbackLog.some(item => item.provider === candidate.provider_key)) {
+        fallbackLog.push({ provider: candidate.provider_key, model: candidate.model_id, error: 'provider API key not configured' });
+      }
       continue;
     }
 
     // Outside provider catch: a revoked lease must stop the fallback chain.
     await req.onAttempt?.({ provider: candidate.provider_key, model: candidate.model_id, attempt: fallbackLog.length + 1 });
+    attempts += 1;
     const started = Date.now();
     try {
       const result: ChatResult = await adapter.chatComplete(

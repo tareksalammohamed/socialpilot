@@ -1,37 +1,47 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
-import { AuthScreen } from '@/screens/AuthScreen';
-import { BrandBrainOnboarding } from '@/screens/BrandBrainOnboarding';
-import { AppShell } from '@/components/AppShell';
-import { SuperAdminScreen } from '@/screens/SuperAdminScreen';
+const AuthScreen = lazy(() => import('@/screens/AuthScreen').then(module => ({ default: module.AuthScreen })));
+const BrandBrainOnboarding = lazy(() => import('@/screens/BrandBrainOnboarding').then(module => ({ default: module.BrandBrainOnboarding })));
+const AppShell = lazy(() => import('@/components/AppShell').then(module => ({ default: module.AppShell })));
+const SuperAdminScreen = lazy(() => import('@/screens/SuperAdminScreen').then(module => ({ default: module.SuperAdminScreen })));
 import { ScreenLoader, Button } from '@/components/ui';
 import { AlertCircle } from 'lucide-react';
+import { ScreenErrorBoundary } from '@/components/ScreenErrorBoundary';
 import type { BrandDna } from '@/lib/types';
 
 function AppContent() {
   const { user, workspace, isSuperAdmin, loading, signOut, refreshWorkspace } = useAuth();
   const [brandDna, setBrandDna] = useState<BrandDna | null>(null);
   const [dnaLoading, setDnaLoading] = useState(true);
+  const [dnaError, setDnaError] = useState(false);
+  const [dnaRetry, setDnaRetry] = useState(0);
   const [retryCount, setRetryCount] = useState(0);
 
+  const workspaceId = workspace?.id;
+
   useEffect(() => {
-    if (!workspace) {
+    if (!workspaceId) {
       setBrandDna(null);
       setDnaLoading(false);
       return;
     }
+    let cancelled = false;
     setDnaLoading(true);
+    setDnaError(false);
     supabase
       .from('brand_dna')
       .select('*')
-      .eq('workspace_id', workspace.id)
+      .eq('workspace_id', workspaceId)
       .maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        setDnaError(Boolean(error));
         setBrandDna((data as BrandDna | null) ?? null);
         setDnaLoading(false);
       });
-  }, [workspace]);
+    return () => { cancelled = true; };
+  }, [workspaceId, dnaRetry]);
 
   useEffect(() => {
     if (loading || !user || isSuperAdmin || workspace) return;
@@ -100,6 +110,13 @@ function AppContent() {
 
   if (dnaLoading) return <ScreenLoader label="جارٍ التحميل..." />;
 
+  if (dnaError) return (
+    <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-6 text-center" role="alert">
+      <p>تعذّر تحميل بيانات علامتك التجارية. أعد المحاولة لاستكمال العمل.</p>
+      <Button onClick={() => setDnaRetry(value => value + 1)}>إعادة المحاولة</Button>
+    </div>
+  );
+
   if (!brandDna || brandDna.status === 'draft') {
     return <BrandBrainOnboarding />;
   }
@@ -110,7 +127,9 @@ function AppContent() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppContent />
+      <ScreenErrorBoundary>
+        <Suspense fallback={<ScreenLoader fullScreen />}><AppContent /></Suspense>
+      </ScreenErrorBoundary>
     </AuthProvider>
   );
 }

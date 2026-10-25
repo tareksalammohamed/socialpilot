@@ -326,10 +326,11 @@ export async function listInboxMessages(workspaceId: string, conversationId: str
     .select('*')
     .eq('workspace_id', workspaceId)
     .eq('conversation_id', conversationId)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
     .limit(200);
   if (error) throw error;
-  return (data ?? []) as InboxMessage[];
+  return ((data ?? []) as InboxMessage[]).reverse();
 }
 
 export async function markInboxConversationRead(conversationId: string): Promise<void> {

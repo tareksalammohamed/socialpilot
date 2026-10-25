@@ -36,6 +36,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: UI behavior regressions
+        run: npm run test:ui
+
       - name: Build
         run: npm run build
 
