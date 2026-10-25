@@ -41,7 +41,7 @@ export async function executeRevision(call:ToolCall,ctx:AgentContext,db:Supabase
     });
   });
   const dates=retained.map(({row:r})=>new Intl.DateTimeFormat('en-CA',{timeZone:'Africa/Cairo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(r.scheduled_at??Date.now())));
-  const slots=retained.map(({row:r,platform})=>({title:snapshot.posts.find(p=>p.id===r.content_id)!.title,content:r.text,platform,hashtags:r.hashtags,cta:r.cta}));
+  const slots=retained.map(({row:r,platform})=>({content_id:r.content_id,title:snapshot.posts.find(p=>p.id===r.content_id)!.title,content:r.text,platform,hashtags:r.hashtags,cta:r.cta}));
   const {result}=await run('create_content_plan',instructions,slots.map(s=>s.platform),{post_count:slots.length,existing_slots:slots,revision:true,schedule:{dates}});
   const generated=result.slots as Array<Record<string,unknown>>;
   if(!Array.isArray(generated)||generated.length!==retained.length||generated.some((slot,i)=>slot.platform!==retained[i].platform))throw new Error('نتيجة التعديل غير مطابقة لعدد النسخ أو المنصات المطلوبة؛ لم يتم حفظ أي تغيير.');

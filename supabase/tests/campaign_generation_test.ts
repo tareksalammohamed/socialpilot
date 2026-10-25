@@ -159,3 +159,46 @@ Deno.test('a reviewer resolving back to an author cannot approve a draft',async(
  try{await generateCampaign('اكتب بالمصري',['linkedin'],{post_count:1},'','',llm,agents);}catch{failed=true;}
  if(!failed)throw Error('author approved itself');
 });
+
+Deno.test('rule preflight saves an unnecessary critic call but corrected text still needs both independent critics',async()=>{
+ let repairs=0,critics=0,generations=0;
+ const safe={title:'افهم العميل',content:'اسأل العميل إيه اللي محتاجه عشان تقدر تساعده يفهم الاختيارات قبل القرار.'};
+ const llm:CampaignLLM=async(_s,p,_j,validate,_budget,excluded)=>{
+  let result:unknown;
+  if(p.includes('"reviews"')){critics++;if(!repairs)throw Error('critic called before obvious violation repaired');result={reviews:[{verdict:'pass',checks,scores:{overall:95},reasons:[],suggested_improvements:[]}]};}
+  else if(p.includes('"posts"')){repairs++;result={posts:[safe]};}
+  else{generations++;result={slots:[{...safe,content:'حققنا زيادة 70% في المبيعات عشان فهمنا احتياج العميل.'}]};}
+  const content=JSON.stringify(result);if(!validate(content))throw Error('invalid response');
+  return {content,model:p.includes('"reviews"')?(excluded?.includes('critic-a')?'critic-b':'critic-a'):'author',provider:'test',tokensIn:1,tokensOut:1,fallbackCount:0,fallbackLog:[]};
+ };
+ const out=await generateCampaign('اكتب بوست بالمصري',['linkedin'],{post_count:1},'','',llm,agents);
+ if(generations!==1||repairs!==1||critics!==2||out.tokensIn!==4||out.result.slots[0].quality.verdict!=='pass')throw Error('preflight failed or independent review bypassed');
+});
+Deno.test('duplicate campaign bodies are rewritten and persistent duplicates cannot auto-pass',async()=>{
+ for(const repairSucceeds of [true,false]){
+  let repairs=0;
+  const text='اسأل العميل إيه اللي محتاجه عشان تقدر تساعده يفهم اختياراته قبل القرار.';
+  const llm:CampaignLLM=async(_s,p,_j,validate,_budget,excluded)=>{
+   let result:unknown;
+   if(p.includes('"reviews"'))result={reviews:[{verdict:'pass',checks,scores:{overall:95},reasons:[],suggested_improvements:[]}]};
+   else if(p.includes('"posts"')){repairs++;const work=JSON.parse(p.split('العناصر وملاحظاتها: ')[1]);if(work.length!==1||!work[0].issues.some((x:string)=>x.includes('مكرر')))throw Error('duplicate repair scope wrong');result={posts:[{title:'الفكرة الثانية',content:repairSucceeds?'راجع الشروط مع العميل ووضح الاستثناءات عشان يقدر ياخد قرار يناسب احتياجه.':text}]};}
+   else result={slots:[{title:'الأول',content:text},{title:'الثاني',content:text,cta:'اسأل دلوقتي'}]};
+   const content=JSON.stringify(result);if(!validate(content))throw Error('invalid response');
+   return {content,model:p.includes('"reviews"')?(excluded?.includes('critic-a')?'critic-b':'critic-a'):'author',provider:'test',tokensIn:1,tokensOut:1,fallbackCount:0,fallbackLog:[]};
+  };
+  const out=await generateCampaign('اعمل منشورين مختلفين بالمصري',['linkedin'],{post_count:2},'','',llm,agents);
+  if(out.result.slots[0].quality.verdict!=='pass'||repairs!==(repairSucceeds?1:2))throw Error('wrong repair bounds');
+  if((out.result.slots[1].quality.verdict==='pass')!==repairSucceeds)throw Error('duplicate publishable');
+ }
+});
+Deno.test('single-post platform variants may share the same body without artificial rewrites',async()=>{
+ let repairs=0;
+ const post={title:'افهم العميل',content:'اسأل العميل إيه اللي محتاجه عشان تقدر تساعده يفهم اختياراته.'};
+ const llm:CampaignLLM=async(_s,p,_j,_validate,_budget,excluded)=>{
+  if(p.includes('"posts"'))repairs++;
+  const value=p.includes('"reviews"')?{reviews:[{verdict:'pass',checks,scores:{overall:95},reasons:[],suggested_improvements:[]}]}:{slots:[post,post]};
+  return {content:JSON.stringify(value),model:p.includes('"reviews"')?(excluded?.includes('critic-a')?'critic-b':'critic-a'):'author',provider:'test',tokensIn:1,tokensOut:1,fallbackCount:0,fallbackLog:[]};
+ };
+ const out=await generateCampaign('اكتب بوست بالمصري',['facebook','linkedin'],{post_count:2,single_content:true},'','',llm,agents);
+ if(repairs||out.result.slots.some(s=>s.quality.verdict!=='pass'))throw Error('cross-platform variants rejected');
+});

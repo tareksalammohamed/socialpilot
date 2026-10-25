@@ -1,6 +1,6 @@
 import { PublicationAttempt, publicationFailureResult, UncertainPublicationError, findPublicationHold } from '../_shared/publication-attempt.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
-import { buildPostText } from '../_shared/published-text.ts';
+import { buildPostText, POST_TEXT_LIMITS } from '../_shared/published-text.ts';
 
 // ---------------------------------------------------------------------------
 // Called by a logged-in workspace member from "المحتوى" (or the calendar)
@@ -151,7 +151,7 @@ async function publishToTelegram(variant: Variant, account: Record<string, unkno
   const chatId = metadata.chat_id ?? account.handle;
   if (!chatId) throw new Error('تعذّر تحديد قناة تيليجرام المربوطة');
 
-  const text = buildPostText(variant, media ? 1024 : 4096);
+  const text = buildPostText(variant, media ? 1024 : POST_TEXT_LIMITS.telegram);
   const method = media ? (media.kind === 'video' ? 'sendVideo' : 'sendPhoto') : 'sendMessage';
   const params: Record<string, string> = media
     ? { chat_id: String(chatId), [media.kind === 'video' ? 'video' : 'photo']: media.url, caption: text }
@@ -305,7 +305,7 @@ async function publishToThreads(variant: Variant, account: Record<string, unknow
   const accessToken = await getFreshThreadsToken(String(account.id));
   const createUrl = new URL('https://graph.threads.net/v1.0/me/threads');
   createUrl.searchParams.set('access_token', accessToken);
-  createUrl.searchParams.set('text', buildPostText(variant, 500));
+  createUrl.searchParams.set('text', buildPostText(variant, POST_TEXT_LIMITS.threads));
   if (media?.kind === 'image') {
     createUrl.searchParams.set('media_type', 'IMAGE');
     createUrl.searchParams.set('image_url', media.url);
@@ -345,7 +345,7 @@ async function publishToLinkedIn(variant: Variant, account: Record<string, unkno
     },
     body: JSON.stringify({
       author,
-      commentary: buildPostText(variant, 3000),
+      commentary: buildPostText(variant, POST_TEXT_LIMITS.linkedin),
       visibility: 'PUBLIC',
       distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] },
       lifecycleState: 'PUBLISHED',
@@ -361,7 +361,7 @@ async function publishToLinkedIn(variant: Variant, account: Record<string, unkno
 async function publishToX(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia, publication: PublicationAttempt): Promise<{ id: string; url: string | null }> {
   assertNoMedia(media, 'إكس');
   const accessToken = await getFreshXToken(String(account.id));
-  const text = buildPostText(variant, 280);
+  const text = buildPostText(variant, POST_TEXT_LIMITS.x);
 
   const res = await publication.send('https://api.twitter.com/2/tweets', {
     method: 'POST',

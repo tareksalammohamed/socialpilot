@@ -1,3 +1,4 @@
+import { buildPostText, POST_TEXT_LIMITS } from './published-text.ts';
 function explicitPostLength(message: string): boolean {
   const request = message.replace(/(?:مش|موش|بدون|من غير|لا|ولا)\s+(?:طويل[ةه]?|قصير[ةه]?|مقال(?:ة)?)/gu, '');
   return /(?:بوست|منشور|نص|قصة|قصه).{0,24}(?:طويل[ةه]?|قصير[ةه]?|مختصر|مفصل)|(?:اكتب|اعمل|اعملي|اعمللي|أنشئ|انشئ)\s+(?:لي\s+)?مقال(?:ة)?|(?:خليه|خليها|خلّيه|اجعله)\s+(?:أطول|اطول|أقصر|اقصر|مختصر)|[0-9٠-٩]+\s*(?:كلمة|كلمه|words)|(?:long|short)\s+post|(?:detailed\s+article)|(?:^|\s)(?:اختصر|اختصره|اختصرها|قصره|قصرها|طوله|طولها|shorten|expand)(?:\s|$)/iu.test(request);
@@ -38,9 +39,16 @@ export function enforceEditorialChecklist(review: Record<string, unknown>): Reco
 export function cleanGeneratedText(text: string): string { return text.replace(/\\n/g, '\n').trim(); }
 
 /** Conservative publication gate, independent of a model's optimistic score. */
-export function enforceEditorialReview(review: Record<string, unknown>, post: {title:string;content:string;cta?:string;hashtags?:string[]}, source: string, rules: string): Record<string, unknown> {
+export type EditorialPost = {title:string;content:string;cta?:string;hashtags?:string[];platform?:string};
+
+export function editorialIssues(post: EditorialPost, source: string, rules: string): string[] {
   const text=[post.title,post.content,post.cta??'',...(post.hashtags??[])].join(' ');
   const issues:string[]=[];
+  const limit=post.platform ? POST_TEXT_LIMITS[post.platform] : undefined;
+  if(limit) {
+    try { buildPostText({text:post.content,cta:post.cta,hashtags:post.hashtags},limit); }
+    catch { issues.push(`النص الكامل لمنصة ${post.platform} يتجاوز حد النشر المستخدم (${limit} حرف) مع الدعوة للتفاعل والهاشتاجات. أعد صياغته باختصار يحافظ على المعنى؛ لا تقطعه آليًا.`); }
+  }
   const wordCount = [post.content, post.cta ?? ''].join(' ').trim().split(/\s+/u).filter(Boolean).length;
   if (!explicitPostLength(source) && wordCount > 180) issues.push('البوست أطول من المطلوب افتراضيًا؛ أعد صياغته في 80 إلى 140 كلمة دون حشو، مع الحفاظ على الفكرة والقصة والدعوة للتفاعل. لا تقطع النص آليًا ولا تحذف نهاية الجملة.');
   if(rules.includes('اكتب باللهجة المصرية')&&[...text].some(char=>/\p{Letter}/u.test(char)&&!/[\p{Script=Arabic}\p{Script=Latin}]/u.test(char)))issues.push('احذف الكلمات المكتوبة بأبجدية غير عربية وأعد صياغتها بالمصري؛ النص يحتوي لغة غير مطلوبة.');
@@ -58,6 +66,35 @@ export function enforceEditorialReview(review: Record<string, unknown>, post: {t
     const allowed=new Set(['linkedin','instagram','facebook','whatsapp','socialpilot','crm','cta','b2b','api']);
     if((text.match(/[A-Za-z][A-Za-z-]{2,}/g)??[]).some(word=>!allowed.has(word.toLowerCase())&&!source.toLowerCase().includes(word.toLowerCase())))issues.push('استبدل الكلمات الأجنبية الدخيلة بتعبيرات مصرية واضحة.');
   }
+  return issues;
+}
+
+export function applyEditorialIssues(review: Record<string, unknown>, issues: string[]): Record<string, unknown> {
   if(!issues.length)return review;
-  return {...review,verdict:'review',scores:{...(review.scores as Record<string,number>),overall:Math.min(60,Number((review.scores as Record<string,number>)?.overall??0))},reasons:[...(review.reasons as string[]??[]),...issues],suggested_improvements:[...(review.suggested_improvements as string[]??[]),...issues]};
+  return {...review,verdict:review.verdict==='fail'?'fail':'review',scores:{...(review.scores as Record<string,number>),overall:Math.min(60,Number((review.scores as Record<string,number>)?.overall??0))},reasons:[...new Set([...(review.reasons as string[]??[]),...issues])],suggested_improvements:[...new Set([...(review.suggested_improvements as string[]??[]),...issues])]};
+}
+
+/** Conservative publication gate, independent of a model's optimistic score. */
+export function enforceEditorialReview(review: Record<string, unknown>, post: EditorialPost, source: string, rules: string): Record<string, unknown> {
+  return applyEditorialIssues(review,editorialIssues(post,source,rules));
+}
+
+/** Select by verdict before score: a failure cannot disappear behind a low score. */
+export function mergeEditorialAudits(audits: Record<string, unknown>[]): Record<string, unknown> {
+  if(!audits.length)throw new Error('Missing editorial audits');
+  const rank=(q:Record<string,unknown>)=>q.verdict==='fail'?0:q.verdict==='review'?1:2;
+  const worst=[...audits].sort((a,b)=>rank(a)-rank(b)||Number((a.scores as Record<string,number>).overall)-Number((b.scores as Record<string,number>).overall))[0];
+  return {...worst,reasons:[...new Set(audits.flatMap(q=>q.reasons as string[]))],suggested_improvements:[...new Set(audits.flatMap(q=>q.suggested_improvements as string[]))]};
+}
+
+function duplicateKey(text:string):string {
+  return text.normalize('NFKC').toLowerCase().replace(/[\u064B-\u065F\u0670\u0640]/gu,'').replace(/[أإآ]/gu,'ا').replace(/[٠-٩]/gu,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).replace(/[^\p{Letter}\p{Number}]+/gu,' ').trim();
+}
+
+/** Exact body repetition with cosmetic changes; never claim semantic detection. */
+export function campaignDuplicateIssues(posts: EditorialPost[], index:number, groups?:unknown[]):string[] {
+  const key=duplicateKey(posts[index].content);
+  if(!key)return [];
+  const duplicate=posts.findIndex((post,i)=>i<index&&duplicateKey(post.content)===key&&!(typeof groups?.[index]==='string'&&groups?.[index]&&groups?.[index]===groups?.[i]));
+  return duplicate<0?[]:[`متن المنشور مكرر من المنشور رقم ${duplicate+1} في الحملة. اكتب معالجة مختلفة للفكرة؛ تغيير العنوان أو علامات الترقيم أو الدعوة للتفاعل وحده لا يزيل التكرار.`];
 }
