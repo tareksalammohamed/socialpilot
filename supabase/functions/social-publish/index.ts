@@ -1,3 +1,4 @@
+import { PublicationAttempt, UncertainPublicationError, findPublicationHold } from '../_shared/publication-attempt.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { buildPostText } from '../_shared/published-text.ts';
 
@@ -8,7 +9,7 @@ import { buildPostText } from '../_shared/published-text.ts';
 // called the platform's API to post. This function:
 //   1. Verifies the caller belongs to the workspace and the variant exists.
 //   2. Opens/reuses a `publishing_jobs` row (idempotent by variant/calendar
-//      item — clicking twice or retrying a failed job never double-posts).
+//      item; unresolved publication responses require review before replay).
 //   3. Actually calls the platform API (Telegram bot API / X API v2).
 //   4. Writes the outcome back to the database: publishing_jobs, the
 //      calendar_item (if scheduled), content.status, a notification, and
@@ -123,7 +124,7 @@ async function fetchWithRetry(input: string | URL, init: RequestInit = {}, maxAt
   let response: Response | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     response = await fetch(input, init);
-    const retryable = response.status === 429 || response.status >= 500;
+    const retryable = (!init.method || init.method.toUpperCase() === 'GET') && (response.status === 429 || response.status >= 500);
     if (response.ok || !retryable || attempt === maxAttempts) return response;
     const retryAfter = Number(response.headers.get('retry-after') ?? 0);
     const waitMs = Math.min(5_000, retryAfter > 0 ? retryAfter * 1_000 : 250 * (2 ** (attempt - 1)));
@@ -137,7 +138,7 @@ async function fetchWithRetry(input: string | URL, init: RequestInit = {}, maxAt
 // sendPhoto when the variant has an image in media_brief, sendMessage
 // otherwise. Bot token lives in social_platform_app_secrets (shared bot).
 // ---------------------------------------------------------------------------
-async function publishToTelegram(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+async function publishToTelegram(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia, publication: PublicationAttempt): Promise<{ id: string; url: string | null }> {
   const { data: secretRow } = await supabase
     .from('social_platform_app_secrets')
     .select('app_secret')
@@ -156,7 +157,7 @@ async function publishToTelegram(variant: Variant, account: Record<string, unkno
     ? { chat_id: String(chatId), [media.kind === 'video' ? 'video' : 'photo']: media.url, caption: text }
     : { chat_id: String(chatId), text };
 
-  const res = await fetchWithRetry(`https://api.telegram.org/bot${botToken}/${method}`, {
+  const res = await publication.send(`https://api.telegram.org/bot${botToken}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -261,7 +262,7 @@ async function getStoredAccessToken(accountId: string): Promise<string> {
   return String(token.access_token);
 }
 
-async function publishToFacebook(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+async function publishToFacebook(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia, publication: PublicationAttempt): Promise<{ id: string; url: string | null }> {
   const accessToken = await getStoredAccessToken(String(account.id));
   const pageId = String(account.page_id ?? account.external_id ?? account.handle ?? '');
   if (!pageId) throw new Error('لم يتم العثور على Page ID لفيسبوك');
@@ -272,14 +273,14 @@ async function publishToFacebook(variant: Variant, account: Record<string, unkno
   const payload = media
     ? { url: media.url, caption: buildPostText(variant), access_token: accessToken }
     : { message: buildPostText(variant), access_token: accessToken };
-  const response = await fetchWithRetry(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(pageId)}/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const response = await publication.send(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(pageId)}/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   const body = await response.json();
   const postId = body.post_id ?? body.id;
   if (!response.ok || !postId) throw new Error(apiErrorMessage(body, 'فشل النشر على فيسبوك'));
   return { id: String(postId), url: `https://www.facebook.com/${postId}` };
 }
 
-async function publishToInstagram(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+async function publishToInstagram(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia, publication: PublicationAttempt): Promise<{ id: string; url: string | null }> {
   const accessToken = await getStoredAccessToken(String(account.id));
   const igId = String(account.ig_user_id ?? account.external_id ?? '');
   assertImageOnly(media, 'إنستجرام');
@@ -291,13 +292,13 @@ async function publishToInstagram(variant: Variant, account: Record<string, unkn
   const createResponse = await fetchWithRetry(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(igId)}/media`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_url: imageUrl, caption: buildPostText(variant), access_token: accessToken }) });
   const createBody = await createResponse.json();
   if (!createResponse.ok || !createBody.id) throw new Error(apiErrorMessage(createBody, 'فشل إنشاء منشور إنستجرام'));
-  const publishResponse = await fetchWithRetry(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(igId)}/media_publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ creation_id: createBody.id, access_token: accessToken }) });
+  const publishResponse = await publication.send(`https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(igId)}/media_publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ creation_id: createBody.id, access_token: accessToken }) });
   const publishBody = await publishResponse.json();
   if (!publishResponse.ok || !publishBody.id) throw new Error(apiErrorMessage(publishBody, 'فشل نشر منشور إنستجرام'));
   return { id: String(publishBody.id), url: null };
 }
 
-async function publishToThreads(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+async function publishToThreads(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia, publication: PublicationAttempt): Promise<{ id: string; url: string | null }> {
   if (media?.kind === 'video') {
     throw new Error('فيديو Threads يحتاج انتظار معالجة الـcontainer — استخدم نص أو صورة في الجدولة الحالية');
   }
@@ -321,7 +322,7 @@ async function publishToThreads(variant: Variant, account: Record<string, unknow
   const publishUrl = new URL('https://graph.threads.net/v1.0/me/threads_publish');
   publishUrl.searchParams.set('access_token', accessToken);
   publishUrl.searchParams.set('creation_id', String(createBody.id));
-  const publishResponse = await fetchWithRetry(publishUrl, { method: 'POST' });
+  const publishResponse = await publication.send(publishUrl, { method: 'POST' });
   const publishBody = await publishResponse.json().catch(() => ({}));
   if (!publishResponse.ok || !publishBody.id) {
     throw new Error(apiErrorMessage(publishBody, 'فشل نشر منشور Threads'));
@@ -329,12 +330,12 @@ async function publishToThreads(variant: Variant, account: Record<string, unknow
   return { id: String(publishBody.id), url: null };
 }
 
-async function publishToLinkedIn(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+async function publishToLinkedIn(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia, publication: PublicationAttempt): Promise<{ id: string; url: string | null }> {
   assertNoMedia(media, 'لينكدإن');
   const accessToken = await getStoredAccessToken(String(account.id));
   const author = String((account.metadata as Record<string, unknown> | undefined)?.urn ?? `urn:li:person:${account.external_id ?? ''}`);
   if (!author || author.endsWith(':')) throw new Error('لم يتم العثور على هوية LinkedIn');
-  const response = await fetchWithRetry('https://api.linkedin.com/rest/posts', {
+  const response = await publication.send('https://api.linkedin.com/rest/posts', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -357,12 +358,12 @@ async function publishToLinkedIn(variant: Variant, account: Record<string, unkno
   return { id: String(postId), url: null };
 }
 
-async function publishToX(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia): Promise<{ id: string; url: string | null }> {
+async function publishToX(variant: Variant, account: Record<string, unknown>, media: ResolvedMedia, publication: PublicationAttempt): Promise<{ id: string; url: string | null }> {
   assertNoMedia(media, 'إكس');
   const accessToken = await getFreshXToken(String(account.id));
   const text = buildPostText(variant, 280);
 
-  const res = await fetchWithRetry('https://api.twitter.com/2/tweets', {
+  const res = await publication.send('https://api.twitter.com/2/tweets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ text }),
@@ -447,6 +448,11 @@ Deno.serve(async (req: Request) => {
     .maybeSingle();
   if (!account) return jsonRes(409, { error: `مفيش حساب ${platformLabel} مربوط بهذه المساحة` });
 
+  const publicationHold = await findPublicationHold(supabase, workspaceId, variantId);
+  if (publicationHold) {
+    return jsonRes(409, { error: publicationHold });
+  }
+
   const idempotencyKey = calendarItemId ? `cal:${calendarItemId}` : `manual:${variantId}`;
 
   let { data: existingJob } = await supabase
@@ -469,6 +475,15 @@ Deno.serve(async (req: Request) => {
       .limit(1)
       .maybeSingle();
     existingJob = scheduledJob;
+  }
+
+  if (existingJob?.result?.outcome === 'confirmed' && existingJob.result.post_id) {
+    const { error } = await supabase.from('publishing_jobs').update({
+      status: 'succeeded', external_post_id: String(existingJob.result.post_id),
+      published_at: new Date().toISOString(), last_error: null,
+    }).eq('id', existingJob.id);
+    if (error) throw error;
+    existingJob.status = 'succeeded';
   }
 
   if (existingJob?.status === 'succeeded') {
@@ -547,17 +562,18 @@ Deno.serve(async (req: Request) => {
     const {data: currentVariant,error: currentError}=await supabase.from('content_variants').select('*').eq('id',variant.id).eq('workspace_id',variant.workspace_id).maybeSingle();
     if(currentError||!currentVariant||['text','platform','cta','hashtags','media_brief','updated_at'].some(field=>JSON.stringify(currentVariant[field])!==JSON.stringify(variant[field])))throw new Error('المحتوى اتغير قبل بدء النشر؛ راجع النسخة الحالية وأعد الموافقة.');
     const media = await resolveVariantMedia(variant as Variant);
-    const result = platform === 'telegram'
-      ? await publishToTelegram(variant as Variant, account, media)
+    const publication = new PublicationAttempt(supabase, job.id);
+    const result = await publication.run(async () => platform === 'telegram'
+      ? await publishToTelegram(variant as Variant, account, media, publication)
       : platform === 'x'
-        ? await publishToX(variant as Variant, account, media)
+        ? await publishToX(variant as Variant, account, media, publication)
         : platform === 'facebook'
-          ? await publishToFacebook(variant as Variant, account, media)
+          ? await publishToFacebook(variant as Variant, account, media, publication)
           : platform === 'instagram'
-            ? await publishToInstagram(variant as Variant, account, media)
+            ? await publishToInstagram(variant as Variant, account, media, publication)
             : platform === 'threads'
-              ? await publishToThreads(variant as Variant, account, media)
-              : await publishToLinkedIn(variant as Variant, account, media);
+              ? await publishToThreads(variant as Variant, account, media, publication)
+              : await publishToLinkedIn(variant as Variant, account, media, publication));
 
     const publishedAt = new Date().toISOString();
     const publishState = {
@@ -610,6 +626,7 @@ Deno.serve(async (req: Request) => {
       status: 'failed',
       last_attempt_at: new Date().toISOString(),
       last_error: message,
+      ...(err instanceof UncertainPublicationError ? { result: { outcome: 'uncertain' } } : {}),
     }).eq('id', job.id);
 
     if (calendarItemId) {

@@ -1,7 +1,7 @@
 import { routeAndRun, AllModelsFailedError } from '../functions/ai-gateway/router.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 
-function database(models: {provider_key:string;model_id:string;is_free:boolean;quality_score:number}[]): SupabaseClient {
+function database(models: {provider_key:string;model_id:string;is_free:boolean;quality_score:number;structured_output?:boolean}[]): SupabaseClient {
   const providers=[...new Set(models.map(m=>m.provider_key))].map(provider_key=>({provider_key,enabled:true,priority:1,allow_paid:true,failover_enabled:true}));
   return {from:(table:string)=>{
     let single=false;
@@ -13,7 +13,7 @@ function database(models: {provider_key:string;model_id:string;is_free:boolean;q
       table==='ai_provider_secrets'?{api_key:'test'}:
       table==='ai_routing_policy'?{policy:'best_quality',allow_paid_fallback:true}:
       single?{success_count:0,failure_count:0,consecutive_failures:0,avg_latency_ms:null}:
-      models.map(m=>({...m,circuit_state:'closed',success_count:0,failure_count:0,structured_output:true,reasoning:true}))});
+      models.map(m=>({...m,circuit_state:'closed',success_count:0,failure_count:0,structured_output:m.structured_output ?? true,reasoning:true}))});
     return query;
   }} as unknown as SupabaseClient;
 }
@@ -93,5 +93,46 @@ Deno.test('actual failing model calls remain bounded to twelve', async () => {
     } catch (error) {
       if (!(error instanceof AllModelsFailedError) || calls !== 12) throw error;
     }
+  } finally { globalThis.fetch = saved; }
+});
+
+Deno.test('validated JSON fallback reaches a provider without native JSON support', async () => {
+  const saved = globalThis.fetch;
+  const requests: Record<string, unknown>[] = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); requests.push(body);
+    return body.model === 'paid-native'
+      ? Response.json({ error: { message: 'no credits', code: 402 } }, { status: 402 })
+      : Response.json({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] });
+  };
+  try {
+    const db = database([
+      { provider_key: 'openrouter', model_id: 'paid-native', is_free: false, quality_score: 100 },
+      { provider_key: 'groq', model_id: 'text-backup', is_free: false, quality_score: 90, structured_output: false },
+    ]);
+    const result = await routeAndRun(db, {
+      requiredCapabilities: ['structured_output'], allowValidatedJsonFallback: true,
+      systemPrompt: '', userPrompt: '', jsonMode: true, validate: text => JSON.parse(text).ok === true,
+    });
+    if (result.providerUsed !== 'groq' || requests[1].response_format) throw Error('native JSON requirement blocked a validated text fallback');
+    const messages = requests[1].messages as { content: string }[];
+    if (!messages[0].content.includes('valid JSON')) throw Error('missing JSON-only instruction');
+  } finally { globalThis.fetch = saved; }
+});
+
+Deno.test('text fallback must pass validation and cannot activate without it', async () => {
+  const saved = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ choices: [{ message: { content: '{"wrong":true}' }, finish_reason: 'stop' }] }); };
+  try {
+    const db = database([{ provider_key: 'groq', model_id: 'text', is_free: true, quality_score: 90, structured_output: false }]);
+    try {
+      await routeAndRun(db, { requiredCapabilities: ['structured_output'], allowValidatedJsonFallback: true, systemPrompt: '', userPrompt: '', jsonMode: true });
+      throw Error('Fallback enabled without validator');
+    } catch (error) { if (calls !== 0 || error instanceof AllModelsFailedError) throw error; }
+    try {
+      await routeAndRun(db, { requiredCapabilities: ['structured_output'], allowValidatedJsonFallback: true, systemPrompt: '', userPrompt: '', jsonMode: true, validate: c => JSON.parse(c).ok === true });
+      throw Error('Invalid schema accepted');
+    } catch (error) { if (!(error instanceof AllModelsFailedError) || calls !== 1) throw error; }
   } finally { globalThis.fetch = saved; }
 });

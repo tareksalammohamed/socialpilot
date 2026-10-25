@@ -60,6 +60,8 @@ export type CapabilityName = 'text_generation' | 'vision' | 'reasoning' | 'tool_
 export type CapabilityRequest = {
   requiredCapabilities: CapabilityName[];
   preferredCapabilities?: CapabilityName[];
+  // Permit prompt-only JSON models only when the caller validates the result.
+  allowValidatedJsonFallback?: boolean;
 };
 
 type CandidateModel = {
@@ -331,8 +333,10 @@ export async function routeAndRun(
   supabase: SupabaseClient,
   req: CapabilityRequest & { onAttempt?: (attempt: ModelAttempt) => Promise<void>; systemPrompt: string; userPrompt: string; jsonMode: boolean; maxOutputTokens?: number; excludedModelIds?: string[]; validate?: (content: string) => boolean; webSearchOptions?: { maxResults?: number; includeDomains?: string[]; excludeDomains?: string[] } | null }
 ): Promise<RunResult> {
+  const validatedJsonFallback = req.allowValidatedJsonFallback === true && req.jsonMode && Boolean(req.validate);
+  const required = validatedJsonFallback ? req.requiredCapabilities.filter(cap => cap !== 'structured_output') : req.requiredCapabilities;
   const [{ candidates, providers }, { policy, allowPaidFallback }] = await Promise.all([
-    loadCandidates(supabase, req.requiredCapabilities),
+    loadCandidates(supabase, required),
     loadPolicy(supabase),
   ]);
 
@@ -379,9 +383,9 @@ export async function routeAndRun(
       const result: ChatResult = await adapter.chatComplete(
         apiKey,
         candidate.model_id,
-        req.systemPrompt,
+        req.systemPrompt + (validatedJsonFallback && !candidate.structured_output ? '\nReturn only a complete valid JSON object matching the requested schema. No markdown or commentary.' : ''),
         req.userPrompt,
-        req.jsonMode,
+        req.jsonMode && (!validatedJsonFallback || candidate.structured_output),
         undefined,
         req.webSearchOptions ?? undefined,
         req.maxOutputTokens,
@@ -425,4 +429,18 @@ export async function routeAndRun(
   }
 
   throw fallbackLog.length > 0 ? new AllModelsFailedError(fallbackLog, Date.now() >= deadline) : new NoModelAvailableError();
+}
+
+/** Eligibility under saved cost/circuit settings, never a promise of live quota. */
+export async function loadRoutingReadiness(supabase: SupabaseClient): Promise<Record<string, { native_json: number; validated_json: number }>> {
+  const [{ candidates, providers }, { policy, allowPaidFallback }] = await Promise.all([
+    loadCandidates(supabase, []), loadPolicy(supabase),
+  ]);
+  const counts: Record<string, { native_json: number; validated_json: number }> = {};
+  for (const model of rankCandidates(candidates, providers, policy, allowPaidFallback)) {
+    const current = counts[model.provider_key] ??= { native_json: 0, validated_json: 0 };
+    current.validated_json++;
+    if (model.structured_output) current.native_json++;
+  }
+  return counts;
 }

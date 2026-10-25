@@ -146,6 +146,7 @@ async function callLLM(
 ): Promise<{ content: string; tokensIn: number; tokensOut: number; provider: string; model: string; fallbackCount: number; fallbackLog: Array<{ provider: string; model: string; error: string }> }> {
   const result = await routeAndRun(supabase, {
     requiredCapabilities: TASK_CAPABILITIES[intent],
+    allowValidatedJsonFallback: true,
     preferredCapabilities: TASK_PREFERRED_CAPABILITIES[intent],
     systemPrompt,
     userPrompt,

@@ -416,6 +416,7 @@ export type AiProvider = {
   last_error: string | null;
   models_count: number;
   healthy_models_count: number;
+  routing_readiness?: { native_json: number; validated_json: number };
 };
 
 export type AiModel = {
