@@ -1,3 +1,4 @@
+import { loadRoutingReadiness } from '../ai-gateway/router.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { getAdapter, computeQualityScore, type ProviderKey, PROVIDER_CATALOG } from './providers.ts';
 
@@ -206,8 +207,11 @@ Deno.serve(async (req: Request) => {
           cohere: 'Cohere',
           openai: 'OpenAI',
         };
-        const { data, error } = await supabase.from('ai_providers').select('*').order('priority', { ascending: true });
-        if (error) console.error('list_providers query failed:', error.message);
+        const [{ data, error }, readiness] = await Promise.all([
+          supabase.from('ai_providers').select('*').order('priority', { ascending: true }),
+          loadRoutingReadiness(supabase),
+        ]);
+        if (error) throw error;
         const rows = (data ?? []) as Array<Record<string, unknown>>;
         const byKey = new Map(rows.map((row) => [String(row.provider_key), row]));
         const providers = Object.entries(PROVIDER_CATALOG).map(([key, catalog], index) => {
@@ -229,6 +233,7 @@ Deno.serve(async (req: Request) => {
             last_error: (row.last_error as string | null | undefined) ?? null,
             models_count: Number(row.models_count ?? 0),
             healthy_models_count: Number(row.healthy_models_count ?? 0),
+            routing_readiness: row.enabled && row.has_api_key ? (readiness[key] ?? { native_json: 0, validated_json: 0 }) : { native_json: 0, validated_json: 0 },
           };
         });
         return jsonRes(200, { providers });

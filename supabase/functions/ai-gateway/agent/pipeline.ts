@@ -71,6 +71,7 @@ function parsePlannerOutput(raw: string): PlannerOutput {
 async function planTurn(supabase: SupabaseClient, req: AgentRequest): Promise<PlannerOutput> {
   const capabilities: CapabilityRequest = {
     requiredCapabilities: ['structured_output'],
+    allowValidatedJsonFallback: true,
     preferredCapabilities: ['reasoning'],
   };
   const result = await routeAndRun(supabase, {

@@ -696,6 +696,14 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
                   <ChevronDown size={16} className={`text-ink-500 transition-transform ${isOpen || isAdding ? 'rotate-180' : ''}`} />
                 </button>
 
+                {p.routing_readiness && p.has_api_key && (
+                  <p className="px-4 pb-3 text-xs text-ink-400">
+                    التأليف والتخطيط والمراجعة: {p.routing_readiness.validated_json} نموذج مرشح حسب الإعدادات،
+                    منها {p.routing_readiness.native_json} يدعم JSON مباشرة. الباقي يخضع للتحقق من الاستجابة.
+                    الرصيد واستقلال المراجع عن الكاتب يتحددان وقت التنفيذ.
+                  </p>
+                )}
+
                 {isAdding && !p.has_api_key && (
                   <div className="px-4 pb-4 flex flex-col gap-2 animate-slide-up">
                     <Input value={apiKeyInput} onChange={setApiKeyInput} placeholder="API Key" type="password" />
