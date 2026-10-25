@@ -83,9 +83,15 @@ export function CreateScreen() {
     const latest = latestTask.current;
     if (latest && ((task.id !== latest.id && task.created_at < latest.created_at) || (task.id === latest.id && task.updated_at < latest.updated_at))) return;
     latestTask.current = task;
-    const version = JSON.stringify([task.id, task.status, task.updated_at, task.progress]);
+    const version = JSON.stringify([task.id, task.status, task.updated_at, task.progress, task.archived_at]);
     if (taskVersion.current === version) return;
     taskVersion.current = version;
+    if (task.archived_at) {
+      setActiveTask(null); setActiveTaskId(null); setMode('idle'); setChat([]);
+      setError(null); setContent(null); setPlan(null); setAdvice(null);
+      setSaved(false); setPlanSaved(false);
+      return;
+    }
     setActiveTask(task);
     setActiveTaskId(task.id);
     setError(null);
@@ -102,7 +108,7 @@ export function CreateScreen() {
     }
 
     if (task.status === 'cancelled') {
-      setChat([{ role: 'user', text: task.request_text }, { role: 'ai', text: 'تم إيقاف الطلب. تقدر تعدّل طلبك وترسله أو تبدأ من جديد.' }]);
+      setChat([{ role: 'user', text: task.request_text }, { role: 'ai', text: 'تم إلغاء الطلب. تقدر تكتب طلب جديد أو تعيد تنفيذ الطلب السابق.' }]);
       setMode('idle');
       return;
     }
@@ -466,7 +472,7 @@ export function CreateScreen() {
         </div>
       </section>
 
-      {activeTask && <div className="mb-4"><TaskProgress task={activeTask} onUpdate={task => applyTask(task as AssistantTask)} /></div>}
+      {activeTask && <div className="mb-4"><TaskProgress key={activeTask.id} task={activeTask} onUpdate={task => applyTask(task as AssistantTask)} /></div>}
 
       {/* Chat + results */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar rounded-2xl border border-ink-800 bg-ink-950/40 p-4 sm:p-5">

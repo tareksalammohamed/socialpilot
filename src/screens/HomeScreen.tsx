@@ -120,7 +120,7 @@ export function HomeScreen({ onNavigate }: { onNavigate: (tab: Tab) => void }) {
           .limit(5),
         supabase
           .from('assistant_tasks')
-          .select('id,status,request_text,result_type,error,updated_at')
+          .select('id,status,request_text,result_type,error,updated_at,archived_at')
           .eq('workspace_id', workspace.id)
           .order('created_at', { ascending: false })
           .limit(1)
@@ -135,7 +135,7 @@ export function HomeScreen({ onNavigate }: { onNavigate: (tab: Tab) => void }) {
       setConversations((inboxRows.data as DashboardConversation[]) ?? []);
       setFailedJobs((jobs.data as DashboardPublishingJob[]) ?? []);
       setUpcoming((calendarRows.data as DashboardCalendarItem[]) ?? []);
-      setLatestTask((task.data as DashboardAssistantTask | null) ?? null);
+      setLatestTask(task.data?.archived_at ? null : (task.data as DashboardAssistantTask | null) ?? null);
       setLoading(false);
     })();
 

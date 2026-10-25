@@ -66,14 +66,14 @@ export function AppShell() {
     let cancelled = false;
     void supabase
       .from('assistant_tasks')
-      .select('status')
+      .select('status,archived_at')
       .eq('workspace_id', workspace.id)
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle()
       .then(({ data }) => {
-        if (!cancelled) setAssistantTaskStatus((data?.status as 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | undefined) ?? null);
+        if (!cancelled) setAssistantTaskStatus((data?.archived_at ? null : data?.status as 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | undefined) ?? null);
       });
 
     const channel = supabase
@@ -82,8 +82,8 @@ export function AppShell() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'assistant_tasks', filter: `user_id=eq.${user.id}` },
         (payload) => {
-          const row = payload.new as { workspace_id?: string; status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' };
-          if (row.workspace_id === workspace.id && row.status) setAssistantTaskStatus(row.status);
+          const row = payload.new as { workspace_id?: string; archived_at?: string | null; status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' };
+          if (row.workspace_id === workspace.id && row.status) setAssistantTaskStatus(row.archived_at ? null : row.status);
         },
       )
       .subscribe();

@@ -3,6 +3,8 @@ export const session = { user: { id: 'user-1', email: 'qa@example.test' }, acces
 export let dnaError = false;
 let enqueueError = false, listener;
 let tasks = [];
+let taskControlError = false;
+export function setTaskControlError(value) { taskControlError = value; }
 const channels = new Set();
 export function setDnaError(value) { dnaError = value; }
 export function setEnqueueError(value) { enqueueError = value; }
@@ -44,14 +46,22 @@ export const supabase = {
     onAuthStateChange: fn => { listener = fn; return { data: { subscription: { unsubscribe() { listener = null; } } } }; },
     signOut: async () => { listener('SIGNED_OUT', null); },
   },
-  async rpc(name) {
+  async rpc(name, params) {
     calls.push({ table: name });
-    return { data: name === 'is_super_admin' ? false : null, error: name === 'enqueue_assistant_task' && enqueueError ? { message: 'تعذّر حفظ المهمة' } : null };
+    if (['cancel_assistant_task', 'archive_creation_request', 'restart_assistant_task'].includes(name)) {
+      if (taskControlError) return { data: null, error: { message: 'تعذر تحديث الطلب' } };
+      const task = tasks.find(row => row.id === params.p_task_id);
+      if (!task) return { data: null, error: { message: 'task_access_denied' } };
+      const next = { ...task, status: name === 'restart_assistant_task' ? 'queued' : ['queued','running'].includes(task.status) ? 'cancelled' : task.status, updated_at: new Date().toISOString(), ...(name === 'archive_creation_request' ? { archived_at: new Date().toISOString() } : {}) };
+      tasks = tasks.map(row => row.id === task.id ? next : row);
+      return { data: next, error: null };
+    }
+    return { data: name === 'is_super_admin'  ? false : null, error: name === 'enqueue_assistant_task' && enqueueError ? { message: 'تعذّر حفظ المهمة' } : null };
   },
   from(table) {
     let single = false;
     const query = {}, args = [];
-    for (const method of ['select', 'eq', 'neq', 'order', 'limit', 'in', 'gte', 'lt', 'update', 'range', 'ilike', 'or', 'abortSignal']) {
+    for (const method of ['select', 'eq', 'neq', 'order', 'limit', 'in', 'gte', 'lt', 'update', 'range', 'ilike', 'or', 'is', 'abortSignal']) {
       query[method] = (...a) => { args.push([method, ...a]); return query; };
     }
     query.maybeSingle = query.single = () => { single = true; return query; };
@@ -60,7 +70,7 @@ export const supabase = {
       if (table === 'workspace_members') data = { workspace_id: ws.id };
       else if (table === 'workspaces') data = ws;
       else if (table === 'brand_dna') data = dnaError ? null : { id: 'dna', status: 'approved' };
-      else if (table === 'assistant_tasks') data = single ? tasks[0] ?? null : tasks;
+      else if (table === 'assistant_tasks') { const visible = args.some(a => a[0] === 'is' && a[1] === 'archived_at') ? tasks.filter(row => !row.archived_at) : tasks; data = single ? visible[0] ?? null : visible; }
       else if (table === 'inbox_conversations' || table === 'inbox_messages') {
         const conversationId = args.find(a => a[0] === 'eq' && a[1] === 'conversation_id')?.[2] ?? 'a';
         let rows = table === 'inbox_conversations' ? [...inboxConversations] : inboxMessages ? [...inboxMessages] : [

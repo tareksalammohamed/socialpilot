@@ -6,6 +6,7 @@ SELECT set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000011'
 DO $$
 DECLARE wid uuid:='20000000-0000-0000-0000-000000000011'; tid uuid; cancelled public.assistant_tasks; fresh public.assistant_tasks; retry public.assistant_tasks; turn jsonb:='{"advice":"late"}';
 BEGIN
+ IF has_function_privilege('anon','public.archive_creation_request(uuid)','EXECUTE') THEN RAISE EXCEPTION 'anonymous_archive'; END IF;
  IF has_function_privilege('anon','public.cancel_assistant_task(uuid)','EXECUTE') OR has_function_privilege('anon','public.restart_assistant_task(uuid)','EXECUTE') THEN RAISE EXCEPTION 'anonymous_controls'; END IF;
  tid:=public.enqueue_assistant_task(wid,'create','{"message":"original","legacyContext":{"timezone":"Africa/Cairo"}}',gen_random_uuid());
  PERFORM public.claim_assistant_task('old-worker',tid);
@@ -21,11 +22,28 @@ BEGIN
  IF fresh.status<>'queued' OR fresh.id=tid OR fresh.checkpoint IS NOT NULL OR fresh.ai_steps<>'{}'::jsonb OR fresh.progress<>'{}'::jsonb OR fresh.payload->>'message'<>'original' THEN RAISE EXCEPTION 'restart_not_fresh'; END IF;
  SELECT * INTO retry FROM public.restart_assistant_task(tid);
  IF retry.id<>fresh.id OR (SELECT count(*) FROM public.assistant_tasks WHERE restarted_from=tid)<>1 THEN RAISE EXCEPTION 'duplicate_restart'; END IF;
+ -- Archive is restricted to the owner, cancels atomically, and fences old workers.
+ tid:=public.enqueue_assistant_task(wid,'create','{"message":"delete me"}',gen_random_uuid());
+ PERFORM public.claim_assistant_task('archive-worker',tid);
+ PERFORM set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000012',true);
+ BEGIN PERFORM public.archive_creation_request(tid); RAISE EXCEPTION 'other_user_archived'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_access_denied' THEN RAISE; END IF; END;
+ PERFORM set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000011',true);
+ SELECT * INTO cancelled FROM public.archive_creation_request(tid);
+ IF cancelled.archived_at IS NULL OR cancelled.status<>'cancelled' OR cancelled.worker_id IS NOT NULL THEN RAISE EXCEPTION 'archive_not_fenced'; END IF;
+ SELECT * INTO retry FROM public.archive_creation_request(tid);
+ IF retry.archived_at<>cancelled.archived_at THEN RAISE EXCEPTION 'archive_not_idempotent'; END IF;
+ BEGIN PERFORM public.complete_assistant_task(tid,'archive-worker',turn); RAISE EXCEPTION 'archived_result_saved'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'lease_lost' THEN RAISE; END IF; END;
+ tid:=public.enqueue_assistant_task(wid,'create','{"message":"done"}',gen_random_uuid());
+ UPDATE public.assistant_tasks SET status='completed',result='{"advice":"keep"}' WHERE id=tid;
+ SELECT * INTO cancelled FROM public.archive_creation_request(tid);
+ IF cancelled.status<>'completed' OR cancelled.result->>'advice'<>'keep' OR cancelled.archived_at IS NULL THEN RAISE EXCEPTION 'archive_destroyed_result'; END IF;
  tid:=public.enqueue_assistant_task(wid,'publish','{"message":"publish"}',gen_random_uuid());
  PERFORM public.claim_assistant_task('publisher',tid);
+ BEGIN PERFORM public.archive_creation_request(tid); RAISE EXCEPTION 'publish_archived'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_archive_not_supported' THEN RAISE; END IF; END;
  BEGIN PERFORM public.restart_assistant_task(tid); RAISE EXCEPTION 'publish_replayed'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_restart_not_supported' THEN RAISE; END IF; END;
  BEGIN PERFORM public.cancel_assistant_task(tid); RAISE EXCEPTION 'inflight_publish_cancelled'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'action_already_started' THEN RAISE; END IF; END;
  DELETE FROM public.workspace_members WHERE workspace_id=wid AND user_id=auth.uid();
+ BEGIN PERFORM public.archive_creation_request(fresh.id); RAISE EXCEPTION 'former_member_archived'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_access_denied' THEN RAISE; END IF; END;
  BEGIN PERFORM public.restart_assistant_task(fresh.id); RAISE EXCEPTION 'former_member_restarted'; EXCEPTION WHEN OTHERS THEN IF SQLERRM<>'task_access_denied' THEN RAISE; END IF; END;
 END $$;
 ROLLBACK;

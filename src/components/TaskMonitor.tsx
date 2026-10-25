@@ -27,7 +27,7 @@ export function TaskMonitor() {
       const base = () => supabase.from('assistant_tasks').select('*').eq('workspace_id', workspaceId).eq('user_id', userId);
       try {
         const [active, latest] = await Promise.all([
-          base().in('status', ['queued', 'running']).order('created_at', { ascending: false }),
+          base().is('archived_at', null).in('status', ['queued', 'running']).order('created_at', { ascending: false }),
           base().order('created_at', { ascending: false }).limit(1).maybeSingle(),
         ]);
         if (disposed) return;
@@ -35,7 +35,7 @@ export function TaskMonitor() {
         lastLoadedAt = Date.now();
         hasActiveTasks = Boolean(active.data?.length);
         setUnavailable(false);
-        setTasks((active.data?.length ? active.data : latest.data ? [latest.data] : []) as DurableTask[]);
+        setTasks((active.data?.length ? active.data : latest.data && !latest.data.archived_at ? [latest.data] : []) as DurableTask[]);
       } catch { if (!disposed) setUnavailable(true); }
       finally { loading = false; }
     }
@@ -65,7 +65,7 @@ export function TaskMonitor() {
         {expanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
       </button>
       {expanded && <div id="global-task-progress" className="max-h-[55vh] overflow-y-auto space-y-2 mt-2 pb-2">{tasks.map(task => <TaskProgress key={task.id} task={task} onUpdate={next => {
-        setTasks(previous => [next, ...previous.filter(item => item.id !== next.id && item.id !== task.id)]);
+        setTasks(previous => [...(next.archived_at ? [] : [next]), ...previous.filter(item => item.id !== next.id && item.id !== task.id)]);
       }} />)}</div>}
     </div>
   </aside>;
