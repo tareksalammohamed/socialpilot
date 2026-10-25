@@ -133,6 +133,6 @@ Deno.test('text fallback must pass validation and cannot activate without it', a
     try {
       await routeAndRun(db, { requiredCapabilities: ['structured_output'], allowValidatedJsonFallback: true, systemPrompt: '', userPrompt: '', jsonMode: true, validate: c => JSON.parse(c).ok === true });
       throw Error('Invalid schema accepted');
-    } catch (error) { if (!(error instanceof AllModelsFailedError) || calls !== 1) throw error; }
+    } catch (error) { if (!(error instanceof AllModelsFailedError) || Number(calls) !== 1) throw error; }
   } finally { globalThis.fetch = saved; }
 });
