@@ -33,3 +33,38 @@ Deno.test('a follow-up edits the existing campaign and removes Instagram in the 
  });
  if(!saved||out.pendingApproval||out.clarifyingQuestion||!out.toolResults[0].ok)throw Error('follow-up not executed');
 });
+
+Deno.test('real revision executor respects platform exclusions and multiple retained platforms',async()=>{
+ for(const [message,expected] of [['شيل انستجرام',['facebook','linkedin']],['خليها فيسبوك ولينكد ان بس',['facebook','linkedin']],['اختصره',['facebook','linkedin','instagram']]] as Array<[string,string[]]>) {
+  let written=false,calls=0;
+  const rows=['facebook','linkedin','instagram'].map(platform=>({id:platform,content_id:'post',platform,text:'النص الحالي '+platform,hashtags:[],cta:null,status:'review',updated_at:'2026-10-25T10:00:00Z',scheduled_at:null}));
+  const db={from:(table:string)=>{
+   const q:Record<string,unknown>={};for(const key of ['select','eq','in'])q[key]=()=>q;
+   q.order=()=>Promise.resolve({data:table==='content'?[{id:'post',title:'الفكرة'}]:rows,error:null});return q;
+  },rpc:(_name:string,args:Record<string,unknown>)=>{
+   const updates=args.p_updates as Array<Record<string,unknown>>;
+   if(JSON.stringify(updates.map(r=>r.platform))!==JSON.stringify(expected)||updates.some(r=>r.id!==r.platform))throw Error('wrong targets');
+   if(JSON.stringify(args.p_remove_ids)!==JSON.stringify(rows.filter(r=>!expected.includes(r.platform)).map(r=>r.id)))throw Error('wrong removals');
+   written=true;return Promise.resolve({data:{},error:null});
+  }} as unknown as SupabaseClient;
+  const out=await runAgentTurn(db,{message,context:{workspaceId:'ws',userId:'user',currentContentId:'post'}},async(_intent,_message,platforms,ctx)=>{
+   calls++;if(JSON.stringify(platforms)!==JSON.stringify(expected)||(ctx.existing_slots as unknown[]).length!==expected.length)throw Error('wrong writer scope');
+   return {result:{slots:platforms.map(platform=>({platform,title:'الفكرة',content:'صياغة بالمصري'}))},tokensIn:0,tokensOut:0};
+  });
+  if(!written||calls!==1||!out.toolResults[0].ok||out.clarifyingQuestion)throw Error('edit failed: '+message);
+ }
+});
+Deno.test('empty platform scope and malformed results never save a partial revision',async()=>{
+ for(const mode of ['remove-all','missing-slot','wrong-platform']) {
+  let writes=0,calls=0;
+  const db={from:(table:string)=>{
+   const q:Record<string,unknown>={};for(const key of ['select','eq','in'])q[key]=()=>q;
+   q.order=()=>Promise.resolve({data:table==='content'?[{id:'post',title:'الفكرة'}]:[{id:'li',content_id:'post',platform:'linkedin',text:'النص الحالي',hashtags:[],cta:null,status:'review',updated_at:'2026-10-25T10:00:00Z',scheduled_at:null}],error:null});return q;
+  },rpc:()=>{writes++;return Promise.resolve({data:{},error:null});}} as unknown as SupabaseClient;
+  let rejected=false;
+  try {await runAgentTurn(db,{message:mode==='remove-all'?'شيل لينكد ان':'اختصره',context:{workspaceId:'ws',userId:'user',currentContentId:'post'}},async()=>{
+    calls++;return {result:{slots:mode==='missing-slot'?[]:[{platform:'instagram',title:'الفكرة',content:'نص مختلف'}]},tokensIn:0,tokensOut:0};
+  });}catch{rejected=true;}
+  if(!rejected||writes!==0||(mode==='remove-all'&&calls!==0))throw Error('unsafe revision: '+mode);
+ }
+});

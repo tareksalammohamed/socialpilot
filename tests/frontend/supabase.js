@@ -47,7 +47,7 @@ export const supabase = {
     signOut: async () => { listener('SIGNED_OUT', null); },
   },
   async rpc(name, params) {
-    calls.push({ table: name });
+    calls.push({ table: name, params });
     if (['cancel_assistant_task', 'archive_creation_request', 'restart_assistant_task'].includes(name)) {
       if (taskControlError) return { data: null, error: { message: 'تعذر تحديث الطلب' } };
       const task = tasks.find(row => row.id === params.p_task_id);

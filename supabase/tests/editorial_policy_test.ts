@@ -1,5 +1,5 @@
 import { editorialRules,enforceEditorialReview,enforceEditorialChecklist,EDITORIAL_CHECKS,cleanGeneratedText } from '../functions/_shared/editorial-policy.ts';
-import { directEditorialPlan,exclusivePlatform,isEditorialFollowup } from '../functions/_shared/editorial-followup.ts';
+import { directEditorialPlan,exclusivePlatform,isEditorialFollowup,revisionPlatforms,editorialTarget } from '../functions/_shared/editorial-followup.ts';
 const pass={verdict:'pass',scores:{overall:100},reasons:[],suggested_improvements:[]};
 Deno.test('default medium posts reject article length while explicit word counts override it',()=>{
  const content='العميل محتاج يفهم الفكرة عشان يقدر يختار بهدوء. '.repeat(24);
@@ -80,4 +80,28 @@ Deno.test('hypothetical stories cannot launder unsupported insurance coverage',(
  if(enforceEditorialReview(pass,safe,'اكتب قصة افتراضية',rules).verdict!=='pass')throw Error('safe story rejected');
  const checks=Object.fromEntries(EDITORIAL_CHECKS.map(key=>[key,true]));
  if(enforceEditorialChecklist({...pass,checks,scores:{overall:79}}).verdict==='pass')throw Error('weak review passed');
+});
+
+Deno.test('Egyptian edits resolve directly while new requests and public actions keep their planner',()=>{
+ for(const message of ['اختصره','اختصرها وخليها بالمصري','طوله شوية','خليها بالمصري','خلّيه رسمي','غيّر الأسلوب','أعد صياغة المقدمة','بالمصري وبأسلوب أبسط','لينكدإن فقط','من غير انستجرام','فيسبوك ولينكد ان بس','shorten it','expand this']) {
+  if(!isEditorialFollowup(message)||!directEditorialPlan(message,{currentContentId:'selected'}))throw Error('edit not understood: '+message);
+ }
+ for(const message of ['اكتب بوست جديد','اعمل حملة جديدة','احذف المنشور','امسح الطلب','الغي الجدولة','عدل البوست وانشره','اختصره وانشر','راجع البوست وجدوله','rewrite and publish it','كيف أكتب منشور؟']) {
+  if(directEditorialPlan(message,{currentContentId:'selected'}))throw Error('action swallowed: '+message);
+ }
+ if(directEditorialPlan('اختصره',{}))throw Error('target invented');
+ for(const message of ['اختصره','اختصرها شوية','طوله شوية','shorten it'])if(editorialRules(message,'').includes('80 إلى 140'))throw Error('explicit length overridden: '+message);
+});
+Deno.test('platform sets retain multiple choices and respect exclusions',()=>{
+ const cases=[['خليها فيسبوك ولينكد ان بس',{included:['facebook','linkedin'],excluded:[]}],['شيل انستجرام وفيسبوك',{included:[],excluded:['instagram','facebook']}],['خليها لينكدإن فقط وشيل انستجرام',{included:['linkedin'],excluded:['instagram']}],['خليها فيسبوك بس مش انستجرام',{included:['facebook'],excluded:['instagram']}],['مش بس لينكدإن',{included:[],excluded:[]}]];
+ for(const [message,expected] of cases)if(JSON.stringify(revisionPlatforms(String(message)))!==JSON.stringify(expected))throw Error('incorrect scope: '+message);
+ if(exclusivePlatform('فيسبوك ولينكد ان بس'))throw Error('multiple platforms narrowed to one');
+});
+Deno.test('target follows saved results and stops at deleted or unresolved work',()=>{
+ const source={status:'completed',content_id:'post',batch_id:'campaign'};
+ if(JSON.stringify(editorialTarget(source))!==JSON.stringify({selectedCampaignId:'campaign'}))throw Error('campaign scope lost');
+ if(Object.keys(editorialTarget({...source,archived_at:'2026-10-25'})).length)throw Error('deleted request reused');
+ for(const status of ['running','queued','failed','cancelled'])if(Object.keys(editorialTarget({...source,status})).length)throw Error('unresolved request reused');
+ if(editorialTarget({status:'completed',result:{revision:true,contentId:'edited-post',batchId:null}}).currentContentId!=='edited-post')throw Error('second revision lost target');
+ if(Object.keys(editorialTarget({status:'completed',result:{contentId:'invented'}})).length)throw Error('advice trusted as target');
 });

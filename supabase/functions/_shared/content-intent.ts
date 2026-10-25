@@ -34,7 +34,7 @@ export function platformSelection(message: string): { platforms: string[]; exclu
     return [...text.matchAll(new RegExp(pattern, 'gu'))].map(match => ({ platform, start: match.index!, end: match.index! + match[0].length }));
   }).sort((a,b) => a.start - b.start);
   const included = new Set<string>(), excluded = new Set<string>();
-  const negative = /(?:بدون|من غير|باستثناء|عدا|إلا|الا|مش عايز|مش عاوز|مش على|امسح|احذف|شيل|without|except|exclude|excluding|not on|no|remove)\s*(?:نسخ[ةه]\s+|على\s+|الـ?\s*)?$/iu;
+  const negative = /(?:بدون|من غير|باستثناء|عدا|إلا|الا|مش عايز|مش عاوز|مش على|مش|موش|امسح|احذف|شيل|without|except|exclude|excluding|not on|not|no|remove)\s*(?:نسخ[ةه]\s+|على\s+|الـ?\s*)?$/iu;
   let last: typeof mentions[number] | undefined;
   for (const mention of mentions) {
     const before = text.slice(Math.max(0, mention.start - 60), mention.start);
