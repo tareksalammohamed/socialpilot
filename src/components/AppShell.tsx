@@ -1,14 +1,16 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { Home, Plus, FileText, MessageSquare, MoreHorizontal, BarChart3, Loader2, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
-import { HomeScreen } from '@/screens/HomeScreen';
-import { CreateScreen } from '@/screens/CreateScreen';
-import { ContentScreen } from '@/screens/ContentScreen';
-import { InboxScreen } from '@/screens/InboxScreen';
-import { MoreScreen } from '@/screens/MoreScreen';
+const HomeScreen = lazy(() => import('@/screens/HomeScreen').then(module => ({ default: module.HomeScreen })));
+const CreateScreen = lazy(() => import('@/screens/CreateScreen').then(module => ({ default: module.CreateScreen })));
+const ContentScreen = lazy(() => import('@/screens/ContentScreen').then(module => ({ default: module.ContentScreen })));
+const InboxScreen = lazy(() => import('@/screens/InboxScreen').then(module => ({ default: module.InboxScreen })));
+const MoreScreen = lazy(() => import('@/screens/MoreScreen').then(module => ({ default: module.MoreScreen })));
+import { ScreenLoader } from './ui';
+import { ScreenErrorBoundary } from './ScreenErrorBoundary';
 import { TaskMonitor } from './TaskMonitor';
-import { AnalyticsScreen } from '@/screens/AnalyticsScreen';
+const AnalyticsScreen = lazy(() => import('@/screens/AnalyticsScreen').then(module => ({ default: module.AnalyticsScreen })));
 
 type Tab = 'home' | 'create' | 'content' | 'analytics' | 'inbox' | 'more';
 
@@ -153,7 +155,11 @@ export function AppShell() {
       <TaskMonitor />
       <div className="flex-1 overflow-y-auto no-scrollbar pb-28">
         <div key={`${tab}-${workspace?.id ?? 'no-ws'}`} className="animate-fade-in">
-          {screens[tab]}
+          <ScreenErrorBoundary>
+            <Suspense fallback={<ScreenLoader label="جارٍ فتح الصفحة..." />}>
+              {screens[tab]}
+            </Suspense>
+          </ScreenErrorBoundary>
         </div>
       </div>
 

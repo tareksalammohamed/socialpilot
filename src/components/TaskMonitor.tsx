@@ -19,6 +19,8 @@ export function TaskMonitor() {
     if (!workspaceId || !userId) return;
     let disposed = false;
     let loading = false;
+    let hasActiveTasks = false;
+    let lastLoadedAt = 0;
     async function load() {
       if (loading || disposed) return;
       loading = true;
@@ -30,6 +32,8 @@ export function TaskMonitor() {
         ]);
         if (disposed) return;
         if (active.error || latest.error) { setUnavailable(true); return; }
+        lastLoadedAt = Date.now();
+        hasActiveTasks = Boolean(active.data?.length);
         setUnavailable(false);
         setTasks((active.data?.length ? active.data : latest.data ? [latest.data] : []) as DurableTask[]);
       } catch { if (!disposed) setUnavailable(true); }
@@ -37,13 +41,16 @@ export function TaskMonitor() {
     }
     const refresh = () => { void load(); };
     void load();
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 3000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible' && Date.now() - lastLoadedAt >= (hasActiveTasks ? 5000 : 60000)) void load();
+    }, 5000);
     window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
     window.addEventListener('assistant-task-change', refresh);
     const channel = supabase.channel(`task-monitor:${workspaceId}:${userId}`).on('postgres_changes', {
       event: '*', schema: 'public', table: 'assistant_tasks', filter: `user_id=eq.${userId}`,
     }, refresh).subscribe();
-    return () => { disposed = true; clearInterval(timer); window.removeEventListener('focus', refresh); window.removeEventListener('assistant-task-change', refresh); void supabase.removeChannel(channel); };
+    return () => { disposed = true; clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); window.removeEventListener('assistant-task-change', refresh); void supabase.removeChannel(channel); };
   }, [workspaceId, userId]);
   if (!tasks.length && !unavailable) return null;
   const active = tasks.filter(task => task.status === 'queued' || task.status === 'running');

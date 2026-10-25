@@ -54,3 +54,44 @@ Deno.test('all credit failures are reported as exhaustion with a readable cause'
   if(!rejected)throw Error('credit failure misclassified');
  }finally{globalThis.fetch=saved;}
 });
+
+Deno.test('credit exhaustion can reach free fallback beyond twelve paid candidates', async () => {
+  const saved = globalThis.fetch;
+  const attempts: string[] = [];
+  globalThis.fetch = async (_url, init) => {
+    const model = JSON.parse(String(init?.body)).model;
+    attempts.push(model);
+    return model.startsWith('paid')
+      ? Response.json({ error: { message: 'requires more credits', code: 402 } }, { status: 402 })
+      : Response.json({ choices: [{ finish_reason: 'stop', message: { content: '{"ok":true}' } }] });
+  };
+  try {
+    const models = Array.from({ length: 20 }, (_, i) => ({
+      provider_key: 'openrouter', model_id: `paid-${i}`, is_free: false, quality_score: 100 - i,
+    }));
+    models.push({ provider_key: 'openrouter', model_id: 'free-backup', is_free: true, quality_score: 50 });
+    const result = await routeAndRun(database(models), {
+      requiredCapabilities: ['structured_output'], systemPrompt: '', userPrompt: '', jsonMode: true,
+    });
+    if (result.modelUsed !== 'free-backup' || attempts.join(',') !== 'paid-0,free-backup') {
+      throw Error('Unused paid candidates exhausted the fallback budget');
+    }
+  } finally { globalThis.fetch = saved; }
+});
+
+Deno.test('actual failing model calls remain bounded to twelve', async () => {
+  const saved = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ error: 'busy' }, { status: 503 }); };
+  try {
+    const models = Array.from({ length: 20 }, (_, i) => ({
+      provider_key: 'openrouter', model_id: `free-${i}`, is_free: true, quality_score: 100 - i,
+    }));
+    try {
+      await routeAndRun(database(models), { requiredCapabilities: [], systemPrompt: '', userPrompt: '', jsonMode: false });
+      throw Error('Expected model failure');
+    } catch (error) {
+      if (!(error instanceof AllModelsFailedError) || calls !== 12) throw error;
+    }
+  } finally { globalThis.fetch = saved; }
+});
