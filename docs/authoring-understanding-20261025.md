@@ -11,7 +11,7 @@
 
 ## Validation
 
-78 content/router/publication tests passed locally, plus frontend integration tests for visible revision identity and new-draft isolation. Frontend lint, TypeScript and build checks accompany CI backend type and PostgreSQL workflow checks. Tests use mocked model responses and do not establish live writing quality or provider latency. No public post, paid generation, or message is sent as part of validation.
+79 content/router/publication tests passed locally, plus frontend integration tests for visible revision identity and new-draft isolation. Frontend lint, TypeScript and build checks accompany CI backend type and PostgreSQL workflow checks. Tests use mocked model responses and do not establish live writing quality or provider latency. No public post, paid generation, or message is sent as part of validation.
 
 ## Still required for full readiness
 

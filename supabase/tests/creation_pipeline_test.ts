@@ -68,3 +68,19 @@ Deno.test('empty platform scope and malformed results never save a partial revis
   if(!rejected||writes!==0||(mode==='remove-all'&&calls!==0))throw Error('unsafe revision: '+mode);
  }
 });
+
+Deno.test('a selected variant in a multi-post campaign does not require editing other posts',async()=>{
+ let selected=false,written=false;
+ const row={id:'chosen',content_id:'second',platform:'linkedin',text:'النص الحالي',hashtags:[],cta:null,status:'review',updated_at:'2026-10-25T10:00:00Z',scheduled_at:null};
+ const db={from:(table:string)=>{
+  const q:Record<string,unknown>={};for(const key of ['select','in'])q[key]=()=>q;
+  q.eq=(field:string,value:string)=>{if(table==='content_variants'&&field==='id'&&value==='chosen')selected=true;return q;};
+  q.order=()=>q; q.then=(resolve:(value:unknown)=>unknown)=>resolve({data:table==='content'?[{id:'first',title:'الأول'},{id:'second',title:'الثاني'}]:[row],error:null});return q;
+ },rpc:(_name:string,args:Record<string,unknown>)=>{
+  const updates=args.p_updates as Array<Record<string,unknown>>;
+  if(!selected||updates.length!==1||updates[0].id!=='chosen'||(args.p_remove_ids as string[]).length)throw Error('variant scope lost');
+  written=true;return Promise.resolve({data:{},error:null});
+ }} as unknown as SupabaseClient;
+ await runAgentTurn(db,{message:'اختصره',context:{workspaceId:'ws',userId:'user',selectedCampaignId:'batch',currentVariantId:'chosen'}},async()=>({result:{slots:[{platform:'linkedin',title:'الثاني',content:'صياغة مختصرة'}]},tokensIn:0,tokensOut:0}));
+ if(!written)throw Error('selected variant not saved');
+});

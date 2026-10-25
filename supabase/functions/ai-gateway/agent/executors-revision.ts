@@ -28,7 +28,9 @@ export async function executeRevision(call:ToolCall,ctx:AgentContext,db:Supabase
   };
   const snapshot=durable?await durable.run(`revision-source:${call.id}`,load,false):await load();
   const retained=snapshot.posts.flatMap(p=>{
-    const rows=snapshot.rows.filter(r=>r.content_id===p.id&&!scope.excluded.includes(r.platform));
+    const originalRows=snapshot.rows.filter(r=>r.content_id===p.id);
+    if(!originalRows.length)return []; // A selected variant can belong to just one post in a campaign.
+    const rows=originalRows.filter(r=>!scope.excluded.includes(r.platform));
     if(!rows.length)throw new Error('لا يمكن إزالة كل نسخ المنشور من خلال تعديل؛ حدد منصة للاحتفاظ بها أو استخدم حذف المحتوى.');
     if(!keep.length)return rows.map(row=>({row,platform:row.platform}));
     const used=new Set<string>();
