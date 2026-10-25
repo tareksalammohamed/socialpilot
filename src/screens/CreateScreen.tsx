@@ -3,6 +3,7 @@ import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'luci
 import { draftKey, useDraft } from '@/lib/drafts';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
+import { editorialTarget, isEditorialFollowup } from '../../supabase/functions/_shared/editorial-followup';
 import { TaskProgress } from '@/components/TaskProgress';
 import { enqueueTask, type DurableTask } from '@/lib/tasks';
 import { Button, Card, ErrorBanner, Spinner, Badge } from '@/components/ui';
@@ -247,7 +248,7 @@ export function CreateScreen() {
       const parsed = parseIntent(message);
       const taskId = await enqueueTask(workspace.id, 'create', {
         message: message.trim(), platforms: parsed.platforms,
-        agentContext: { currentRoute: 'create' },
+        agentContext: { currentRoute: 'create', ...(isEditorialFollowup(message) ? editorialTarget(activeTask) : {}) },
         legacyContext: {
           post_count: parsed.postCount, start_date: parsed.startDate, end_date: parsed.endDate,
           frequency: parsed.frequency, schedule: parsed.schedule, content_goal: parsed.contentGoal,

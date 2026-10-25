@@ -1,4 +1,4 @@
-import { isEditorialFollowup } from '../_shared/editorial-followup.ts';
+import { isEditorialFollowup, editorialTarget, directEditorialPlan } from '../_shared/editorial-followup.ts';
 import { DurableSteps } from '../_shared/durable-steps.ts';
 import { creationDefaults, isSimpleCreation, isSchedulingFollowup, continueRecentCreation } from '../_shared/creation-policy.ts';
 import { aggregateInsights } from '../_shared/analytics-math.ts';
@@ -47,16 +47,17 @@ async function execute(task: Task, worker: string): Promise<void> {
     if (['create','agent'].includes(task.task_kind)) {
       const editorContext=(task.payload.agentContext??{}) as Record<string,unknown>;
       if(isEditorialFollowup(String(task.payload.message??''))&&!editorContext.currentContentId&&!editorContext.selectedCampaignId){
-        const {data:previous,error}=await db.from('assistant_tasks').select('batch_id,content_id').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('status','completed').lt('created_at',task.created_at).or('batch_id.not.is.null,content_id.not.is.null').order('created_at',{ascending:false}).limit(1).maybeSingle();
+        const {data:previous,error}=await db.from('assistant_tasks').select('batch_id,content_id,result,status,archived_at').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).in('task_kind',['create','agent']).lt('created_at',task.created_at).gte('created_at',new Date(new Date(task.created_at).getTime()-24*60*60_000).toISOString()).order('created_at',{ascending:false}).limit(1).maybeSingle();
         if(error)throw error;
-        if(previous){task.payload={...task.payload,agentContext:{...editorContext,currentContentId:previous.content_id??undefined,selectedCampaignId:previous.batch_id??undefined}};
+        const target=editorialTarget(previous);
+        if(target.currentContentId||target.selectedCampaignId){task.payload={...task.payload,agentContext:{...editorContext,...target}};
           const {data:saved,error:err}=await db.from('assistant_tasks').update({payload:task.payload}).eq('id',task.id).eq('worker_id',worker).eq('status','running').select('id').maybeSingle();if(err||!saved)throw new Error('lease_lost');}
       }
 
       if(task.task_kind==='create'&&(task.payload.legacyContext as Record<string,unknown>|undefined)?.creation_defaults_applied!==true&&isSchedulingFollowup(String(task.payload.message??''))){
-        const {data:previous,error}=await db.from('assistant_tasks').select('request_text,payload,result_type').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('task_kind','create').eq('status','completed').lt('created_at',task.created_at).gte('created_at',new Date(new Date(task.created_at).getTime()-24*60*60_000).toISOString()).order('created_at',{ascending:false}).limit(5);
+        const {data:previous,error}=await db.from('assistant_tasks').select('request_text,payload,result_type,status,archived_at').eq('workspace_id',task.workspace_id).eq('user_id',task.user_id).eq('task_kind','create').lt('created_at',task.created_at).gte('created_at',new Date(new Date(task.created_at).getTime()-24*60*60_000).toISOString()).order('created_at',{ascending:false}).limit(5);
         if(error)throw error;
-        const combined=continueRecentCreation(String(task.payload.message??''),(previous??[]).map(item=>({message:String(item.payload?.message??item.request_text),resultType:item.result_type})));
+        const combined=continueRecentCreation(String(task.payload.message??''),(previous??[]).map(item=>({message:String(item.payload?.message??item.request_text),resultType:item.archived_at||item.status!=='completed'?'unavailable':item.result_type})));
         task.payload={...task.payload,message:combined};
       }
       const draft={message:String(task.payload.message??''),platforms:task.payload.platforms as string[]|undefined,context:(task.payload.agentContext??{}) as {currentRoute?:string},legacyContext:task.payload.legacyContext as Record<string,unknown>|undefined};
@@ -69,7 +70,8 @@ async function execute(task: Task, worker: string): Promise<void> {
         if(saveError||!saved)throw new Error('lease_lost');
       }
       const legacy = (task.payload.legacyContext ?? {}) as Record<string, unknown>;
-      if (!Object.hasOwn(legacy, 'performance')) {
+      // Direct edits consume the existing text and brand context, not account-wide analytics.
+      if (!directEditorialPlan(String(task.payload.message??''),task.payload.agentContext??{}) && !Object.hasOwn(legacy, 'performance')) {
         const insights=[];
         for(let offset=0;;offset+=1000){
           const {data,error}=await db.from('latest_post_insights').select('*').eq('workspace_id',task.workspace_id).order('id').range(offset,offset+999);
