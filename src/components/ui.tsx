@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react';
+import { type ReactNode, type ButtonHTMLAttributes } from 'react';
 import { Loader2 } from 'lucide-react';
 
 export function Spinner({ className = '', size = 20 }: { className?: string; size?: number }) {
@@ -41,15 +41,12 @@ export function Button({
   disabled,
   className = '',
   type = 'button',
+  ...attributes
 }: {
   children: ReactNode;
-  onClick?: () => void;
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
   size?: 'sm' | 'md' | 'lg';
-  disabled?: boolean;
-  className?: string;
-  type?: 'button' | 'submit';
-}) {
+} & ButtonHTMLAttributes<HTMLButtonElement>) {
   const variants = {
     primary: 'bg-brand-500 text-ink-950 hover:bg-brand-400 font-semibold',
     secondary: 'bg-ink-800 text-ink-100 hover:bg-ink-700 border border-ink-700',
@@ -63,6 +60,7 @@ export function Button({
   };
   return (
     <button
+      {...attributes}
       type={type}
       onClick={onClick}
       disabled={disabled}

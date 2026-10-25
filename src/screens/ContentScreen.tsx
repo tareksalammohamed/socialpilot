@@ -1,3 +1,4 @@
+import { CONTENT_PAGE_SIZE, calendarWeek, loadContentPage, loadContentSummary, loadCalendarWeek, findVariantCalendar, type ContentFilter, type ContentPreview } from '@/lib/contentQueries';
 import { durableRpc, type DurableTask } from '@/lib/tasks';
 import { TaskActivity } from '@/components/TaskActivity';
 import { useEffect, useState } from 'react';
@@ -47,6 +48,19 @@ export function ContentScreen() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [weekOffset, setWeekOffset] = useState(0);
+  const workspaceId = workspace?.id;
+  const [page, setPage] = useState(0);
+  const [statusFilter, setStatusFilter] = useState<ContentFilter>('all');
+  const [search, setSearch] = useState('');
+  const [querySearch, setQuerySearch] = useState('');
+  const [matchingCount, setMatchingCount] = useState(0);
+  const [summary, setSummary] = useState({ total: 0, review: 0, published: 0, scheduled: 0 });
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [metaError, setMetaError] = useState<string | null>(null);
+  const [calendarError, setCalendarError] = useState<string | null>(null);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarContent, setCalendarContent] = useState<ContentPreview[]>([]);
+  const [revision, setRevision] = useState(0);
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [variantsByContent, setVariantsByContent] = useState<Record<string, ContentVariant[]>>({});
@@ -91,32 +105,46 @@ export function ContentScreen() {
   }, [variantsByContent, mediaCache]);
 
   useEffect(() => {
-    if (!workspace) return;
-    (async () => {
-      const [c, cal, acc] = await Promise.all([
-        supabase
-          .from('content')
-          .select('*')
-          .eq('workspace_id', workspace.id)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('calendar_items')
-          .select('*')
-          .eq('workspace_id', workspace.id)
-          .order('scheduled_for', { ascending: true }),
-        supabase
-          .from('social_accounts')
-          .select('*')
-          .eq('workspace_id', workspace.id),
-      ]);
-      const firstError = c.error ?? cal.error ?? acc.error;
-      if (firstError) setLoadError(firstError.message);
-      setContent((c.data as Content[]) ?? []);
-      setCalendar((cal.data as CalendarItem[]) ?? []);
-      setAccounts((acc.data as SocialAccount[]) ?? []);
-      setLoading(false);
-    })();
-  }, [workspace]);
+    if (search.trim() === querySearch) return;
+    const timer = setTimeout(() => { setQuerySearch(search.trim()); setPage(0); }, 300);
+    return () => clearTimeout(timer);
+  }, [search, querySearch]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    let disposed = false;
+    setLoading(true); setLoadError(null); setContent([]);
+    void loadContentPage(workspaceId, page, statusFilter, querySearch).then(result => {
+      if (disposed) return;
+      const lastPage = Math.max(0, Math.ceil(result.total / CONTENT_PAGE_SIZE) - 1);
+      if (page > lastPage) { setPage(lastPage); return; }
+      setContent(result.items); setMatchingCount(result.total);
+    }).catch(error => { if (!disposed) setLoadError(error instanceof Error ? error.message : 'تعذّر تحميل المحتوى'); })
+      .finally(() => { if (!disposed) setLoading(false); });
+    return () => { disposed = true; };
+  }, [workspaceId, page, statusFilter, querySearch, revision]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    let disposed = false;
+    setMetaError(null); setSummaryLoading(true);
+    void loadContentSummary(workspaceId).then(result => {
+      if (!disposed) { setSummary(result); setAccounts(result.accounts); }
+    }).catch(error => { if (!disposed) setMetaError(error instanceof Error ? error.message : 'تعذّر تحميل المؤشرات'); })
+      .finally(() => { if (!disposed) setSummaryLoading(false); });
+    return () => { disposed = true; };
+  }, [workspaceId, revision]);
+
+  useEffect(() => {
+    if (!workspaceId || view !== 'calendar') return;
+    let disposed = false;
+    setCalendarLoading(true); setCalendarError(null); setCalendar([]); setCalendarContent([]);
+    void loadCalendarWeek(workspaceId, weekOffset).then(result => {
+      if (!disposed) { setCalendar(result.items); setCalendarContent(result.content); }
+    }).catch(error => { if (!disposed) setCalendarError(error instanceof Error ? error.message : 'تعذّر تحميل التقويم'); })
+      .finally(() => { if (!disposed) setCalendarLoading(false); });
+    return () => { disposed = true; };
+  }, [workspaceId, view, weekOffset, revision]);
 
   async function toggleExpand(contentId: string) {
     if (expandedId === contentId) {
@@ -127,12 +155,14 @@ export function ContentScreen() {
     if (variantsByContent[contentId]) return;
 
     setVariantsLoading(contentId);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('content_variants')
       .select('*')
+      .eq('workspace_id', workspace?.id ?? '')
       .eq('content_id', contentId)
       .order('platform', { ascending: true });
-    setVariantsByContent((prev) => ({ ...prev, [contentId]: (data as ContentVariant[]) ?? [] }));
+    if (error) setLoadError(error.message);
+    else setVariantsByContent((prev) => ({ ...prev, [contentId]: (data as ContentVariant[]) ?? [] }));
     setVariantsLoading(null);
   }
 
@@ -167,6 +197,7 @@ export function ContentScreen() {
         setContent((prev) => prev.map((item) => item.id === variant.content_id && item.status === 'approved' ? { ...item, status: 'draft' } : item));
       }
       setEditResults((prev) => ({ ...prev, [variant.id]: 'تم حفظ التعديل وإرجاع النسخة للمراجعة قبل النشر.' }));
+      setRevision(value => value + 1);
       cancelEditingVariant();
     } catch (e) {
       setEditResults((prev) => ({ ...prev, [variant.id]: e instanceof Error ? e.message : 'فشل حفظ تعديل المسودة' }));
@@ -250,16 +281,21 @@ export function ContentScreen() {
     setAiEditResults(prev => ({ ...prev, ...messages }));
   }
 
-  async function refreshAfterAgentAction(contentId: string) {
-    if (!workspace) return;
-    const [c, cal, v] = await Promise.all([
-      supabase.from('content').select('*').eq('workspace_id', workspace.id).order('created_at', { ascending: false }),
-      supabase.from('calendar_items').select('*').eq('workspace_id', workspace.id).order('scheduled_for', { ascending: true }),
-      supabase.from('content_variants').select('*').eq('content_id', contentId).order('platform', { ascending: true }),
-    ]);
-    if (c.data) setContent(c.data as Content[]);
-    if (cal.data) setCalendar(cal.data as CalendarItem[]);
-    if (v.data) setVariantsByContent((prev) => ({ ...prev, [contentId]: v.data as ContentVariant[] }));
+  async function refreshAfterAgentAction(contentIds: string | string[]) {
+    if (!workspaceId) return;
+    const ids = typeof contentIds === 'string' ? [contentIds] : contentIds;
+    setRevision(value => value + 1);
+    setVariantsByContent(previous => {
+      const next = { ...previous };
+      for (const id of ids.length ? ids : Object.keys(next)) delete next[id];
+      return next;
+    });
+    if (expandedId && (!ids.length || ids.includes(expandedId))) {
+      const { data, error } = await supabase.from('content_variants').select('*').eq('workspace_id', workspaceId)
+        .eq('content_id', expandedId).order('platform', { ascending: true });
+      if (error) setLoadError(error.message);
+      else setVariantsByContent(previous => ({ ...previous, [expandedId]: (data ?? []) as ContentVariant[] }));
+    }
   }
 
   async function handleApprovePendingTool(variant: ContentVariant) {
@@ -413,8 +449,7 @@ export function ContentScreen() {
         [variant.content_id]: (prev[variant.content_id] ?? []).map((item) => item.id === variant.id ? { ...item, status: 'approved' } : item),
       }));
       setContent((prev) => prev.map((item) => item.id === variant.content_id ? { ...item, status: 'scheduled' } : item));
-      const { data } = await supabase.from('calendar_items').select('*').eq('workspace_id', workspace.id).order('scheduled_for', { ascending: true });
-      setCalendar((data as CalendarItem[]) ?? []);
+      setRevision(value => value + 1);
     } catch (e) {
       setApprovalResults((prev) => ({ ...prev, [variant.id]: e instanceof Error ? e.message : 'فشلت الموافقة' }));
     } finally {
@@ -435,6 +470,7 @@ export function ContentScreen() {
       });
       setCalendar((prev) => prev.map((entry) => entry.id === item.id ? { ...entry, scheduled_for: scheduledFor, status: 'scheduled' } : entry));
       setContent((prev) => prev.map((entry) => entry.id === item.content_id ? { ...entry, scheduled_at: scheduledFor, status: 'scheduled' } : entry));
+      setRevision(value => value + 1);
       setCalendarMessage('تم تحديث الموعد ومهمة النشر المرتبطة بدون إنشاء مهمة مكررة.');
     } catch (e) {
       setCalendarMessage(e instanceof Error ? e.message : 'فشل تعديل موعد النشر');
@@ -452,7 +488,7 @@ export function ContentScreen() {
       return next;
     });
     try {
-      const linkedCalendarItem = calendar.find((item) => item.variant_id === variant.id);
+      const linkedCalendarItem = await findVariantCalendar(workspace.id, variant.id);
       const res = await publishVariant({ workspaceId: workspace.id, variantId: variant.id, calendarItemId: linkedCalendarItem?.id });
       setPublishResults((prev) => ({
         ...prev,
@@ -463,6 +499,7 @@ export function ContentScreen() {
         },
       }));
       setContent((prev) => prev.map((c) => (c.id === variant.content_id ? { ...c, status: 'published' } : c)));
+      setRevision(value => value + 1);
     } catch (e) {
       setPublishResults((prev) => ({
         ...prev,
@@ -473,11 +510,9 @@ export function ContentScreen() {
     }
   }
 
-  if (loading) return <ScreenLoader />;
-
-  const scheduledCount = calendar.filter((item) => ['planned', 'scheduled', 'publishing'].includes(item.status)).length;
-  const reviewCount = content.filter((item) => item.status === 'review' || item.quality_status === 'needs_improvement').length;
-  const publishedCount = content.filter((item) => item.status === 'published').length;
+  const scheduledCount = summary.scheduled;
+  const reviewCount = summary.review;
+  const publishedCount = summary.published;
   const connectedCount = accounts.filter((item) => item.status === 'connected').length;
 
   return (
@@ -493,10 +528,10 @@ export function ContentScreen() {
           <div className="status-orb"><FileText size={20} className="text-brand-300" /></div>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          <div className="metric-tile"><p className="metric-value">{content.length}</p><p className="metric-label">إجمالي المحتوى</p></div>
-          <div className="metric-tile"><p className="metric-value">{scheduledCount}</p><p className="metric-label">في الجدول</p></div>
-          <div className="metric-tile"><p className={`metric-value ${reviewCount ? 'text-warning-300' : ''}`}>{reviewCount}</p><p className="metric-label">يحتاج مراجعة</p></div>
-          <div className="metric-tile"><p className="metric-value">{publishedCount}</p><p className="metric-label">تم نشره · {connectedCount} حساب</p></div>
+          <div className="metric-tile"><p className="metric-value">{summaryLoading || metaError ? '—' : summary.total}</p><p className="metric-label">إجمالي المحتوى</p></div>
+          <div className="metric-tile"><p className="metric-value">{summaryLoading || metaError ? '—' : scheduledCount}</p><p className="metric-label">في الجدول</p></div>
+          <div className="metric-tile"><p className={`metric-value ${reviewCount ? 'text-warning-300' : ''}`}>{summaryLoading || metaError ? '—' : reviewCount}</p><p className="metric-label">يحتاج مراجعة</p></div>
+          <div className="metric-tile"><p className="metric-value">{summaryLoading || metaError ? '—' : publishedCount}</p><p className="metric-label">تم نشره · {connectedCount} حساب</p></div>
         </div>
       </section>
 
@@ -520,15 +555,27 @@ export function ContentScreen() {
         </button>
       </div>
 
-      {loadError && <div className="mb-4"><ErrorBanner message={loadError} /></div>}
+      {(loadError || metaError || calendarError) && <div className="mb-4 space-y-2">
+        <ErrorBanner message={loadError ?? metaError ?? calendarError ?? ''} />
+        <Button size="sm" variant="secondary" onClick={() => setRevision(value => value + 1)}>إعادة تحميل البيانات</Button>
+      </div>}
+      {view === 'list' && <div className="flex flex-wrap gap-2 mb-4">
+        <input value={search} onChange={event => setSearch(event.target.value)} placeholder="ابحث في عنوان المحتوى..." aria-label="البحث في المحتوى"
+          className="flex-1 min-w-40 rounded-xl border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-ink-100" />
+        <select value={statusFilter} onChange={event => { setStatusFilter(event.target.value as ContentFilter); setPage(0); }} aria-label="حالة المحتوى"
+          className="rounded-xl border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-ink-100">
+          <option value="all">كل الحالات</option>
+          {Object.entries(STATUS_LABELS).map(([status, label]) => <option key={status} value={status}>{label}</option>)}
+        </select>
+      </div>}
       {calendarMessage && <div className="mb-4"><ErrorBanner message={calendarMessage} /></div>}
 
       {view === 'list' ? (
-        content.length === 0 ? (
+        loading ? <ScreenLoader label="جارٍ تحميل المحتوى..." /> : content.length === 0 ? (
           <EmptyState
             icon={<FileText size={28} />}
-            title="لا يوجد محتوى بعد"
-            subtitle="استخدم تبويب إنشاء واكتب للـ AI ما تريد"
+            title={querySearch || statusFilter !== 'all' ? "لا توجد نتائج مطابقة" : "لا يوجد محتوى بعد"}
+            subtitle={querySearch || statusFilter !== 'all' ? "غيّر البحث أو حالة المحتوى لعرض نتائج أخرى" : "استخدم تبويب إنشاء واكتب للـ AI ما تريد"}
           />
         ) : (
           <div className="flex flex-col gap-2">
@@ -786,16 +833,21 @@ export function ContentScreen() {
             })}
           </div>
         )
-      ) : (
+      ) : calendarLoading ? <ScreenLoader label="جارٍ تحميل الأسبوع..." /> : (
         <CalendarView
           items={calendar}
-          content={content}
+          content={calendarContent}
           weekOffset={weekOffset}
           setWeekOffset={setWeekOffset}
           onReschedule={handleReschedule}
           reschedulingId={reschedulingId}
         />
       )}
+      {view === 'list' && !loadError && matchingCount > 0 && <div className="mt-5 flex items-center justify-between gap-3" aria-label="صفحات المحتوى">
+        <Button variant="secondary" size="sm" disabled={loading || page === 0} onClick={() => setPage(value => value - 1)} aria-label="الصفحة السابقة للمحتوى">السابق</Button>
+        <p className="text-xs text-ink-400" aria-live="polite">{page * CONTENT_PAGE_SIZE + 1}–{Math.min((page + 1) * CONTENT_PAGE_SIZE, matchingCount)} من {matchingCount}</p>
+        <Button variant="secondary" size="sm" disabled={loading || (page + 1) * CONTENT_PAGE_SIZE >= matchingCount} onClick={() => setPage(value => value + 1)} aria-label="الصفحة التالية للمحتوى">التالي</Button>
+      </div>}
     </div>
   );
 }
@@ -815,22 +867,13 @@ function CalendarView({
   reschedulingId,
 }: {
   items: CalendarItem[];
-  content: Content[];
+  content: ContentPreview[];
   weekOffset: number;
   setWeekOffset: (n: number) => void;
   onReschedule: (item: CalendarItem, value: string) => void;
   reschedulingId: string | null;
 }) {
-  const today = new Date();
-  const startOfWeek = new Date(today);
-  startOfWeek.setDate(today.getDate() - today.getDay() + weekOffset * 7);
-  startOfWeek.setHours(0, 0, 0, 0);
-
-  const days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(startOfWeek);
-    d.setDate(startOfWeek.getDate() + i);
-    return d;
-  });
+  const { days } = calendarWeek(weekOffset);
 
   const dayNames = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
 
@@ -850,6 +893,7 @@ function CalendarView({
       <div className="flex items-center justify-between mb-4">
         <button
           onClick={() => setWeekOffset(weekOffset - 1)}
+          aria-label="الأسبوع السابق"
           className="p-2 rounded-lg bg-ink-900 text-ink-300 active:scale-95"
         >
           <ChevronRight size={18} />
@@ -859,6 +903,7 @@ function CalendarView({
         </p>
         <button
           onClick={() => setWeekOffset(weekOffset + 1)}
+          aria-label="الأسبوع التالي"
           className="p-2 rounded-lg bg-ink-900 text-ink-300 active:scale-95"
         >
           <ChevronLeft size={18} />
@@ -868,8 +913,8 @@ function CalendarView({
       {items.length === 0 ? (
         <EmptyState
           icon={<CalendarIcon size={28} />}
-          title="التقويم فارغ"
-          subtitle="المحتوى المجدول سيظهر هنا"
+          title="لا توجد مواعيد في هذا الأسبوع"
+          subtitle="انتقل لأسبوع آخر أو أضف محتوى مجدولًا"
         />
       ) : (
         <div className="flex flex-col gap-3">
@@ -896,7 +941,7 @@ function CalendarView({
                             {linkedContent?.master_text && <p className="text-ink-500 text-xs mt-1 line-clamp-2">{linkedContent.master_text}</p>}
                             <div className="flex items-center gap-2 mt-2">
                               <Badge color={item.status === 'published' ? 'brand' : item.status === 'failed' ? 'danger' : 'neutral'}>
-                                {item.status}
+                                {{ planned: 'مخطط', scheduled: 'مجدول', publishing: 'جارٍ النشر', published: 'تم النشر', failed: 'تعذّر النشر', cancelled: 'ملغي' }[item.status]}
                               </Badge>
                               <span className="text-ink-500 text-xs">{new Date(item.scheduled_for).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</span>
                             </div>

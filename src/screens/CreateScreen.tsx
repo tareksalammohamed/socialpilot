@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Copy, Check, FileText, Calendar, BarChart3 } from 'lucide-react';
+import { draftKey, useDraft } from '@/lib/drafts';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { TaskProgress } from '@/components/TaskProgress';
@@ -53,7 +54,7 @@ const SUGGESTIONS = [
 
 export function CreateScreen() {
   const { workspace, user } = useAuth();
-  const [input, setInput] = useState('');
+  const { text: input, setDraft: setInput, replaceIfUnchanged: replaceInput, saved: inputSaved } = useDraft(draftKey(user?.id, workspace?.id, 'create'));
   const [mode, setMode] = useState<Mode>('idle');
   const [error, setError] = useState<string | null>(null);
   const [content, setContent] = useState<GeneratedContent | null>(null);
@@ -223,7 +224,6 @@ export function CreateScreen() {
     if (!message.trim() || !workspace || !user || mode === 'thinking' || restoringTask || submitting.current) return;
     submitting.current = true;
 
-    setInput('');
     setError(null);
     setContent(null);
     setPlan(null);
@@ -248,6 +248,8 @@ export function CreateScreen() {
           content_type: parsed.contentType, platforms: parsed.platforms, timezone: 'Africa/Cairo',
         },
       });
+      // The persisted task now owns this request, even if loading it fails.
+      replaceInput(message, '');
       const { data, error: loadError } = await supabase.from('assistant_tasks').select('*').eq('id', taskId).single();
       submitting.current = false;
       setActiveTaskId(taskId);
@@ -658,6 +660,7 @@ export function CreateScreen() {
             <Send size={18} />
           </button>
         </div>
+        {input && !inputSaved && <p className="text-xs text-warning-300 mt-2" role="status">تعذّر حفظ المسودة تلقائيًا على هذا الجهاز. احتفظ بنسخة قبل مغادرة الصفحة.</p>}
       </div>
     </div>
   );
