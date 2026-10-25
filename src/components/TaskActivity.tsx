@@ -2,36 +2,57 @@ import { useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { DurableTask } from '@/lib/tasks';
 
-
-// Poll on mount and while visible: status/results restore even when realtime
-// disconnected while the app was closed. The worker never depends on this UI.
-export function TaskActivity({ workspaceId, onChange, onTasks }: { workspaceId?: string; onChange: (contentId: string) => Promise<void>; onTasks: (tasks: DurableTask[]) => void }) {
+/** Restore task results without refetching every content list on each progress
+ * update. The worker's persisted state remains independent of this screen. */
+export function TaskActivity({ workspaceId, onChange, onTasks }: {
+  workspaceId?: string;
+  onChange: (contentIds: string[]) => Promise<void>;
+  onTasks: (tasks: DurableTask[]) => void;
+}) {
   const refresh = useRef(onChange);
   const restore = useRef(onTasks);
-  const previous = useRef('');
   useEffect(() => { refresh.current = onChange; restore.current = onTasks; }, [onChange, onTasks]);
   useEffect(() => {
     if (!workspaceId) return;
-    let cancelled = false;
+    let disposed = false, loading = false, initialized = false, active = false, loadedAt = 0;
+    let previous = new Map<string, string>();
+    let signature = '';
     const load = async () => {
-      const { data, error } = await supabase.from('assistant_tasks').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }).limit(20);
-      if (cancelled || error || !data) return;
-      const signature = JSON.stringify(data.map(t => [t.id,t.status,t.updated_at]));
-      if (signature !== previous.current) {
-        previous.current = signature;
-        restore.current(data as DurableTask[]);
-        const contentIds = new Set(data.map(t => (t.payload?.agentContext as { currentContentId?: string } | undefined)?.currentContentId).filter(Boolean));
-        // Refresh the list/calendar even for publish/rpc tasks without context.
-        for (const id of contentIds.size ? contentIds : ['']) await refresh.current(id as string);
-      }
+      if (disposed || loading) return;
+      loading = true;
+      try {
+        const { data, error } = await supabase.from('assistant_tasks').select('id,workspace_id,user_id,task_kind,status,request_text,payload,result,error,created_at,updated_at').eq('workspace_id', workspaceId).order('created_at', { ascending: false }).limit(20);
+        if (disposed || error || !data) return;
+        loadedAt = Date.now();
+        const tasks = data as DurableTask[];
+        active = tasks.some(task => task.status === 'running' || task.status === 'queued');
+        const nextSignature = JSON.stringify(tasks.map(task => [task.id, task.status, task.updated_at]));
+        if (signature === nextSignature) return;
+        signature = nextSignature;
+        restore.current(tasks);
+        const completed = tasks.filter(task => ['completed', 'failed', 'cancelled'].includes(task.status) && previous.get(task.id) !== task.status);
+        const shouldRefresh = initialized && completed.length > 0;
+        previous = new Map(tasks.map(task => [task.id, task.status]));
+        initialized = true;
+        if (shouldRefresh) {
+          const ids = completed.map(task => (task.payload.agentContext as { currentContentId?: string } | undefined)?.currentContentId).filter((id): id is string => Boolean(id));
+          await refresh.current([...new Set(ids)]);
+        }
+      } catch { /* Keep the last confirmed task state until reconnection. */ }
+      finally { loading = false; }
     };
+    const focused = () => { if (document.visibilityState === 'visible') void load(); };
     void load();
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 5000);
-    const focused = () => { void load(); };
+    const timer = setInterval(() => { if (document.visibilityState === 'visible' && Date.now() - loadedAt >= (active ? 5000 : 60000)) void load(); }, 5000);
+    const channel = supabase.channel(`content-task-activity:${workspaceId}`).on('postgres_changes', {
+      event: '*', schema: 'public', table: 'assistant_tasks', filter: `workspace_id=eq.${workspaceId}`,
+    }, focused).subscribe();
     window.addEventListener('focus', focused);
-    return () => { cancelled = true; clearInterval(timer); window.removeEventListener('focus', focused); };
+    document.addEventListener('visibilitychange', focused);
+    return () => {
+      disposed = true; clearInterval(timer); window.removeEventListener('focus', focused);
+      document.removeEventListener('visibilitychange', focused); void supabase.removeChannel(channel);
+    };
   }, [workspaceId]);
-  // Keep result restoration and content refresh in the background. Progress
-  // controls remain available in TaskMonitor without taking up the content page.
   return null;
 }

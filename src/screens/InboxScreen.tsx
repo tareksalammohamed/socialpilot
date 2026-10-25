@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
+import { draftKey, useDraft } from '@/lib/drafts';
 import { supabase } from '@/lib/supabase';
 import {
   listInboxConversations,
@@ -217,11 +218,9 @@ export function InboxScreen() {
   const [loading, setLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [sending, setSending] = useState(false);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const draft = selectedId ? drafts[selectedId] ?? '' : '';
-  const setDraft = (value: string) => {
-    if (selectedId) setDrafts(current => ({ ...current, [selectedId]: value }));
-  };
+  const { text: draft, setDraft, replaceIfUnchanged: replaceDraft, saved: draftSaved } = useDraft(
+    draftKey(user?.id, workspace?.id, `inbox:${selectedId ?? ''}`),
+  );
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const [error, setError] = useState<string | null>(null);
@@ -561,7 +560,7 @@ export function InboxScreen() {
     try {
       const approved = await setInboxReplyApproval({ conversationId: selectedConversation.id, action: 'approve_reply', reply: aiAnalysis.suggested_reply });
       if (selectedIdRef.current === selectedConversation.id) setAiAnalysis(approved);
-      setDrafts(current => ({ ...current, [selectedConversation.id]: approved.approved_reply ?? approved.suggested_reply ?? '' }));
+      replaceDraft(draft, approved.approved_reply ?? approved.suggested_reply ?? '');
     } catch (cause) {
       setAiError(cause instanceof Error ? cause.message : 'تعذّر اعتماد الرد المقترح');
     } finally {
@@ -661,7 +660,7 @@ export function InboxScreen() {
         setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
         clearPendingAttachment();
       }
-      setDrafts(current => ({ ...current, [selectedConversation.id]: '' }));
+      replaceDraft(draft, '');
       setConversations((current) => current.map((item) => (
         item.id === selectedConversation.id
           ? { ...item, snippet: message.content, unread: false, updated_at: message.created_at }
@@ -1109,6 +1108,7 @@ export function InboxScreen() {
                 </div>
 
                 <div className="p-3 border-t border-ink-800">
+                  {draft && !draftSaved && <p className="mb-2 text-xs text-warning-300" role="status">تعذّر حفظ مسودة الرد تلقائيًا. احتفظ بنسخة قبل مغادرة الصفحة.</p>}
                   {selectedConversation.platform === 'whatsapp' && (
                     <div className={`mb-2 rounded-xl border px-3 py-2 text-xs ${
                       whatsappUsesWebProvider
