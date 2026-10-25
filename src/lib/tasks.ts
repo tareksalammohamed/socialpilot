@@ -5,6 +5,7 @@ export type DurableTask = {
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; request_text: string;
   payload: Record<string, unknown>; result: Record<string, unknown> | null;
   error: string | null; created_at: string; updated_at?: string; started_at?: string; completed_at?: string; available_at?: string; result_type?: string | null;
+  archived_at?: string | null;
   progress?: { phase?: string; label?: string; detail?: string; current?: number; total?: number; provider?: string; model?: string; attempt?: number; updated_at?: string };
 };
 
@@ -42,3 +43,5 @@ async function controlTask(rpc: string, id: string): Promise<DurableTask> {
 }
 export const cancelTask = (id: string) => controlTask('cancel_assistant_task', id);
 export const restartTask = (id: string) => controlTask('restart_assistant_task', id);
+
+export const archiveCreationRequest = (id: string) => controlTask('archive_creation_request', id);

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, CircleStop, RotateCcw, Clock3, Activity } from 'lucide-react';
+import { CheckCircle2, CircleStop, RotateCcw, Clock3, Activity, Trash2 } from 'lucide-react';
 import { Button, ErrorBanner, Spinner } from './ui';
-import { cancelTask, restartTask, type DurableTask } from '@/lib/tasks';
+import { cancelTask, restartTask, archiveCreationRequest, type DurableTask } from '@/lib/tasks';
 import { useAuth } from '@/lib/auth';
 import { taskErrorMessage } from '../../supabase/functions/_shared/model-failure';
 
@@ -9,22 +9,25 @@ const labels = { queued: 'في الانتظار', running: 'جارٍ التنف�
 
 export function TaskProgress({ task, onUpdate }: { task: DurableTask; onUpdate: (task: DurableTask) => void }) {
   const { user } = useAuth();
-  const [busy, setBusy] = useState<'cancel' | 'restart' | null>(null);
+  const [busy, setBusy] = useState<'cancel' | 'restart' | 'delete' | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const active = task.status === 'running' || task.status === 'queued';
   useEffect(() => { if (!active) return; const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, [active]);
   const own = task.user_id === user?.id;
-  const restartable = ['create', 'agent', 'analytics'].includes(task.task_kind);
-  const stoppable = active && (task.status === 'queued' || restartable);
+  const canRestart = ['create', 'agent', 'analytics'].includes(task.task_kind);
+  const restartable = canRestart && !active;
+  const deletable = task.task_kind === 'create';
+  const stoppable = active && (task.status === 'queued' || canRestart);
   const p = task.progress;
   const stale = task.status === 'running' && now - new Date(p?.updated_at ?? task.updated_at ?? task.created_at).getTime() > 90_000;
   const waitSeconds = Math.max(0, Math.ceil((new Date(task.available_at ?? '').getTime() - now) / 1000));
   const elapsed = Math.max(0, Math.floor(((active ? now : new Date(task.completed_at ?? task.updated_at ?? task.created_at).getTime()) - new Date(task.started_at ?? task.created_at).getTime()) / 1000));
-  async function control(action: 'cancel' | 'restart') {
+  async function control(action: 'cancel' | 'restart' | 'delete') {
     if (busy) return;
     setBusy(action); setError(null);
-    try { onUpdate(await (action === 'cancel' ? cancelTask(task.id) : restartTask(task.id))); }
+    try { onUpdate(await (action === 'cancel' ? cancelTask(task.id) : action === 'delete' ? archiveCreationRequest(task.id) : restartTask(task.id))); }
     catch (e) { setError(e instanceof Error ? e.message : 'تعذر تنفيذ الإجراء؛ حاول مرة أخرى.'); }
     finally { setBusy(null); }
   }
@@ -49,9 +52,17 @@ export function TaskProgress({ task, onUpdate }: { task: DurableTask; onUpdate: 
       </div>
     </div>
     {task.error && <p className="mt-2 text-xs text-warning-300 break-words">{task.status === 'running' ? 'سبب تعذر المحاولة السابقة: ' : ''}{taskErrorMessage(task.error)}</p>}
-    {own && (stoppable || restartable) && <div className="flex flex-wrap gap-2 mt-4">
-      {stoppable && <Button variant="danger" size="sm" disabled={Boolean(busy)} onClick={() => void control('cancel')} className="flex gap-2 items-center">{busy === 'cancel' ? <Spinner size={14} /> : <CircleStop size={14} />}إيقاف الطلب</Button>}
-      {restartable && <Button variant="secondary" size="sm" disabled={Boolean(busy)} onClick={() => void control('restart')} className="flex gap-2 items-center">{busy === 'restart' ? <Spinner size={14} /> : <RotateCcw size={14} />}البدء من جديد</Button>}
+    {own && (stoppable || restartable || deletable) && <div className="flex flex-wrap gap-2 mt-4">
+      {stoppable && <Button variant="danger" size="sm" disabled={Boolean(busy)} onClick={() => void control('cancel')} className="flex gap-2 items-center">{busy === 'cancel' ? <Spinner size={14} /> : <CircleStop size={14} />}إلغاء الطلب</Button>}
+      {restartable && <Button variant="secondary" size="sm" disabled={Boolean(busy)} onClick={() => void control('restart')} className="flex gap-2 items-center">{busy === 'restart' ? <Spinner size={14} /> : <RotateCcw size={14} />}إعادة تنفيذ الطلب</Button>}
+      {deletable && <Button variant="danger" size="sm" disabled={Boolean(busy)} onClick={() => setConfirmDelete(true)} className="flex gap-2 items-center"><Trash2 size={14} />حذف الطلب</Button>}
+    </div>}
+    {confirmDelete && <div role="alertdialog" aria-label="تأكيد حذف الطلب" className="mt-3 rounded-xl border border-ink-700 p-3">
+      <p className="text-sm text-ink-200">سيُحذف الطلب من العرض{active ? ' ويتوقف تنفيذ الخطوات المتبقية' : ''}. المحتوى المحفوظ والجدولة سيظلان موجودين في صفحة المحتوى.</p>
+      <div className="mt-3 flex gap-2">
+        <Button variant="danger" size="sm" disabled={Boolean(busy)} onClick={() => void control('delete')}>{busy === 'delete' ? <Spinner size={14} /> : 'تأكيد حذف الطلب'}</Button>
+        <Button variant="secondary" size="sm" disabled={Boolean(busy)} onClick={() => setConfirmDelete(false)}>تراجع</Button>
+      </div>
     </div>}
     {error && <div className="mt-3"><ErrorBanner message={error} /></div>}
   </div>;

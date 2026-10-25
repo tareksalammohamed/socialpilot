@@ -21,7 +21,7 @@ export function TaskActivity({ workspaceId, onChange, onTasks }: {
       if (disposed || loading) return;
       loading = true;
       try {
-        const { data, error } = await supabase.from('assistant_tasks').select('id,workspace_id,user_id,task_kind,status,request_text,payload,result,error,created_at,updated_at').eq('workspace_id', workspaceId).order('created_at', { ascending: false }).limit(20);
+        const { data, error } = await supabase.from('assistant_tasks').select('id,workspace_id,user_id,task_kind,status,request_text,payload,result,error,created_at,updated_at').eq('workspace_id', workspaceId).is('archived_at', null).order('created_at', { ascending: false }).limit(20);
         if (disposed || error || !data) return;
         loadedAt = Date.now();
         const tasks = data as DurableTask[];
