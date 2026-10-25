@@ -2,7 +2,7 @@
 
 Leaf steps (planning, context, generation, quality, improvement) record monotonic work duration, successful/failed executions and model attempts reported by routing. The fixed-size numeric aggregate is stored with assistant_tasks.ai_steps and projected into progress under existing lease fences. No prompts, secrets or raw model errors are added. Cached replay adds no duration or attempts; parent tool wrappers do not double-count child work. Failure timings persist without caching a successful result, and cancellation/lease loss prevents stale telemetry writes.
 
-The worker restores the existing cache for progress reporting, including checkpoint-only completion after a restart. The visible stage clock starts when the stage starts rather than resetting at each model fallback update. Task cards expose measured phase time and clarify that total wall time includes background waits.
+The worker restores the existing cache for progress reporting, including checkpoint-only completion after a restart. The visible stage clock starts when the stage starts rather than resetting at each model fallback update, and stops when the step completes or the task is queued. Task cards expose measured phase time and clarify that total wall time includes background waits.
 
 The super-admin usage endpoint also samples the latest 200 completed create/agent tasks. Only tasks with recorded metrics enter the timing cohort. It reports total wall-clock p50/p95, sample sizes, initial queue mean, and per-phase work aggregates. Failed/cancelled and unfinished tasks are outside this completed-task cohort; this is not a success-rate dashboard. Old tasks remain unmeasured, not zero duration. A performance-read failure leaves usage available with an explicit unavailable state.
 

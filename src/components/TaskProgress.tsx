@@ -51,8 +51,8 @@ export function TaskProgress({ task, onUpdate }: { task: DurableTask; onUpdate: 
         {p?.detail && <p className="text-xs text-ink-400 mt-1">{p.detail}</p>}
         {p?.current != null && p.total != null && <p className="text-xs text-brand-300 mt-1">العنصر {p.current} من {p.total}</p>}
         {p?.provider && <p className="text-xs text-ink-400 mt-1 break-all" dir="ltr">{p.provider} · {p.model}{p.attempt && p.attempt > 1 ? ` · محاولة ${p.attempt}` : ''}</p>}
-        {active && phaseSeconds!==null && <p className="text-xs text-ink-400 mt-1" aria-live="off">وقت المرحلة الحالية: {phaseSeconds} ثانية</p>}
-        {active && (p?.attempt??0)>1 && <p className="text-xs text-warning-300 mt-1">بيجرّب بديل بعد تعذر المحاولة السابقة؛ الطلب محفوظ.</p>}
+        {task.status==='running' && !p?.phase_completed_at && phaseSeconds!==null && <p className="text-xs text-ink-400 mt-1" aria-live="off">وقت المرحلة الحالية: {phaseSeconds} ثانية</p>}
+        {task.status==='running' && !p?.phase_completed_at && (p?.attempt??0)>1 && <p className="text-xs text-warning-300 mt-1">بيجرّب بديل بعد تعذر المحاولة السابقة؛ الطلب محفوظ.</p>}
         {stale && <p className="text-xs text-warning-300 mt-1">دي آخر مرحلة مؤكدة؛ لم يصل تحديث جديد بعد.</p>}
         {task.status === 'queued' && waitSeconds > 0 && <p className="text-xs text-ink-400 mt-1" aria-live="off">إعادة المحاولة متاحة خلال {waitSeconds} ثانية.</p>}
       </div>

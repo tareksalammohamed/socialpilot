@@ -137,6 +137,10 @@ process.on('exit',()=>rmSync(scratch,{recursive:true,force:true}));
  assert.ok(document.body.textContent.includes('وقت المرحلة الحالية'));
  assert.ok(document.body.textContent.includes('بيجرّب بديل'));
  assert.ok(document.body.textContent.includes('المراجعة: 1.5 ثانية'));
+ await qa.act(async()=>qa.emitTasks([{...createTask,updated_at:'2026-01-02',progress:{...createTask.progress,phase_completed_at:new Date().toISOString()}}]));await settle();
+ assert.ok(!document.body.textContent.includes('وقت المرحلة الحالية'));
+ await qa.act(async()=>qa.emitTasks([{...createTask,updated_at:'2026-01-03'}]));await settle();
+
  assert.ok(document.body.textContent.includes('إلغاء الطلب'));
  assert.ok(!document.body.textContent.includes('إعادة تنفيذ الطلب'));
  await qa.act(async()=>clickText('إلغاء الطلب')); await settle();

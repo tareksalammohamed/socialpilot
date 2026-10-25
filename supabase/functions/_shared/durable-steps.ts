@@ -40,6 +40,7 @@ export class DurableSteps {
     try { result=await work(); }
     catch(error) {
       if(measurement) {
+        this.progress={...this.progress,phase_completed_at:new Date().toISOString(),updated_at:new Date().toISOString()};
         const metrics=addMeasurement(this.cache[METRICS_CACHE_KEY],measurement.phase,this.clock()-started,true,measurement.attempts);
         const failedCache={...this.cache,[METRICS_CACHE_KEY]:metrics};
         const {data,error:saveError}=await this.db.from('assistant_tasks').update({ai_steps:failedCache,progress:{...this.progress,metrics}})
@@ -49,6 +50,7 @@ export class DurableSteps {
       }
       throw error;
     } finally { if(this.measurement===measurement)this.measurement=undefined; }
+    if(measurement)this.progress={...this.progress,phase_completed_at:new Date().toISOString(),updated_at:new Date().toISOString()};
     const metrics=measurement?addMeasurement(this.cache[METRICS_CACHE_KEY],measurement.phase,this.clock()-started,false,measurement.attempts):parseExecutionMetrics(this.cache[METRICS_CACHE_KEY]);
     const cache = { ...this.cache, [key]: result, [METRICS_CACHE_KEY]:metrics };
     const { data, error } = await this.db.from('assistant_tasks').update({ ai_steps: cache, progress:{...this.progress,metrics} })
