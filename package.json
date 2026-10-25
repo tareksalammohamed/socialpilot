@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
-    "test:ui": "node tests/frontend/run.cjs"
+    "test:ui": "node tests/frontend/run.cjs && node tests/frontend/inbox.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",

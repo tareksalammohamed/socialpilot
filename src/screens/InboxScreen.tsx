@@ -1,3 +1,4 @@
+import { INBOX_PAGE_SIZE, loadInboxPage, loadInboxSummary, loadMessagePage, mergeInboxMessages, type MessageCursor } from '@/lib/inboxQueries';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
@@ -24,8 +25,6 @@ import { useAuth } from '@/lib/auth';
 import { draftKey, useDraft } from '@/lib/drafts';
 import { supabase } from '@/lib/supabase';
 import {
-  listInboxConversations,
-  listInboxMessages,
   markInboxConversationRead,
   analyzeInboxConversation,
   setInboxReplyApproval,
@@ -150,10 +149,12 @@ function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
   const type = typeof message.metadata?.message_type === 'string' ? message.metadata.message_type : null;
   const [url, setUrl] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
-  const [mediaLoading, setMediaLoading] = useState(hasMedia);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [requested, setRequested] = useState(false);
+  const [mediaAttempt, setMediaAttempt] = useState(0);
 
   useEffect(() => {
-    if (!hasMedia) return;
+    if (!hasMedia || !requested) return;
     let disposed = false;
     let objectUrl: string | null = null;
     setMediaLoading(true);
@@ -176,11 +177,12 @@ function WhatsAppMediaPreview({ message }: { message: InboxMessage }) {
       disposed = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [message.id, mediaId, storagePath, hasMedia]);
+  }, [message.id, mediaId, storagePath, hasMedia, requested, mediaAttempt]);
 
   if (!hasMedia || !type) return null;
+  if (!requested) return <Button variant="ghost" size="sm" onClick={() => setRequested(true)}><Paperclip size={14} />عرض المرفق</Button>;
   if (mediaLoading) return <div className="mt-2 text-[11px] text-ink-500">جارٍ تحميل المرفق...</div>;
-  if (mediaError) return <div className="mt-2 text-[11px] text-warning-400">{mediaError}</div>;
+  if (mediaError) return <div className="mt-2 text-[11px] text-warning-400">{mediaError}<Button variant="ghost" size="sm" onClick={() => setMediaAttempt(value => value + 1)}>إعادة تحميل المرفق</Button></div>;
   if (!url) return null;
 
   const filename = typeof message.metadata?.filename === 'string' ? message.metadata.filename : 'WhatsApp file';
@@ -214,7 +216,40 @@ export function InboxScreen() {
   const { workspace, user, refreshWorkspace } = useAuth();
   const [conversations, setConversations] = useState<InboxConversation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<InboxConversation | null>(null);
+  const [mobilePane, setMobilePane] = useState<'list' | 'conversation'>('list');
+  const [desktop, setDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches);
+  const conversationVisible = desktop || mobilePane === 'conversation';
+  const visiblePane = useRef(conversationVisible);
+  visiblePane.current = conversationVisible;
+  const pendingRead = useRef(new Set<string>());
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 768px)');
+    const changed = () => setDesktop(media.matches);
+    media.addEventListener('change', changed);
+    return () => media.removeEventListener('change', changed);
+  }, []);
+  const [page, setPage] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [querySearch, setQuerySearch] = useState('');
+  const [summary, setSummary] = useState({ unread: 0, open: 0, review: 0, accounts: 0 });
+  const [summaryError, setSummaryError] = useState(false);
+  const [summaryReady, setSummaryReady] = useState(false);
+  const [messageCursor, setMessageCursor] = useState<MessageCursor | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [olderLoading, setOlderLoading] = useState(false);
+  const conversationRequest = useRef(0);
+  const summaryRequest = useRef(0);
+  const selectionEpoch = useRef(0);
+  const olderRequest = useRef<number | null>(null);
+  const alive = useRef(true);
+  const refreshLatest = useRef<(() => Promise<void>) | null>(null);
+  const messageView = useRef<HTMLDivElement>(null);
+  const latestMessages = useRef<InboxMessage[]>([]);
   const [messages, setMessages] = useState<InboxMessage[]>([]);
+  const [messageScope, setMessageScope] = useState<string | null>(null);
+  const deletedMessages = useRef(new Set<string>());
+  latestMessages.current = messageScope === selectedId ? messages : [];
   const [loading, setLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -255,8 +290,8 @@ export function InboxScreen() {
   }, [workspace?.id, workspace?.settings]);
 
   const selectedConversation = useMemo(
-    () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
-    [conversations, selectedId],
+    () => conversations.find((conversation) => conversation.id === selectedId) ?? (selectedSnapshot?.id === selectedId ? selectedSnapshot : null),
+    [conversations, selectedId, selectedSnapshot],
   );
 
   const whatsappUsesWebProvider = useMemo(
@@ -266,10 +301,11 @@ export function InboxScreen() {
 
   const whatsappServiceWindowOpen = useMemo(() => {
     if (selectedConversation?.platform !== 'whatsapp' || whatsappUsesWebProvider) return true;
+    if (messageScope !== selectedId) return false;
     const latestInbound = [...messages].reverse().find((message) => message.direction === 'inbound');
     if (!latestInbound) return false;
     return Date.now() - new Date(latestInbound.created_at).getTime() <= 24 * 60 * 60 * 1000;
-  }, [selectedConversation?.platform, whatsappUsesWebProvider, messages]);
+  }, [selectedConversation?.platform, whatsappUsesWebProvider, messages, messageScope, selectedId]);
 
   const selectedWhatsAppTemplate = useMemo(
     () => whatsappTemplates.find((template) => templateKey(template) === selectedTemplateKey) ?? null,
@@ -281,18 +317,20 @@ export function InboxScreen() {
     [selectedWhatsAppTemplate, templateVariables],
   );
 
+  const templateId = selectedConversation?.id, templatePlatform = selectedConversation?.platform, templateProvider = selectedConversation?.metadata?.provider;
+
   useEffect(() => {
-    if (!selectedConversation || selectedConversation.platform !== 'whatsapp' || ['evolution', 'waha', 'wppconnect'].includes(String(selectedConversation.metadata?.provider))) {
+    if (!templateId || templatePlatform !== 'whatsapp' || ['evolution', 'waha', 'wppconnect'].includes(String(templateProvider))) {
       setWhatsappTemplates([]);
       setSelectedTemplateKey('');
       setTemplateVariables([]);
-      setTemplatesError(null);
+      setTemplatesError(null); setTemplatesLoading(false);
       return;
     }
     let cancelled = false;
     setTemplatesLoading(true);
     setTemplatesError(null);
-    void listWhatsAppTemplates(selectedConversation.id)
+    void listWhatsAppTemplates(templateId)
       .then((templates) => {
         if (cancelled) return;
         setWhatsappTemplates(templates);
@@ -309,135 +347,185 @@ export function InboxScreen() {
     return () => {
       cancelled = true;
     };
-  }, [selectedConversation]);
+  }, [templateId, templatePlatform, templateProvider]);
 
-  const filteredConversations = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return conversations.filter((conversation) => {
-      if (statusFilter !== 'all' && conversation.status !== statusFilter) return false;
-      if (platformFilter !== 'all' && conversation.platform !== platformFilter) return false;
-      if (!needle) return true;
-      return [conversation.sender_name, conversation.snippet, conversation.platform]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(needle));
-    });
-  }, [conversations, search, statusFilter, platformFilter]);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
-  const visiblePlatforms = useMemo(
-    () => Array.from(new Set(conversations.map((conversation) => conversation.platform))).sort(),
-    [conversations],
-  );
+  const canApply = useCallback((epoch: number, id: string) => alive.current && selectionEpoch.current === epoch && selectedIdRef.current === id, []);
+  const selectConversation = useCallback((conversation: InboxConversation, open = true) => {
+    if (selectedIdRef.current !== conversation.id) selectionEpoch.current++;
+    selectedIdRef.current = conversation.id;
+    setSelectedId(conversation.id); setSelectedSnapshot(conversation);
+    if (open) setMobilePane('conversation');
+  }, []);
+
+  useEffect(() => {
+    if (search.trim() === querySearch) return;
+    const timer = setTimeout(() => { setQuerySearch(search.trim()); setPage(0); }, 300);
+    return () => clearTimeout(timer);
+  }, [search, querySearch]);
+
+  const refreshSummary = useCallback(async () => {
+    if (!workspace?.id) return;
+    const request = ++summaryRequest.current;
+    try {
+      const result = await loadInboxSummary(workspace.id);
+      if (alive.current && request === summaryRequest.current) { setSummary(result); setSummaryError(false); setSummaryReady(true); }
+    } catch { if (alive.current && request === summaryRequest.current) setSummaryError(true); }
+  }, [workspace?.id]);
 
   const loadConversations = useCallback(async (silent = false) => {
     if (!workspace?.id) return;
+    const request = ++conversationRequest.current;
     if (!silent) setLoading(true);
     setError(null);
     try {
-      const data = await listInboxConversations(workspace.id);
-      setConversations(data);
-      setSelectedId((current) => (current && data.some((item) => item.id === current) ? current : data[0]?.id ?? null));
+      const result = await loadInboxPage(workspace.id, { page, status: statusFilter, platform: platformFilter, search: querySearch });
+      if (!alive.current || request !== conversationRequest.current) return;
+      const lastPage = Math.max(0, Math.ceil(result.total / INBOX_PAGE_SIZE) - 1);
+      if (page > lastPage) { setPage(lastPage); return; }
+      setConversations(result.items); setTotal(result.total);
+      const selected = result.items.find(item => item.id === selectedIdRef.current);
+      if (selected) setSelectedSnapshot(selected);
+      else if (!selectedIdRef.current && result.items[0]) selectConversation(result.items[0], false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'تعذّر تحميل المحادثات');
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, [workspace?.id]);
+      if (alive.current && request === conversationRequest.current) {
+        if (!silent) setConversations([]);
+        setError(cause instanceof Error ? cause.message : 'تعذّر تحميل المحادثات');
+      }
+    } finally { if (alive.current && request === conversationRequest.current) setLoading(false); }
+  }, [workspace?.id, page, statusFilter, platformFilter, querySearch, selectConversation]);
 
-  useEffect(() => {
-    void loadConversations();
-  }, [loadConversations]);
+  useEffect(() => { void loadConversations(); }, [loadConversations]);
+  useEffect(() => { void refreshSummary(); }, [refreshSummary]);
+  const filteredConversations = conversations;
+  const visiblePlatforms = Object.keys(PLATFORM_LABELS);
+
+  const markRead = useCallback(async (id: string, epoch: number) => {
+    if (!visiblePane.current || document.visibilityState !== 'visible' || !canApply(epoch, id) || pendingRead.current.has(id)) return;
+    pendingRead.current.add(id);
+    try {
+      await markInboxConversationRead(id);
+      if (!canApply(epoch, id)) return;
+      setConversations(current => current.map(item => item.id === id ? { ...item, unread: false } : item));
+      setSelectedSnapshot(current => current?.id === id ? { ...current, unread: false } : current);
+      void refreshSummary();
+    } catch { if (canApply(epoch, id)) setMessagesError('تعذّر تحديث حالة القراءة؛ الرسائل المعروضة لم تتغير.'); }
+    finally { pendingRead.current.delete(id); }
+  }, [canApply, refreshSummary]);
 
   useEffect(() => {
     setPendingAttachment(null);
     if (attachmentInputRef.current) attachmentInputRef.current.value = '';
-    if (!workspace?.id || !selectedId) {
-      setMessages([]);
-      setAiAnalysis(null);
-      setAnalysisLoaded(false);
-      return;
-    }
-    let cancelled = false;
-    setMessages([]);
-    setMessagesLoading(true);
-    setMessagesError(null);
-    setAiError(null);
-    setAnalysisLoaded(false);
-    setAiAnalysis(null);
-    void (async () => {
+    refreshLatest.current = null;
+    setMessageScope(selectedId); deletedMessages.current = new Set();
+    setMessages([]); setMessageCursor(null); setHasOlderMessages(false); setOlderLoading(false);
+    setAiAnalysis(null); setAnalysisLoaded(false); setMessagesError(null); setAiError(null);
+    autoAnalyzeKeyRef.current = null;
+    olderRequest.current = null;
+    if (!workspace?.id || !selectedId) return;
+    const epoch = selectionEpoch.current;
+    let cancelled = false, loaded = false, request = 0;
+    const valid = () => !cancelled && alive.current && epoch === selectionEpoch.current && selectedIdRef.current === selectedId;
+    const load = async () => {
+      const version = ++request;
+      const baseline = new Map(latestMessages.current.map(row => [row.id, row]));
+      const initial = !loaded;
+      if (!loaded) setMessagesLoading(true);
       try {
-        const data = await listInboxMessages(workspace.id, selectedId);
-        if (!cancelled) setMessages(data);
-      } catch (cause) {
-        if (!cancelled) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحميل الرسائل');
-      } finally {
-        if (!cancelled) setMessagesLoading(false);
-      }
-    })();
-
-    void markInboxConversationRead(selectedId).catch(() => undefined);
-
-    void (async () => {
-      const { data } = await supabase
-        .from('inbox_ai_analyses')
-        .select('*')
-        .eq('workspace_id', workspace.id)
-        .eq('conversation_id', selectedId)
-        .maybeSingle();
-      if (!cancelled) {
-        setAiAnalysis((data as InboxAiAnalysis | null) ?? null);
-        setAnalysisLoaded(true);
-      }
-    })();
-    setConversations((current) => current.map((item) => (item.id === selectedId ? { ...item, unread: false } : item)));
-    return () => {
-      cancelled = true;
+        const result = await loadMessagePage(workspace.id, selectedId);
+        if (!valid() || version !== request) return;
+        setMessages(current => mergeInboxMessages(result.items.filter(row => !deletedMessages.current.has(row.id)), current.filter(row => !result.items.some(item => item.id === row.id) || baseline.get(row.id) !== row)));
+        if (initial) requestAnimationFrame(() => { if (valid() && messageView.current) messageView.current.scrollTop = messageView.current.scrollHeight; });
+        if (!loaded) { setMessageCursor(result.cursor); setHasOlderMessages(result.hasMore); }
+        loaded = true;
+        setMessagesError(null);
+      } catch (cause) { if (valid() && version === request) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحميل الرسائل'); }
+      finally { if (valid() && version === request) setMessagesLoading(false); }
     };
-  }, [workspace?.id, selectedId]);
+    refreshLatest.current = load;
+    void load();
+    void supabase.from('inbox_ai_analyses').select('*').eq('workspace_id', workspace.id).eq('conversation_id', selectedId).maybeSingle()
+      .then(({ data, error }) => {
+        if (!valid()) return;
+        if (error) { setAiError('تعذّر تحميل آخر تحليل؛ أعد المحاولة قبل تشغيل التحليل التلقائي.'); return; }
+        setAiAnalysis((data as InboxAiAnalysis | null) ?? null); setAnalysisLoaded(true);
+      });
+    return () => { cancelled = true; refreshLatest.current = null; };
+  }, [workspace?.id, selectedId, refreshSummary]);
+
+  useEffect(() => {
+    if (conversationVisible && selectedId && messageScope === selectedId && !messagesLoading && messages.length && selectedSnapshot?.unread) {
+      void markRead(selectedId, selectionEpoch.current);
+    }
+  }, [conversationVisible, selectedId, messageScope, messagesLoading, messages, selectedSnapshot?.unread, markRead]);
 
   useEffect(() => {
     if (!workspace?.id) return;
-    const channel = supabase
-      .channel(`inbox:${workspace.id}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'inbox_conversations', filter: `workspace_id=eq.${workspace.id}` },
-        () => { void loadConversations(true); },
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'inbox_messages', filter: `workspace_id=eq.${workspace.id}` },
-        (payload) => {
-          const row = payload.new as InboxMessage;
-          if (payload.eventType === 'DELETE') {
-            const oldRow = payload.old as InboxMessage;
-            if (oldRow.conversation_id === selectedId) {
-              setMessages((current) => current.filter((item) => item.id !== oldRow.id));
-            }
-            return;
-          }
-          if (row.conversation_id === selectedId) {
-            setMessages((current) => {
-              const exists = current.some((item) => item.id === row.id);
-              if (payload.eventType === 'UPDATE' && exists) {
-                return current.map((item) => item.id === row.id ? row : item);
-              }
-              return exists ? current : [...current, row];
-            });
-            if (payload.eventType === 'INSERT' && row.direction === 'inbound') {
-              autoAnalyzeKeyRef.current = null;
-              setAiAnalysis(null);
-              setAnalysisLoaded(true);
-            }
-          }
-          void loadConversations(true);
-        },
-      )
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refreshList = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { void loadConversations(true); void refreshSummary(); }, 250);
     };
-  }, [workspace?.id, selectedId, loadConversations]);
+    const recover = () => {
+      if (document.visibilityState !== 'visible') return;
+      refreshList(); void refreshLatest.current?.();
+    };
+    const channel = supabase.channel(`inbox:${workspace.id}`).on('postgres_changes',
+      { event: '*', schema: 'public', table: 'inbox_conversations', filter: `workspace_id=eq.${workspace.id}` },
+      payload => {
+        const row = payload.new as InboxConversation;
+        if (payload.eventType === 'DELETE' && (payload.old as InboxConversation).id === selectedIdRef.current) {
+          selectionEpoch.current++; selectedIdRef.current = null; setSelectedId(null); setSelectedSnapshot(null); setMobilePane('list');
+        } else if (row.id === selectedIdRef.current) setSelectedSnapshot(row);
+        refreshList();
+      }).on('postgres_changes',
+      { event: '*', schema: 'public', table: 'inbox_messages', filter: `workspace_id=eq.${workspace.id}` },
+      payload => {
+        const row = payload.new as InboxMessage;
+        if (payload.eventType === 'DELETE') {
+          const old = payload.old as InboxMessage;
+          deletedMessages.current.add(old.id);
+          setMessages(current => current.filter(item => item.id !== old.id));
+        } else if (row.conversation_id === selectedIdRef.current) {
+          const epoch = selectionEpoch.current, id = row.conversation_id;
+          const viewport = messageView.current;
+          const atBottom = viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80;
+          setMessages(current => mergeInboxMessages([row], current.filter(item => item.id !== row.id)));
+          if (atBottom) requestAnimationFrame(() => { if (alive.current && selectionEpoch.current === epoch && selectedIdRef.current === id && viewport) viewport.scrollTop = viewport.scrollHeight; });
+          if (payload.eventType === 'INSERT' && row.direction === 'inbound') {
+            autoAnalyzeKeyRef.current = null; setAiAnalysis(null); setAnalysisLoaded(true);
+            void markRead(row.conversation_id, selectionEpoch.current);
+          }
+        }
+        refreshList();
+      }).subscribe();
+    const poll = setInterval(recover, 60000);
+    window.addEventListener('focus', recover); document.addEventListener('visibilitychange', recover);
+    return () => {
+      clearTimeout(timer); clearInterval(poll); window.removeEventListener('focus', recover);
+      document.removeEventListener('visibilitychange', recover); void supabase.removeChannel(channel);
+    };
+  }, [workspace?.id, loadConversations, refreshSummary, markRead]);
+
+  async function loadOlderMessages() {
+    if (!workspace?.id || !selectedId || !messageCursor || !hasOlderMessages || olderRequest.current === selectionEpoch.current) return;
+    const epoch = selectionEpoch.current, id = selectedId;
+    olderRequest.current = epoch; setOlderLoading(true); setMessagesError(null);
+    const viewport = messageView.current;
+    try {
+      const result = await loadMessagePage(workspace.id, id, messageCursor);
+      if (!canApply(epoch, id)) return;
+      const height = viewport?.scrollHeight ?? 0, top = viewport?.scrollTop ?? 0;
+      setMessages(current => mergeInboxMessages(result.items.filter(row => !deletedMessages.current.has(row.id)), current));
+      setMessageCursor(result.cursor); setHasOlderMessages(result.hasMore);
+      requestAnimationFrame(() => { if (canApply(epoch, id) && viewport) viewport.scrollTop = top + viewport.scrollHeight - height; });
+    } catch (cause) { if (canApply(epoch, id)) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحميل الرسائل السابقة'); }
+    finally { if (canApply(epoch, id)) { olderRequest.current = null; setOlderLoading(false); } }
+  }
 
   useEffect(() => {
     if (!aiAnalysis || messages.length === 0) return;
@@ -449,30 +537,34 @@ export function InboxScreen() {
     }
   }, [messages, aiAnalysis]);
 
-  useEffect(() => {
-    if (!selectedConversation || !analysisLoaded || aiAnalysis || aiLoading || !aiSettings.enabled || !aiSettings.autoAnalyze) return;
-    if (autoAnalyzeKeyRef.current === selectedConversation.id) return;
-    const conversationId = selectedConversation.id;
-    autoAnalyzeKeyRef.current = conversationId;
-    setAiLoading(true);
-    setAiError(null);
-    void (async () => {
-      try {
-        const result = await analyzeInboxConversation(conversationId);
-        if (selectedIdRef.current === conversationId) setAiAnalysis(result);
-      } catch (cause) {
-        if (selectedIdRef.current === conversationId) setAiError(cause instanceof Error ? cause.message : 'تعذّر تحليل المحادثة');
-      } finally {
-        setAiLoading(false);
-      }
-    })();
+  const analysisIsCurrent = (result: InboxAiAnalysis, epoch: number, id: string) => {
+    const latest = [...latestMessages.current].reverse().find(row => row.direction === 'inbound');
+    return canApply(epoch, id) && result.conversation_id === id && Array.isArray(result.source_message_ids) && Boolean(latest && result.source_message_ids.includes(latest.id));
+  };
 
-  }, [selectedConversation, analysisLoaded, aiAnalysis, aiLoading, aiSettings.enabled, aiSettings.autoAnalyze]);
+  useEffect(() => {
+    if (!conversationVisible || document.visibilityState !== 'visible' || !selectedConversation || messageScope !== selectedId || !analysisLoaded || messagesLoading || !messages.length || aiAnalysis || aiLoading || !aiSettings.enabled || !aiSettings.autoAnalyze) return;
+    const inbound = [...messages].reverse().find(row => row.direction === 'inbound');
+    if (!inbound) return;
+    const sourceKey = `${selectedConversation.id}:${inbound.id}`;
+    if (autoAnalyzeKeyRef.current === sourceKey) return;
+    const conversationId = selectedConversation.id, epoch = selectionEpoch.current;
+    autoAnalyzeKeyRef.current = sourceKey;
+    setAiLoading(true); setAiError(null);
+    void analyzeInboxConversation(conversationId).then(result => {
+      if (analysisIsCurrent(result, epoch, conversationId)) setAiAnalysis(result);
+    }).catch(cause => {
+      if (canApply(epoch, conversationId)) setAiError(cause instanceof Error ? cause.message : 'تعذّر تحليل المحادثة');
+    }).finally(() => { if (alive.current) setAiLoading(false); });
+    // State transitions are guarded above; the request survives loading rerenders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationVisible, selectedConversation?.id, messageScope, selectedId, analysisLoaded, messagesLoading, messages, aiAnalysis, aiLoading, aiSettings.enabled, aiSettings.autoAnalyze]);
 
   async function handleConversationStatus(status: 'open' | 'pending' | 'closed') {
     if (!selectedConversation || workflowBusy) return;
     setWorkflowBusy(true);
     setMessagesError(null);
+    const epoch = selectionEpoch.current;
     try {
       const resolvedAt = status === 'closed' ? new Date().toISOString() : null;
       const { error: updateError } = await supabase
@@ -484,8 +576,10 @@ export function InboxScreen() {
       setConversations((current) => current.map((item) => (
         item.id === selectedConversation.id ? { ...item, status, resolved_at: resolvedAt } : item
       )));
+      setSelectedSnapshot(current => current?.id === selectedConversation.id ? { ...current, status, resolved_at: resolvedAt } : current);
+      void loadConversations(true); void refreshSummary();
     } catch (cause) {
-      setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحديث حالة المحادثة');
+      if (canApply(epoch, selectedConversation.id)) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحديث حالة المحادثة');
     } finally {
       setWorkflowBusy(false);
     }
@@ -495,6 +589,7 @@ export function InboxScreen() {
     if (!selectedConversation || !user || workflowBusy) return;
     setWorkflowBusy(true);
     setMessagesError(null);
+    const epoch = selectionEpoch.current;
     try {
       const assignedTo = selectedConversation.assigned_to === user.id ? null : user.id;
       const { error: updateError } = await supabase
@@ -506,8 +601,10 @@ export function InboxScreen() {
       setConversations((current) => current.map((item) => (
         item.id === selectedConversation.id ? { ...item, assigned_to: assignedTo } : item
       )));
+      setSelectedSnapshot(current => current?.id === selectedConversation.id ? { ...current, assigned_to: assignedTo } : current);
+      void loadConversations(true); void refreshSummary();
     } catch (cause) {
-      setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحديث إسناد المحادثة');
+      if (canApply(epoch, selectedConversation.id)) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر تحديث إسناد المحادثة');
     } finally {
       setWorkflowBusy(false);
     }
@@ -536,18 +633,19 @@ export function InboxScreen() {
   }
 
   async function handleAnalyzeConversation() {
-    if (!selectedConversation || aiLoading) return;
+    if (!selectedConversation || aiLoading || messagesLoading || messageScope !== selectedId || !messages.length) return;
     if (!aiSettings.enabled) {
       setAiError('مساعد الذكاء الاصطناعي معطّل من إعدادات صندوق الوارد.');
       return;
     }
     setAiLoading(true);
     setAiError(null);
+    const epoch = selectionEpoch.current;
     try {
       const result = await analyzeInboxConversation(selectedConversation.id);
-      if (selectedIdRef.current === selectedConversation.id) setAiAnalysis(result);
+      if (analysisIsCurrent(result, epoch, selectedConversation.id)) setAiAnalysis(result);
     } catch (cause) {
-      setAiError(cause instanceof Error ? cause.message : 'تعذّر تحليل المحادثة');
+      if (canApply(epoch, selectedConversation.id)) setAiError(cause instanceof Error ? cause.message : 'تعذّر تحليل المحادثة');
     } finally {
       setAiLoading(false);
     }
@@ -557,12 +655,14 @@ export function InboxScreen() {
     if (!selectedConversation || !aiAnalysis?.suggested_reply || approvalLoading) return;
     setApprovalLoading(true);
     setAiError(null);
+    const epoch = selectionEpoch.current;
     try {
       const approved = await setInboxReplyApproval({ conversationId: selectedConversation.id, action: 'approve_reply', reply: aiAnalysis.suggested_reply });
-      if (selectedIdRef.current === selectedConversation.id) setAiAnalysis(approved);
-      replaceDraft(draft, approved.approved_reply ?? approved.suggested_reply ?? '');
+      if (analysisIsCurrent(approved, epoch, selectedConversation.id)) {
+        setAiAnalysis(approved); replaceDraft(draft, approved.approved_reply ?? approved.suggested_reply ?? '');
+      }
     } catch (cause) {
-      setAiError(cause instanceof Error ? cause.message : 'تعذّر اعتماد الرد المقترح');
+      if (canApply(epoch, selectedConversation.id)) setAiError(cause instanceof Error ? cause.message : 'تعذّر اعتماد الرد المقترح');
     } finally {
       setApprovalLoading(false);
     }
@@ -572,11 +672,12 @@ export function InboxScreen() {
     if (!selectedConversation || !aiAnalysis || approvalLoading) return;
     setApprovalLoading(true);
     setAiError(null);
+    const epoch = selectionEpoch.current;
     try {
       const result = await setInboxReplyApproval({ conversationId: selectedConversation.id, action: 'reject_reply' });
-      if (selectedIdRef.current === selectedConversation.id) setAiAnalysis(result);
+      if (analysisIsCurrent(result, epoch, selectedConversation.id)) setAiAnalysis(result);
     } catch (cause) {
-      setAiError(cause instanceof Error ? cause.message : 'تعذّر رفض الرد المقترح');
+      if (canApply(epoch, selectedConversation.id)) setAiError(cause instanceof Error ? cause.message : 'تعذّر رفض الرد المقترح');
     } finally {
       setApprovalLoading(false);
     }
@@ -595,6 +696,7 @@ export function InboxScreen() {
 
     setTemplateSending(true);
     setMessagesError(null);
+    const epoch = selectionEpoch.current;
     try {
       const message = await sendWhatsAppTemplate({
         conversationId: selectedConversation.id,
@@ -602,16 +704,13 @@ export function InboxScreen() {
         variables: templateVariables,
         preview: selectedTemplatePreview,
       });
-      if (selectedIdRef.current === selectedConversation.id) {
+      if (canApply(epoch, selectedConversation.id)) {
         setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
       }
-      setConversations((current) => current.map((item) => (
-        item.id === selectedConversation.id
-          ? { ...item, snippet: message.content, unread: false, updated_at: message.created_at }
-          : item
-      )));
+      if (selectedIdRef.current === selectedConversation.id) void refreshLatest.current?.();
+      void loadConversations(true); void refreshSummary();
     } catch (cause) {
-      setMessagesError(cause instanceof Error ? cause.message : 'تعذّر إرسال WhatsApp Template');
+      if (canApply(epoch, selectedConversation.id)) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر إرسال WhatsApp Template');
     } finally {
       setTemplateSending(false);
     }
@@ -644,10 +743,11 @@ export function InboxScreen() {
   }
 
   async function handleSend() {
-    if (!selectedConversation || sending) return;
+    if (!selectedConversation || sending || messagesLoading || messageScope !== selectedId) return;
     if (!draft.trim() && !pendingAttachment) return;
     setSending(true);
     setMessagesError(null);
+    const epoch = selectionEpoch.current;
     try {
       const message = pendingAttachment
         ? await sendInboxMedia({
@@ -656,18 +756,15 @@ export function InboxScreen() {
             caption: draft.trim() || undefined,
           })
         : await sendInboxReply(selectedConversation.id, draft);
-      if (selectedIdRef.current === selectedConversation.id) {
+      if (canApply(epoch, selectedConversation.id)) {
         setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
         clearPendingAttachment();
       }
       replaceDraft(draft, '');
-      setConversations((current) => current.map((item) => (
-        item.id === selectedConversation.id
-          ? { ...item, snippet: message.content, unread: false, updated_at: message.created_at }
-          : item
-      )));
+      if (selectedIdRef.current === selectedConversation.id) void refreshLatest.current?.();
+      void loadConversations(true); void refreshSummary();
     } catch (cause) {
-      setMessagesError(cause instanceof Error ? cause.message : 'تعذّر إرسال الرد');
+      if (canApply(epoch, selectedConversation.id)) setMessagesError(cause instanceof Error ? cause.message : 'تعذّر إرسال الرد');
     } finally {
       setSending(false);
     }
@@ -675,14 +772,15 @@ export function InboxScreen() {
 
   if (!workspace) return null;
 
-  const unreadCount = conversations.filter((item) => item.unread).length;
-  const openCount = conversations.filter((item) => item.status === 'open').length;
-  const aiReviewCount = conversations.filter((item) => item.needs_review).length;
-  const platformCount = new Set(conversations.map((item) => item.platform)).size;
+  const unreadCount = summary.unread;
+  const openCount = summary.open;
+  const aiReviewCount = summary.review;
+  const platformCount = summary.accounts;
+  const summaryUnavailable = !summaryReady || summaryError;
 
   return (
     <div className="page-shell safe-top pb-28 max-w-6xl">
-      <section className="surface-hero mb-5">
+      <section className={`surface-hero mb-5 ${mobilePane === 'conversation' ? 'hidden md:block' : ''}`}>
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
             <div className="status-orb"><InboxIcon size={21} className="text-brand-300" /></div>
@@ -692,22 +790,23 @@ export function InboxScreen() {
               <p className="text-ink-400 text-sm mt-2">رسائل وتعليقات المنصات، مع تحليل واقتراح رد AI ومراجعة بشرية قبل الإرسال.</p>
             </div>
           </div>
-          <Button variant="secondary" size="sm" onClick={() => void loadConversations()} disabled={loading}>
+          <Button variant="secondary" size="sm" onClick={() => { void loadConversations(); void refreshSummary(); void refreshLatest.current?.(); }} disabled={loading}>
             {loading ? <Spinner size={16} /> : <RefreshCw size={16} />}
             تحديث
           </Button>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-5">
-          <div className="metric-tile"><p className={`metric-value ${unreadCount ? 'text-accent-300' : ''}`}>{unreadCount}</p><p className="metric-label">غير مقروء</p></div>
-          <div className="metric-tile"><p className="metric-value">{openCount}</p><p className="metric-label">محادثات مفتوحة</p></div>
-          <div className="metric-tile"><p className={`metric-value ${aiReviewCount ? 'text-warning-300' : ''}`}>{aiReviewCount}</p><p className="metric-label">تحتاج مراجعة AI</p></div>
-          <div className="metric-tile"><p className="metric-value">{platformCount}</p><p className="metric-label">منصات نشطة</p></div>
+          <div className="metric-tile"><p className={`metric-value ${unreadCount ? 'text-accent-300' : ''}`}>{summaryUnavailable ? '—' : unreadCount}</p><p className="metric-label">غير مقروء</p></div>
+          <div className="metric-tile"><p className="metric-value">{summaryUnavailable ? '—' : openCount}</p><p className="metric-label">محادثات مفتوحة</p></div>
+          <div className="metric-tile"><p className={`metric-value ${aiReviewCount ? 'text-warning-300' : ''}`}>{summaryUnavailable ? '—' : aiReviewCount}</p><p className="metric-label">تحتاج مراجعة AI</p></div>
+          <div className="metric-tile"><p className="metric-value">{summaryUnavailable ? '—' : platformCount}</p><p className="metric-label">حسابات متصلة</p></div>
         </div>
       </section>
 
       {error && <div className="mb-4"><ErrorBanner message={error} /></div>}
+      {summaryError && <p className="mb-3 text-xs text-warning-300">تعذّر تحديث مؤشرات صندوق الوارد؛ اضغط تحديث للمحاولة مجددًا.</p>}
 
-      <Card className="surface-card mb-4 !p-0 overflow-hidden">
+      <Card className={`surface-card mb-4 !p-0 overflow-hidden ${mobilePane === 'conversation' ? 'hidden md:block' : ''}`}>
         <button
           type="button"
           onClick={() => setSettingsOpen((value) => !value)}
@@ -888,22 +987,11 @@ export function InboxScreen() {
         )}
       </Card>
 
-      {loading ? (
-        <div className="py-20 flex justify-center"><Spinner className="text-brand-400" size={28} /></div>
-      ) : conversations.length === 0 ? (
-        <Card className="surface-card">
-          <EmptyState
-            icon={<MessageSquare size={28} />}
-            title="لا توجد محادثات بعد"
-            subtitle="ستظهر هنا رسائل وتعليقات الحسابات المتصلة بعد وصول أول Webhook."
-          />
-        </Card>
-      ) : (
         <div className="grid grid-cols-1 md:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.4fr)] gap-4">
-          <Card className="surface-card p-0 overflow-hidden">
+          <Card className={`surface-card p-0 overflow-hidden ${mobilePane === 'list' ? 'block' : 'hidden md:block'}`}>
             <div className="px-4 py-3 border-b border-ink-800 flex items-center justify-between">
               <span className="text-sm font-semibold text-ink-100">المحادثات</span>
-              <Badge color="brand">{conversations.filter((item) => item.unread).length} جديدة</Badge>
+              <Badge color="brand">{summaryUnavailable ? '—' : summary.unread} جديدة</Badge>
             </div>
             <div className="p-3 border-b border-ink-800 space-y-2">
               <div className="relative">
@@ -911,14 +999,16 @@ export function InboxScreen() {
                 <input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder="ابحث بالاسم أو نص الرسالة..."
+                  placeholder="ابحث بالاسم أو آخر رسالة..."
+                  aria-label="البحث في المحادثات"
                   className="w-full rounded-xl border border-ink-800 bg-ink-900 pr-9 pl-3 py-2 text-xs text-ink-100 outline-none focus:border-brand-500/50"
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <select
                   value={statusFilter}
-                  onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+                  onChange={(event) => { setStatusFilter(event.target.value as typeof statusFilter); setPage(0); }}
+                  aria-label="حالة المحادثات"
                   className="rounded-xl border border-ink-800 bg-ink-900 px-2.5 py-2 text-xs text-ink-200"
                 >
                   <option value="all">كل الحالات</option>
@@ -928,7 +1018,8 @@ export function InboxScreen() {
                 </select>
                 <select
                   value={platformFilter}
-                  onChange={(event) => setPlatformFilter(event.target.value)}
+                  onChange={(event) => { setPlatformFilter(event.target.value); setPage(0); }}
+                  aria-label="منصة المحادثات"
                   className="rounded-xl border border-ink-800 bg-ink-900 px-2.5 py-2 text-xs text-ink-200"
                 >
                   <option value="all">كل المنصات</option>
@@ -939,15 +1030,16 @@ export function InboxScreen() {
               </div>
             </div>
             <div className="max-h-[560px] overflow-y-auto">
-              {filteredConversations.length === 0 ? (
-                <div className="p-5 text-center text-xs text-ink-500">لا توجد محادثات مطابقة للفلاتر.</div>
+              {loading ? <div className="p-6 text-center"><Spinner /></div> : filteredConversations.length === 0 ? (
+                <div className="p-5 text-center text-xs text-ink-500">{total === 0 && !querySearch && statusFilter === 'all' && platformFilter === 'all' ? 'لا توجد محادثات بعد. ستظهر رسائل الحسابات المتصلة عند وصولها.' : 'لا توجد محادثات مطابقة للفلاتر.'}</div>
               ) : filteredConversations.map((conversation) => {
                 const active = conversation.id === selectedId;
                 return (
                   <button
                     key={conversation.id}
+                    data-conversation-id={conversation.id}
                     type="button"
-                    onClick={() => setSelectedId(conversation.id)}
+                    onClick={() => selectConversation(conversation)}
                     className={`w-full text-right px-4 py-3 border-b border-ink-900 transition-colors ${active ? 'bg-brand-500/10' : 'hover:bg-ink-900/70'}`}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -969,9 +1061,15 @@ export function InboxScreen() {
                 );
               })}
             </div>
+
+            {total > 0 && <div className="flex justify-between items-center gap-2 p-3 border-t border-ink-800" aria-label="صفحات المحادثات">
+              <Button size="sm" variant="ghost" disabled={loading || page === 0} onClick={() => setPage(value => value - 1)} aria-label="صفحة المحادثات السابقة">السابق</Button>
+              <span className="text-xs text-ink-400">{page * INBOX_PAGE_SIZE + 1}–{Math.min((page + 1) * INBOX_PAGE_SIZE, total)} من {total}</span>
+              <Button size="sm" variant="ghost" disabled={loading || (page + 1) * INBOX_PAGE_SIZE >= total} onClick={() => setPage(value => value + 1)} aria-label="صفحة المحادثات التالية">التالي</Button>
+            </div>}
           </Card>
 
-          <Card className="p-0 overflow-hidden min-h-[560px] flex flex-col">
+          <Card className={`p-0 overflow-hidden min-h-[560px] flex-col ${mobilePane === 'conversation' ? 'flex' : 'hidden md:flex'}`}>
             {selectedConversation ? (
               <>
                 <div className="px-4 py-3 border-b border-ink-800 flex items-center justify-between gap-3">
@@ -992,12 +1090,12 @@ export function InboxScreen() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button variant="ghost" size="sm" onClick={() => void handleToggleAssignment()} disabled={workflowBusy}>
+                    <Button variant="ghost" size="sm" onClick={() => void handleToggleAssignment()} aria-label={selectedConversation.assigned_to === user?.id ? 'إلغاء إسنادي' : 'إسناد المحادثة لي'} disabled={workflowBusy}>
                       <UserCheck size={14} />
                       <span className="hidden lg:inline">{selectedConversation.assigned_to === user?.id ? 'إلغاء إسنادي' : 'إسناد لي'}</span>
                     </Button>
                     {selectedConversation.status !== 'pending' && (
-                      <Button variant="ghost" size="sm" onClick={() => void handleConversationStatus('pending')} disabled={workflowBusy}>
+                      <Button variant="ghost" size="sm" onClick={() => void handleConversationStatus('pending')} aria-label="تعليق المحادثة" disabled={workflowBusy}>
                         <Clock3 size={14} />
                         <span className="hidden lg:inline">تعليق</span>
                       </Button>
@@ -1007,22 +1105,22 @@ export function InboxScreen() {
                         فتح
                       </Button>
                     ) : (
-                      <Button variant="ghost" size="sm" onClick={() => void handleConversationStatus('closed')} disabled={workflowBusy}>
+                      <Button variant="ghost" size="sm" onClick={() => void handleConversationStatus('closed')} aria-label="إغلاق المحادثة" disabled={workflowBusy}>
                         <CircleCheckBig size={14} />
                         <span className="hidden lg:inline">إغلاق</span>
                       </Button>
                     )}
-                    <Button variant="secondary" size="sm" onClick={() => void handleAnalyzeConversation()} disabled={aiLoading || !aiSettings.enabled}>
+                    <Button variant="secondary" size="sm" onClick={() => void handleAnalyzeConversation()} aria-label={aiAnalysis ? 'إعادة تحليل المحادثة' : 'تحليل المحادثة'} disabled={aiLoading || messagesLoading || messageScope !== selectedId || !messages.length || !aiSettings.enabled}>
                       {aiLoading ? <Spinner size={14} /> : <Sparkles size={14} />}
                       <span className="hidden sm:inline">{aiAnalysis ? 'إعادة تحليل AI' : 'تحليل AI'}</span>
                     </Button>
-                    <button type="button" className="md:hidden text-ink-500" onClick={() => setSelectedId(null)} aria-label="رجوع">
+                    <button type="button" className="md:hidden text-ink-500" onClick={() => setMobilePane('list')} aria-label="الرجوع للمحادثات">
                       <ArrowRight size={18} />
                     </button>
                   </div>
                 </div>
 
-                {(aiError || aiAnalysis) && (
+                {messageScope === selectedId && (aiError || aiAnalysis) && (
                   <div className="px-4 pt-3">
                     {aiError && <ErrorBanner message={aiError} />}
                     {aiAnalysis && (
@@ -1073,15 +1171,16 @@ export function InboxScreen() {
                   </div>
                 )}
 
-                <div className="flex-1 p-4 space-y-3 overflow-y-auto min-h-[360px]">
-                  {messagesError && <ErrorBanner message={messagesError} />}
-                  {messagesLoading ? (
+                <div ref={messageView} role="region" aria-label="رسائل المحادثة" className="flex-1 p-4 space-y-3 overflow-y-auto min-h-[360px] max-h-[65dvh]">
+                  {messageScope === selectedId && hasOlderMessages && <div className="text-center"><Button size="sm" variant="secondary" disabled={olderLoading} onClick={() => void loadOlderMessages()}>{olderLoading ? 'جارٍ تحميل الرسائل السابقة...' : 'تحميل رسائل أقدم'}</Button></div>}
+                  {messageScope === selectedId && messagesError && <div className="space-y-2"><ErrorBanner message={messagesError} /><Button size="sm" variant="ghost" onClick={() => void refreshLatest.current?.()}>إعادة تحميل الرسائل</Button></div>}
+                  {messagesLoading || messageScope !== selectedId ? (
                     <div className="h-full flex items-center justify-center"><Loader2 className="animate-spin text-brand-400" size={24} /></div>
                   ) : messages.length === 0 ? (
                     <EmptyState icon={<MessageSquare size={24} />} title="لا توجد رسائل محفوظة" subtitle="ستتم مزامنة الرسائل الجديدة من Webhook." />
                   ) : (
                     messages.map((message) => (
-                      <div key={message.id} className={`flex ${message.direction === 'outbound' ? 'justify-start' : 'justify-end'}`}>
+                      <div key={message.id} data-message-id={message.id} className={`flex ${message.direction === 'outbound' ? 'justify-start' : 'justify-end'}`}>
                         <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 ${message.direction === 'outbound' ? 'bg-brand-500/15 text-brand-100' : 'bg-ink-800 text-ink-100'}`}>
                           <div className="flex items-center justify-between gap-3 mb-1 text-[10px] text-ink-500">
                             <span>{messageLabel(message)}</span>
@@ -1252,7 +1351,7 @@ export function InboxScreen() {
                       size="sm"
                       onClick={() => void handleSend()}
                       disabled={
-                        sending
+                        sending || messagesLoading || messageScope !== selectedId
                         || (!draft.trim() && !pendingAttachment)
                         || !canReplyToConversation(selectedConversation)
                         || (selectedConversation.platform === 'whatsapp' && !whatsappServiceWindowOpen)
@@ -1270,7 +1369,6 @@ export function InboxScreen() {
             )}
           </Card>
         </div>
-      )}
     </div>
   );
 }

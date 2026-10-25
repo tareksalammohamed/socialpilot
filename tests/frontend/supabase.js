@@ -8,7 +8,17 @@ export function setDnaError(value) { dnaError = value; }
 export function setEnqueueError(value) { enqueueError = value; }
 export function enableAutoAnalyze() { ws.settings = { inbox_ai: { enabled: true, autoAnalyze: true } }; }
 const ws = { id: 'workspace-1', owner_id: 'user-1', name: 'QA', settings: {} };
-export const conversations = ['a', 'b'].map((id, i) => ({ id, workspace_id: ws.id, platform: 'whatsapp', type: 'dm', sender_name: 'عميل ' + (i + 1), status: 'open', unread: false, metadata: { provider: i ? 'wppconnect' : 'waha' }, updated_at: new Date().toISOString() }));
+export const conversations = ['a', 'b'].map((id, i) => ({ id, workspace_id: ws.id, platform: 'whatsapp', type: 'dm', sender_name: 'عميل ' + (i + 1), status: 'open', unread: false, metadata: { provider: i ? 'wppconnect' : 'waha' }, updated_at: new Date(Date.now() - i * 1000).toISOString() }));
+let inboxConversations = conversations;
+let inboxMessages = null;
+const deferred = [];
+export function setInboxData(rows, messages) { inboxConversations = rows; inboxMessages = messages; }
+export function deferRead(table, matches = () => true) {
+  const gate = { table, matches, release: null }; deferred.push(gate); return gate;
+}
+export function emitInbox(table, payload) {
+  for (const channel of channels) for (const entry of channel.inboxCallbacks) if (entry.table === table) entry.callback(payload);
+}
 export const contentRows = Array.from({ length: 73 }, (_, index) => ({
   id: `content-${index}`, workspace_id: ws.id, title: `منشور رقم ${index}`, master_text: `نص ${index}`,
   status: ['published', 'review', 'draft'][index % 3], quality_status: 'passed', platforms: ['facebook'],
@@ -41,7 +51,7 @@ export const supabase = {
   from(table) {
     let single = false;
     const query = {}, args = [];
-    for (const method of ['select', 'eq', 'neq', 'order', 'limit', 'in', 'gte', 'lt', 'update', 'range', 'ilike', 'or']) {
+    for (const method of ['select', 'eq', 'neq', 'order', 'limit', 'in', 'gte', 'lt', 'update', 'range', 'ilike', 'or', 'abortSignal']) {
       query[method] = (...a) => { args.push([method, ...a]); return query; };
     }
     query.maybeSingle = query.single = () => { single = true; return query; };
@@ -50,12 +60,44 @@ export const supabase = {
       if (table === 'workspace_members') data = { workspace_id: ws.id };
       else if (table === 'workspaces') data = ws;
       else if (table === 'brand_dna') data = dnaError ? null : { id: 'dna', status: 'approved' };
-      else if (table === 'inbox_conversations') data = conversations;
       else if (table === 'assistant_tasks') data = single ? tasks[0] ?? null : tasks;
-      else if (table === 'inbox_messages') data = [
-        { id: 'latest', conversation_id: 'a', direction: 'inbound', content: 'أحدث رسالة', created_at: '2026-10-24T10:00:00Z', metadata: {} },
-        { id: 'older', conversation_id: 'a', direction: 'inbound', content: 'رسالة أقدم', created_at: '2026-10-20T10:00:00Z', metadata: {} },
-      ];
+      else if (table === 'inbox_conversations' || table === 'inbox_messages') {
+        const conversationId = args.find(a => a[0] === 'eq' && a[1] === 'conversation_id')?.[2] ?? 'a';
+        let rows = table === 'inbox_conversations' ? [...inboxConversations] : inboxMessages ? [...inboxMessages] : [
+          { id: 'latest', conversation_id: conversationId, workspace_id: ws.id, direction: 'inbound', content: 'أحدث رسالة', created_at: '2026-10-24T10:00:00Z', metadata: {} },
+          { id: 'older', conversation_id: conversationId, workspace_id: ws.id, direction: 'inbound', content: 'رسالة أقدم', created_at: '2026-10-20T10:00:00Z', metadata: {} },
+        ];
+        for (const [method, field, value] of args) {
+          if (method === 'eq') rows = rows.filter(row => row[field] === value);
+          if (method === 'neq') rows = rows.filter(row => row[field] !== value);
+          if (method === 'in') rows = rows.filter(row => value.includes(row[field]));
+          if (method === 'or' && field.startsWith('sender_name.ilike.')) {
+            const match = field.match(/^sender_name\.ilike\.("(?:[^"\\]|\\.)*"),snippet\.ilike\.("(?:[^"\\]|\\.)*")$/);
+            if (!match) throw Error('Invalid quoted conversation search: '+field);
+            const term = JSON.parse(match[1]).slice(1,-1).replace(/\\([\\%_])/g,'$1').toLowerCase();
+            rows = rows.filter(row => [row.sender_name, row.snippet].some(text => String(text ?? '').toLowerCase().includes(term)));
+          }
+          if (method === 'or' && field.startsWith('created_at.lt.')) {
+            const match = field.match(/^created_at\.lt\.("(?:[^"\\]|\\.)*"),and\(created_at\.eq\.("(?:[^"\\]|\\.)*"),id\.lt\.("(?:[^"\\]|\\.)*")\)$/);
+            if (!match) throw Error('Invalid message cursor: '+field);
+            const timestamp = JSON.parse(match[1]), id = JSON.parse(match[3]);
+            rows = rows.filter(row => row.created_at < timestamp || row.created_at === timestamp && row.id < id);
+          }
+        }
+        const update = args.find(a => a[0] === 'update');
+        if (update && table === 'inbox_conversations') {
+          const ids = new Set(rows.map(row => row.id));
+          inboxConversations = inboxConversations.map(row => ids.has(row.id) ? { ...row, ...update[1] } : row);
+        }
+        const orders = args.filter(a => a[0] === 'order');
+        rows.sort((a,b) => { for (const [, field, order] of orders) { if (a[field] !== b[field]) return (a[field] < b[field] ? -1 : 1) * (order.ascending ? 1 : -1); } return 0; });
+        count = rows.length;
+        const range = args.find(a => a[0] === 'range'), limit = args.find(a => a[0] === 'limit');
+        if (range) rows = rows.slice(range[1], range[2] + 1);
+        if (limit) rows = rows.slice(0, limit[1]);
+        data = single ? rows[0] ?? null : rows;
+        if (args.some(a => a[0] === 'select' && a[2]?.head)) data = null;
+      }
       else if (table === 'content' || table === 'calendar_items') {
         let rows = table === 'content' ? [...contentRows] : [...calendarRows];
         for (const [method, field, value] of args) {
@@ -74,12 +116,15 @@ export const supabase = {
         if (args.some(a => a[0] === 'select' && a[2]?.head)) data = null;
       }
       else data = single ? null : [];
-      return Promise.resolve({ data, error: table === 'brand_dna' && dnaError ? { message: 'offline' } : null, count }).then(resolve, reject);
+      const result = { data, error: table === 'brand_dna' && dnaError ? { message: 'offline' } : null, count };
+      const index = deferred.findIndex(gate => gate.table === table && !args.some(a => a[0] === 'update') && gate.matches(args));
+      if (index >= 0) { const gate = deferred.splice(index, 1)[0]; return new Promise(release => { gate.release = () => release(result); }).then(resolve, reject); }
+      return Promise.resolve(result).then(resolve, reject);
     };
     return query;
   },
   channel() {
-    const channel = { callbacks: [], on: (_event, filter, callback) => { if (filter.table === 'assistant_tasks') channel.callbacks.push(callback); return channel; }, subscribe: () => channel };
+    const channel = { callbacks: [], inboxCallbacks: [], on: (_event, filter, callback) => { if (filter.table === 'assistant_tasks') channel.callbacks.push(callback); else channel.inboxCallbacks.push({ table: filter.table, callback }); return channel; }, subscribe: () => channel };
     channels.add(channel); return channel;
   },
   removeChannel: async channel => { channels.delete(channel); },

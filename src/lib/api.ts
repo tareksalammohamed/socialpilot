@@ -337,7 +337,7 @@ export async function markInboxConversationRead(conversationId: string): Promise
   const { error } = await supabase
     .from('inbox_conversations')
     .update({ unread: false })
-    .eq('id', conversationId);
+    .eq('id', conversationId).abortSignal(AbortSignal.timeout(15_000));
   if (error) throw error;
 }
 
