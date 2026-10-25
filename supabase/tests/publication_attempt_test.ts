@@ -1,4 +1,4 @@
-import { PublicationAttempt, UncertainPublicationError, findPublicationHold, UNCERTAIN_PUBLICATION } from '../functions/_shared/publication-attempt.ts';
+import { PublicationAttempt, publicationFailureResult, UncertainPublicationError, findPublicationHold, UNCERTAIN_PUBLICATION } from '../functions/_shared/publication-attempt.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 function database(options: { failDispatch?: boolean; failConfirm?: boolean; hold?: Record<string, unknown> } = {}) {
@@ -74,7 +74,7 @@ Deno.test('lost confirmation persistence remains uncertain after remote success'
   try {
     const attempt = new PublicationAttempt(database({ failConfirm: true }).db, 'job');
     try { await attempt.run(async () => { await attempt.send('https://example.test', { method: 'POST' }); return { id: 'post', url: null }; }); }
-    catch (error) { if (!(error instanceof UncertainPublicationError)) throw error; return; }
+    catch (error) { if (!(error instanceof UncertainPublicationError) || publicationFailureResult(error).post_id !== 'post') throw error; return; }
     throw Error('lost confirmation reported as safe to retry');
   } finally { globalThis.fetch = saved; }
 });

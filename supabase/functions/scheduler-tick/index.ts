@@ -1,4 +1,4 @@
-import { PublicationAttempt, UncertainPublicationError, UNCERTAIN_PUBLICATION, findPublicationHold } from '../_shared/publication-attempt.ts';
+import { PublicationAttempt, publicationFailureResult, UncertainPublicationError, UNCERTAIN_PUBLICATION, findPublicationHold } from '../_shared/publication-attempt.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { buildPostText } from '../_shared/published-text.ts';
 
@@ -414,7 +414,7 @@ async function publishCalendarItem(item: CalendarItem): Promise<'published' | 's
     throw new Error(`مفيش حساب ${platformLabel} مربوط بهذه المساحة`);
   }
 
-  const publicationHold = await findPublicationHold(supabase, item.workspace_id, item.variant_id);
+  const publicationHold = await findPublicationHold(supabase, item.workspace_id, variant.id);
   if (publicationHold) {
     if (publicationHold !== UNCERTAIN_PUBLICATION) return 'skipped';
     await supabase.from('calendar_items').update({ status: 'failed' }).eq('id', item.id);
@@ -452,6 +452,7 @@ async function publishCalendarItem(item: CalendarItem): Promise<'published' | 's
   }
 
   if (existingJob?.status === 'succeeded') {
+    await supabase.from('content').update({ status: 'published' }).eq('id', variant.content_id);
     await supabase.from('calendar_items').update({ status: 'published' }).eq('id', item.id);
     return 'skipped';
   }
@@ -598,7 +599,7 @@ async function publishCalendarItem(item: CalendarItem): Promise<'published' | 's
       status: 'failed',
       last_attempt_at: new Date().toISOString(),
       last_error: message,
-      ...(err instanceof UncertainPublicationError ? { result: { outcome: 'uncertain' } } : {}),
+      ...(err instanceof UncertainPublicationError ? { result: publicationFailureResult(err) } : {}),
     }).eq('id', job.id);
 
     await supabase.from('calendar_items').update({ status: 'failed' }).eq('id', item.id);

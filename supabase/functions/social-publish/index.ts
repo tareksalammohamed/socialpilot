@@ -1,4 +1,4 @@
-import { PublicationAttempt, UncertainPublicationError, findPublicationHold } from '../_shared/publication-attempt.ts';
+import { PublicationAttempt, publicationFailureResult, UncertainPublicationError, findPublicationHold } from '../_shared/publication-attempt.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { buildPostText } from '../_shared/published-text.ts';
 
@@ -487,6 +487,8 @@ Deno.serve(async (req: Request) => {
   }
 
   if (existingJob?.status === 'succeeded') {
+    if (calendarItemId) await supabase.from('calendar_items').update({ status: 'published' }).eq('id', calendarItemId);
+    await supabase.from('content').update({ status: 'published' }).eq('id', variant.content_id);
     return jsonRes(200, { ok: true, alreadyPublished: true, job: existingJob });
   }
   if (existingJob && Number(existingJob.attempts ?? 0) >= Number(existingJob.max_attempts ?? 3)) {
@@ -626,7 +628,7 @@ Deno.serve(async (req: Request) => {
       status: 'failed',
       last_attempt_at: new Date().toISOString(),
       last_error: message,
-      ...(err instanceof UncertainPublicationError ? { result: { outcome: 'uncertain' } } : {}),
+      ...(err instanceof UncertainPublicationError ? { result: publicationFailureResult(err) } : {}),
     }).eq('id', job.id);
 
     if (calendarItemId) {

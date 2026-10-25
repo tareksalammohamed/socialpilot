@@ -4,7 +4,7 @@ export const UNCERTAIN_PUBLICATION = 'نتيجة النشر غير مؤكدة؛ 
 export const HELD_PUBLICATION_OUTCOMES = ['dispatching', 'uncertain'];
 
 export class UncertainPublicationError extends Error {
-  constructor() { super(UNCERTAIN_PUBLICATION); }
+  constructor(readonly confirmed?: { id: string; url: string | null }) { super(UNCERTAIN_PUBLICATION); }
 }
 
 /** One object per claimed job, never shared between requests. The durable
@@ -32,15 +32,17 @@ export class PublicationAttempt {
   }
 
   async run<T extends { id: string; url: string | null }>(publish: () => Promise<T>): Promise<T> {
+    let confirmed: T | undefined;
     try {
       const result = await publish();
       if (!result.id || result.id === 'undefined' || result.id === 'null') throw new Error('Missing post identifier');
+      confirmed = result;
       const { error } = await this.db.from('publishing_jobs')
         .update({ result: { outcome: 'confirmed', post_id: result.id, url: result.url } }).eq('id', this.jobId);
       if (error) throw error;
       return result;
     } catch (error) {
-      if (this.dispatched) throw new UncertainPublicationError();
+      if (this.dispatched) throw new UncertainPublicationError(confirmed);
       throw error;
     }
   }
@@ -63,4 +65,10 @@ export async function findPublicationHold(db: SupabaseClient, workspaceId: strin
     if (saveError) throw saveError;
   }
   return UNCERTAIN_PUBLICATION;
+}
+
+export function publicationFailureResult(error: UncertainPublicationError): Record<string, unknown> {
+  return error.confirmed
+    ? { outcome: 'confirmed', post_id: error.confirmed.id, url: error.confirmed.url }
+    : { outcome: 'uncertain' };
 }
