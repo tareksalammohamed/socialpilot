@@ -342,7 +342,7 @@ async function executeIntent(
   const memStr = memoryContextString(ctx.memory);
 
   let stage = 0;
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["editorial-v10",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableStringify(["editorial-v11",intent,message,platforms,runtimeContext]))))).map(b => b.toString(16).padStart(2,'0')).join('');
   const runLLM = (kind: Intent, system: string, prompt: string, jsonMode = false,
     validate?: (content: string) => boolean, maxTokens = 2000, excluded: string[] = [], progress?: StepProgress) => {
     const index = stage++;
@@ -381,7 +381,7 @@ preferred_phrases و forbidden_phrases يجب أن تكونا مصفوفتين �
 
     case 'create_content': {
       const selected = platforms.length ? platforms : ['linkedin'];
-      const generated = await generateCampaign(message, selected, {...runtimeContext, post_count:selected.length, schedule:{dates:selected.map(()=>new Date().toISOString().slice(0,10))}}, brandStr, memStr, (...args) => runLLM(intent,...args), AGENTS);
+      const generated = await generateCampaign(message, selected, {...runtimeContext, post_count:selected.length, single_content:true, schedule:{dates:selected.map(()=>new Date().toISOString().slice(0,10))}}, brandStr, memStr, (...args) => runLLM(intent,...args), AGENTS);
       const slots=generated.result.slots;
       const rank=(q:Record<string,unknown>)=>q.verdict==='fail'?0:q.verdict==='review'?1:2;
       const worst=slots.map(s=>s.quality).sort((a,b)=>rank(a)-rank(b)||Number((a.scores as Record<string,number>).overall)-Number((b.scores as Record<string,number>).overall))[0];

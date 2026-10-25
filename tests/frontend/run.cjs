@@ -176,6 +176,15 @@ process.on('exit',()=>rmSync(scratch,{recursive:true,force:true}));
  await qa.act(async()=>document.querySelector('button[aria-label="إرسال الطلب"]').click()); await settle();
  assert.deepEqual(qa.calls.filter(call=>call.table==='enqueue_assistant_task').at(-1).params.p_payload.agentContext,{currentRoute:'create'});
  console.log('PASS editorial requests carry the visible revision target while new drafts do not inherit it');
+ const qualityTask={...visibleRevision,id:'quality-summary',created_at:'2026-10-26T01:00:00Z',updated_at:'2026-10-26T01:00:00Z',batch_id:'quality-batch',result_type:'plan',result:{theme:'اختبار حالة الجودة',slots:[{date:'2026-10-27',platform:'linkedin',title:'منشور اجتاز',content:'نص أول',quality:{verdict:'pass',scores:{overall:95},reasons:[]}},{date:'2026-10-28',platform:'facebook',title:'منشور للمراجعة',content:'نص ثان',quality:{verdict:'review',scores:{overall:60},reasons:['المتن مكرر']}}]}};
+ await qa.act(async()=>qa.emitTasks([qualityTask])); await settle();
+ assert.ok(document.querySelector('[aria-label="ملخص جودة المحتوى"]').textContent.includes('اجتاز المراجعة 1 من 2'));
+ assert.ok(document.body.textContent.includes('بعض المنشورات تحتاج مراجعة قبل النشر'));
+ assert.ok(!document.body.textContent.includes('تم حفظ الخطة وربطها بالتقويم'));
+ await qa.act(async()=>qa.emitTasks([{...qualityTask,updated_at:'2026-10-26T02:00:00Z',result:{...qualityTask.result,slots:qualityTask.result.slots.map(slot=>({...slot,quality:{verdict:'pass',scores:{overall:95},reasons:[]}}))}}])); await settle();
+ assert.ok(document.querySelector('[aria-label="ملخص جودة المحتوى"]').textContent.includes('(2/2)'));
+ console.log('PASS completed generation distinguishes passed reviews from drafts needing attention');
+
 
  await qa.act(async()=>qa.emitTasks([]));
  await qa.act(async()=>root2.unmount());

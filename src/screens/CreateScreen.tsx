@@ -455,6 +455,10 @@ export function CreateScreen() {
     setTimeout(() => setCopied(null), 2000);
   }
 
+  const qualityResults = mode === 'plan' && plan ? plan.slots.map(slot => slot.quality) : mode === 'content' && content ? [content.quality] : [];
+  const qualityPassed = qualityResults.filter(quality => quality?.verdict === 'pass').length;
+  const qualityBlocked = qualityPassed < qualityResults.length;
+
   return (
     <div className="page-shell safe-top pb-28 max-w-5xl flex flex-col min-h-[calc(100vh-7rem)]">
       <section className="surface-hero mb-4">
@@ -474,6 +478,10 @@ export function CreateScreen() {
       </section>
 
       {activeTask && <div className="mb-4"><TaskProgress key={activeTask.id} task={activeTask} onUpdate={task => applyTask(task as AssistantTask)} /></div>}
+
+      {qualityResults.length > 0 && <div role="status" aria-label="ملخص جودة المحتوى" className={`mb-3 rounded-xl border px-4 py-3 text-sm ${qualityBlocked ? 'border-warning-500/30 text-warning-300' : 'border-brand-500/30 text-brand-300'}`}>
+        {qualityBlocked ? `اكتمل الإنشاء: اجتاز المراجعة ${qualityPassed} من ${qualityResults.length}. المتبقي يحتاج مراجعة قبل النشر.` : `اجتاز المحتوى المراجعة (${qualityPassed}/${qualityResults.length}).`}
+      </div>}
 
       {/* Chat + results */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar rounded-2xl border border-ink-800 bg-ink-950/40 p-4 sm:p-5">
@@ -606,7 +614,7 @@ export function CreateScreen() {
               const meta = PLATFORM_META[slot.platform as keyof typeof PLATFORM_META];
               const qStatus = qualityStatusOf(slot.quality?.verdict);
               const qColor = qStatus === 'passed' ? 'brand' : qStatus === 'failed' ? 'danger' : 'accent';
-              const qLabel = qStatus === 'passed' ? 'جاهز' : qStatus === 'failed' ? 'مرفوض' : qStatus === 'needs_improvement' ? 'يحتاج تحسين' : 'قيد التقييم';
+              const qLabel = qStatus === 'passed' ? 'اجتاز المراجعة' : qStatus === 'failed' ? 'مرفوض' : qStatus === 'needs_improvement' ? 'يحتاج تحسين' : 'قيد التقييم';
               return (
                 <Card key={i}>
                   <div className="flex items-center justify-between mb-2">
@@ -626,7 +634,7 @@ export function CreateScreen() {
             })}
             {planSaved ? (
               <div className="flex items-center justify-center gap-2 py-3 text-brand-400">
-                <Check size={18} /> <span className="text-sm">تم حفظ الخطة وربطها بالتقويم</span>
+                <Check size={18} /> <span className="text-sm">{qualityBlocked ? 'تم حفظ الخطة؛ بعض المنشورات تحتاج مراجعة قبل النشر' : 'تم حفظ الخطة وربطها بالتقويم'}</span>
               </div>
             ) : (
               <Button onClick={() => void savePlan().catch(() => setMode('error'))} disabled={savingPlan} size="lg">

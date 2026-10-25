@@ -1,3 +1,6 @@
+// Shared with the authoring gate: these are the limits enforced by this publisher.
+export const POST_TEXT_LIMITS: Readonly<Record<string, number>> = { linkedin: 3000, x: 280, threads: 500, telegram: 4096 };
+
 type PostText = { text: string; cta?: string | null; hashtags?: readonly string[] };
 
 /** Publish the reviewed copy exactly; never silently cut its meaning or CTA. */

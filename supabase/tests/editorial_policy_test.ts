@@ -1,4 +1,4 @@
-import { editorialRules,enforceEditorialReview,enforceEditorialChecklist,EDITORIAL_CHECKS,cleanGeneratedText } from '../functions/_shared/editorial-policy.ts';
+import { editorialRules,enforceEditorialReview,enforceEditorialChecklist,EDITORIAL_CHECKS,cleanGeneratedText,mergeEditorialAudits,campaignDuplicateIssues } from '../functions/_shared/editorial-policy.ts';
 import { directEditorialPlan,exclusivePlatform,isEditorialFollowup,revisionPlatforms,editorialTarget } from '../functions/_shared/editorial-followup.ts';
 const pass={verdict:'pass',scores:{overall:100},reasons:[],suggested_improvements:[]};
 Deno.test('default medium posts reject article length while explicit word counts override it',()=>{
@@ -104,4 +104,24 @@ Deno.test('target follows saved results and stops at deleted or unresolved work'
  for(const status of ['running','queued','failed','cancelled'])if(Object.keys(editorialTarget({...source,status})).length)throw Error('unresolved request reused');
  if(editorialTarget({status:'completed',result:{revision:true,contentId:'edited-post',batchId:null}}).currentContentId!=='edited-post')throw Error('second revision lost target');
  if(Object.keys(editorialTarget({status:'completed',result:{contentId:'invented'}})).length)throw Error('advice trusted as target');
+});
+
+Deno.test('publisher text limits count the full body, CTA and hashtags before approval',()=>{
+ const post={title:'اسأل الأول',content:'اسأل العميل إيه اللي محتاجه عشان تقدر تساعده يفهم اختياراته. '.repeat(3),platform:'x',cta:'اسأل عن التفاصيل',hashtags:['#تأمين']};
+ if(enforceEditorialReview(pass,post,'اكتب بوست بالمصري','').verdict!=='pass')throw Error('valid short copy rejected');
+ const long={...post,cta:'اسأل عن التفاصيل '.repeat(15)};
+ if(enforceEditorialReview(pass,long,'اكتب بوست بالمصري','').verdict==='pass')throw Error('oversized full text passed');
+ const failed={...pass,verdict:'fail'};
+ if(enforceEditorialReview(failed,long,'اكتب بوست بالمصري','').verdict!=='fail')throw Error('rule demoted reviewer failure');
+});
+
+Deno.test('a failed audit remains authoritative despite a lower review score',()=>{
+ const result=mergeEditorialAudits([{verdict:'review',scores:{overall:20},reasons:['ضعف'],suggested_improvements:[]},{verdict:'fail',scores:{overall:90},reasons:['مرفوض'],suggested_improvements:[]}]);
+ if(result.verdict!=='fail'||(result.reasons as string[]).length!==2)throw Error('failure hidden by score');
+});
+Deno.test('campaign duplicate detection ignores cosmetic differences and permits variants of the same post',()=>{
+ const posts=[{title:'الأول',content:'إسأل العميل: إيه اللي محتاجه؟ عشان تقدر تساعده.'},{title:'الثاني',content:'اسال العميل ايه اللي محتاجه عشان تقدر تساعده',cta:'تواصل'}];
+ if(!campaignDuplicateIssues(posts,1).length||campaignDuplicateIssues(posts,0).length)throw Error('duplicate body missed');
+ if(campaignDuplicateIssues(posts,1,['same-post','same-post']).length)throw Error('same post variants blocked');
+ if(!campaignDuplicateIssues(posts,1,['post-a','post-b']).length)throw Error('unrelated posts grouped');
 });

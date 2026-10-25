@@ -1,4 +1,5 @@
-import { editorialRules, enforceEditorialReview, enforceEditorialChecklist, cleanGeneratedText, requestedNonArabic } from '../_shared/editorial-policy.ts';
+import { POST_TEXT_LIMITS } from '../_shared/published-text.ts';
+import { editorialRules, enforceEditorialReview, enforceEditorialChecklist, cleanGeneratedText, requestedNonArabic, editorialIssues, applyEditorialIssues, mergeEditorialAudits, campaignDuplicateIssues } from '../_shared/editorial-policy.ts';
 import type { StepProgress } from '../_shared/durable-steps.ts';
 
 import { parseStructured, validItems } from '../_shared/structured-output.ts';
@@ -18,6 +19,9 @@ export async function generateCampaign(message:string, platforms:string[], runti
       const rules = editorialRules(message, memStr);
       const skeletons = slotDates.map((date, i) => ({ date, platform: existing?.[i]?.platform ? String(existing[i].platform) : plats[i % plats.length], ...(topics.length > 1 ? { focus: topics[i % topics.length] } : {}) }));
 
+      const duplicateGroups=runtimeContext.single_content===true ? skeletons.map(()=>'single-content') : existing?.map(slot=>slot.content_id);
+      const ruleIssues=(slot:Slot)=>[...editorialIssues(slot,message,rules),...campaignDuplicateIssues(slots,slots.indexOf(slot),duplicateGroups)];
+
       const arabicOnly = !requestedNonArabic(message);
       const languageInstruction = arabicOnly ? 'اكتب بالعربية المطلوبة، وباللهجة المصرية المهنية افتراضيًا.' : 'اكتب النص باللغة التي طلبها المستخدم صراحة، بما فيها العنوان والدعوة للتفاعل والهاشتاجات.';
       const sys = AGENTS.strategy_planner(brandStr, memStr);
@@ -27,8 +31,9 @@ ${existing ? `عدّل هذه النصوص الموجودة حسب طلب الم
 هذه الدفعة من المنشور ${offset+1} إلى ${offset+batch.length} ضمن ${skeletons.length} منشورًا في الحملة. أرجع هذه الدفعة فقط.
 خريطة المحاور والمنصات للحملة كاملة للاطلاع: ${JSON.stringify(skeletons)}
 اكتب محتوى فعلي كامل (وليس عنوانًا فقط) لكل فترة من الفترات التالية، بنفس الترتيب والعدد بالضبط (${batch.length} فترة):
-${JSON.stringify(batch)}
+${JSON.stringify(batch.map(slot=>({...slot,max_characters:POST_TEXT_LIMITS[slot.platform]})))}
 عند وجود focus في الفترة، اجعله محور هذا المنشور تحديدًا؛ لا تدمج باقي المحاور فيه قسرًا.
+حد max_characters، إن وُجد، للنص الكامل مع الدعوة للتفاعل والهاشتاجات؛ اختصر هذه النسخة بما يناسب منصتها.
 بيانات الأداء السابقة التي يجب أن تؤثر على اختيار المحاور: ${JSON.stringify(runtimeContext.performance ?? {})}
 هدف المحتوى (إن وُجد): ${runtimeContext.content_goal ?? 'غير محدد'}
 أرجع JSON فقط بصيغة:
@@ -83,6 +88,11 @@ ${languageInstruction} كل "content" نص كامل أصلي مخصص لمنصت
         const reviews: Record<string, unknown>[] = [];
         for (let offset = 0; offset < items.length; offset += 1) {
         const batch = items.slice(offset, offset + 1);
+        const issues=ruleIssues(batch[0]);
+        if(issues.length){
+          reviews.push(applyEditorialIssues({verdict:'review',scores:{overall:60},reasons:[],suggested_improvements:[],review_models:[],review_source:'rules'},issues));
+          continue;
+        }
         const qPrompt = `${rules}
 أنت تراجع منشورًا واحدًا فقط ضمن حملة من ${slots.length} منشورات. لا تطلب منه احتواء بقية أيام الحملة ولا ترفضه لأنه منشور واحد. لا تطلب دمج المحاور المختلفة في كل منشور.
 خريطة الحملة للاطلاع فقط: ${JSON.stringify(slots.map((s, i) => ({position:i+1, date:s.date, platform:s.platform, title:s.title})))}
@@ -112,8 +122,7 @@ ${languageInstruction} كل "content" نص كامل أصلي مخصص لمنصت
           audits.push(audit);
           if(audit.verdict!=='pass')break;
         }
-        const worst=[...audits].sort((a,b)=>Number(a.verdict==='pass')-Number(b.verdict==='pass')||Number((a.scores as Record<string,number>).overall)-Number((b.scores as Record<string,number>).overall))[0];
-        reviews.push({...worst,reasons:audits.flatMap(q=>q.reasons as string[]),suggested_improvements:audits.flatMap(q=>q.suggested_improvements as string[]),review_models:reviewModels});
+        reviews.push({...mergeEditorialAudits(audits),review_models:reviewModels,review_source:'independent_models'});
         }
         return reviews;
       };
@@ -135,7 +144,7 @@ ${languageInstruction} كل "content" نص كامل أصلي مخصص لمنصت
 أعد كتابة الموضوع نفسه عند الحاجة لتحقيق الطلب، ولا تكتف بتلميع صياغة فكرة غير مناسبة. ${languageInstruction} لا تخلط النص بلغات غير مطلوبة ولا تخترع تغطيات أو منتجات تأمين.
 حسّن عناصر المحتوى التالية بناءً على ملاحظات الجودة، مع الحفاظ على المنصة والموضوع الأساسي لكل عنصر. إذا طلب قصة بيعية فاحتفظ بالسرد وأصلح صدق نسبتها بدل حذف القصة وتحويلها لنصائح.
 أرجع كائن JSON فقط يحتوي posts بنفس العدد والترتيب (${workBatch.length} عنصر): {"posts": [{ "title": "...", "content": "...", "hashtags": [], "cta": "..." }]}
-العناصر وملاحظاتها: ${JSON.stringify(workBatch.map(({ slot, q }) => ({ platform: slot.platform, title: slot.title, content: slot.content, cta: slot.cta, hashtags: slot.hashtags, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
+العناصر وملاحظاتها: ${JSON.stringify(workBatch.map(({ slot, q }) => ({ platform: slot.platform, max_characters:POST_TEXT_LIMITS[slot.platform], title: slot.title, content: slot.content, cta: slot.cta, hashtags: slot.hashtags, issues: q.reasons ?? [], suggestions: q.suggested_improvements ?? [] })))}`;
         const improveRun = await runLLM( AGENTS.content_creator(brandStr, memStr), improvePrompt, true, c => validItems(c, "posts", workBatch.length, false, arabicOnly), budgetFor(workBatch.length), [...editorialReviewerModels], { phase: 'improvement', label: 'تحسين المنشورات وفق ملاحظات الجودة', current:offset+workBatch.length,total:needsWork.length });
         authorModels.add(improveRun.model);
 
@@ -160,6 +169,8 @@ ${languageInstruction} كل "content" نص كامل أصلي مخصص لمنصت
 
         const recheck = await runQuality(needsWork.map(({ i }) => slots[i]), true);
         needsWork.forEach(({ i }, idx) => { qualities[i] = recheck[idx]; });
+        // A rewrite may accidentally duplicate a previously passing slot.
+        slots.forEach((slot,i)=>{qualities[i]=applyEditorialIssues(qualities[i],ruleIssues(slot));});
       }
 
       const finalSlots = slots.map((slot, i) => ({ ...slot, quality: qualities[i] }));
