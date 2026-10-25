@@ -1,3 +1,4 @@
+import { summarizeTaskPerformance } from '../_shared/execution-metrics.ts';
 import { loadRoutingReadiness } from '../ai-gateway/router.ts';
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 import { getAdapter, computeQualityScore, type ProviderKey, PROVIDER_CATALOG } from './providers.ts';
@@ -252,11 +253,13 @@ Deno.serve(async (req: Request) => {
       }
 
       case 'get_usage_summary': {
-        const { data } = await supabase
-          .from('ai_runs')
-          .select('provider, model, status, cost_usd, input_tokens, output_tokens, fallback_count, created_at')
-          .order('created_at', { ascending: false })
-          .limit(200);
+        const [usageRead,performanceRead]=await Promise.all([
+          supabase.from('ai_runs').select('provider, model, status, cost_usd, input_tokens, output_tokens, fallback_count, created_at').order('created_at',{ascending:false}).limit(200),
+          supabase.from('assistant_tasks').select('status,created_at,started_at,completed_at,progress').in('task_kind',['create','agent']).eq('status','completed').order('created_at',{ascending:false}).limit(200).abortSignal(AbortSignal.timeout(10_000)),
+        ]);
+        const {data,error:usageError}=usageRead;
+        if(usageError)throw usageError;
+        const {data:taskRows,error:taskError}=performanceRead;
         const rows = data ?? [];
         const totals = rows.reduce(
           (acc, r) => {
@@ -271,6 +274,8 @@ Deno.serve(async (req: Request) => {
         );
         return jsonRes(200, {
           totals,
+          performance:taskError?null:summarizeTaskPerformance(taskRows??[]),
+          performance_unavailable:Boolean(taskError),
           recent: rows.slice(0, 30).map((r) => ({ ...r, cost_usd: Math.max(0, Number(r.cost_usd ?? 0)) })),
         });
       }

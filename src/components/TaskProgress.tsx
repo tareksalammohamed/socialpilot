@@ -1,3 +1,4 @@
+import { PHASE_LABELS, parseExecutionMetrics } from '../../supabase/functions/_shared/execution-metrics';
 import { useEffect, useState } from 'react';
 import { CheckCircle2, CircleStop, RotateCcw, Clock3, Activity, Trash2 } from 'lucide-react';
 import { Button, ErrorBanner, Spinner } from './ui';
@@ -21,6 +22,9 @@ export function TaskProgress({ task, onUpdate }: { task: DurableTask; onUpdate: 
   const deletable = task.task_kind === 'create';
   const stoppable = active && (task.status === 'queued' || canRestart);
   const p = task.progress;
+  const metrics=parseExecutionMetrics(p?.metrics);
+  const phaseStarted=Date.parse(p?.phase_started_at??'');
+  const phaseSeconds=Number.isFinite(phaseStarted)?Math.max(0,Math.floor((now-phaseStarted)/1000)):null;
   const stale = task.status === 'running' && now - new Date(p?.updated_at ?? task.updated_at ?? task.created_at).getTime() > 90_000;
   const waitSeconds = Math.max(0, Math.ceil((new Date(task.available_at ?? '').getTime() - now) / 1000));
   const elapsed = Math.max(0, Math.floor(((active ? now : new Date(task.completed_at ?? task.updated_at ?? task.created_at).getTime()) - new Date(task.started_at ?? task.created_at).getTime()) / 1000));
@@ -47,11 +51,18 @@ export function TaskProgress({ task, onUpdate }: { task: DurableTask; onUpdate: 
         {p?.detail && <p className="text-xs text-ink-400 mt-1">{p.detail}</p>}
         {p?.current != null && p.total != null && <p className="text-xs text-brand-300 mt-1">العنصر {p.current} من {p.total}</p>}
         {p?.provider && <p className="text-xs text-ink-400 mt-1 break-all" dir="ltr">{p.provider} · {p.model}{p.attempt && p.attempt > 1 ? ` · محاولة ${p.attempt}` : ''}</p>}
+        {task.status==='running' && !p?.phase_completed_at && phaseSeconds!==null && <p className="text-xs text-ink-400 mt-1" aria-live="off">وقت المرحلة الحالية: {phaseSeconds} ثانية</p>}
+        {task.status==='running' && !p?.phase_completed_at && (p?.attempt??0)>1 && <p className="text-xs text-warning-300 mt-1">بيجرّب بديل بعد تعذر المحاولة السابقة؛ الطلب محفوظ.</p>}
         {stale && <p className="text-xs text-warning-300 mt-1">دي آخر مرحلة مؤكدة؛ لم يصل تحديث جديد بعد.</p>}
         {task.status === 'queued' && waitSeconds > 0 && <p className="text-xs text-ink-400 mt-1" aria-live="off">إعادة المحاولة متاحة خلال {waitSeconds} ثانية.</p>}
       </div>
     </div>
     {task.error && <p className="mt-2 text-xs text-warning-300 break-words">{task.status === 'running' ? 'سبب تعذر المحاولة السابقة: ' : ''}{taskErrorMessage(task.error)}</p>}
+    {Object.keys(metrics.phases).length>0 && <details className="mt-3 text-xs text-ink-400">
+      <summary className="cursor-pointer">أوقات المراحل المسجّلة</summary>
+      <ul className="mt-2 space-y-1">{Object.entries(metrics.phases).map(([phase,m])=><li key={phase}>{PHASE_LABELS[phase as keyof typeof PHASE_LABELS]}: {(m.duration_ms/1000).toFixed(1)} ثانية · {m.completed} خطوة مكتملة{m.failed?` · ${m.failed} متعثرة`:''}</li>)}</ul>
+      <p className="mt-2">الأوقات دي للخطوات المقاسة؛ الوقت الكلي بيشمل انتظار التشغيل في الخلفية.</p>
+    </details>}
     {own && (stoppable || restartable || deletable) && <div className="flex flex-wrap gap-2 mt-4">
       {stoppable && <Button variant="danger" size="sm" disabled={Boolean(busy)} onClick={() => void control('cancel')} className="flex gap-2 items-center">{busy === 'cancel' ? <Spinner size={14} /> : <CircleStop size={14} />}إلغاء الطلب</Button>}
       {restartable && <Button variant="secondary" size="sm" disabled={Boolean(busy)} onClick={() => void control('restart')} className="flex gap-2 items-center">{busy === 'restart' ? <Spinner size={14} /> : <RotateCcw size={14} />}إعادة تنفيذ الطلب</Button>}

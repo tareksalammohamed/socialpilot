@@ -10,7 +10,7 @@ import type { AgentContext, ToolCall } from '../ai-gateway/agent/types.ts';
 const url = Deno.env.get('SUPABASE_URL') ?? '';
 const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const db = createClient(url, key, { auth: { persistSession: false } });
-type Task = { created_at: string; id: string; workspace_id: string; user_id: string; task_kind: string; payload: Record<string, unknown>; checkpoint: Record<string, unknown> | null; attempt_count: number; max_attempts: number };
+type Task = { created_at: string; id: string; workspace_id: string; user_id: string; task_kind: string; payload: Record<string, unknown>; checkpoint: Record<string, unknown> | null; ai_steps?: Record<string, unknown>; attempt_count: number; max_attempts: number };
 
 async function call(path: string, body: unknown, task?: Task, worker?: string): Promise<Record<string, unknown>> {
   const response = await fetch(`${url}/functions/v1/${path}`, {
@@ -24,7 +24,7 @@ async function call(path: string, body: unknown, task?: Task, worker?: string): 
 }
 
 async function execute(task: Task, worker: string): Promise<void> {
-  const progress = new DurableSteps(db, task.id, worker, {});
+  const progress = new DurableSteps(db, task.id, worker, task.ai_steps ?? {});
   try {
     await progress.report({ phase: 'preparing', label: 'التحقق من الطلب وتجهيز بيانات التنفيذ' });
     const { data: member } = await db.from('workspace_members').select('role').eq('workspace_id', task.workspace_id).eq('user_id', task.user_id).maybeSingle();

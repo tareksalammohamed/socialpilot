@@ -6,7 +6,7 @@ export type DurableTask = {
   payload: Record<string, unknown>; result: Record<string, unknown> | null;
   error: string | null; created_at: string; updated_at?: string; started_at?: string; completed_at?: string; available_at?: string; result_type?: string | null;
   archived_at?: string | null;
-  progress?: { phase?: string; label?: string; detail?: string; current?: number; total?: number; provider?: string; model?: string; attempt?: number; updated_at?: string };
+  progress?: { phase?: string; label?: string; detail?: string; current?: number; total?: number; provider?: string; model?: string; attempt?: number; updated_at?: string; phase_started_at?: string; phase_completed_at?: string; metrics?: import('../../supabase/functions/_shared/execution-metrics').ExecutionMetrics };
 };
 
 export async function enqueueTask(workspaceId: string, kind: string, payload: Record<string, unknown>): Promise<string> {

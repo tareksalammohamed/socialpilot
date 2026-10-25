@@ -6,3 +6,5 @@ export * from './supabase.js';
 export { findVariantCalendar, loadContentPage, loadCalendarWeek, loadContentSummary } from '../../src/lib/contentQueries';
 
 export { loadInboxPage, loadMessagePage, mergeInboxMessages } from '../../src/lib/inboxQueries';
+
+export { SuperAdminScreen } from '../../src/screens/SuperAdminScreen';
