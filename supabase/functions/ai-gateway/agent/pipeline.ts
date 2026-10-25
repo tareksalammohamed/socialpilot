@@ -68,7 +68,7 @@ function parsePlannerOutput(raw: string): PlannerOutput {
   return parseStructured(raw) as PlannerOutput;
 }
 
-async function planTurn(supabase: SupabaseClient, req: AgentRequest): Promise<PlannerOutput> {
+async function planTurn(supabase: SupabaseClient, req: AgentRequest, durable?: DurableSteps): Promise<PlannerOutput> {
   const capabilities: CapabilityRequest = {
     requiredCapabilities: ['structured_output'],
     allowValidatedJsonFallback: true,
@@ -76,6 +76,7 @@ async function planTurn(supabase: SupabaseClient, req: AgentRequest): Promise<Pl
   };
   const result = await routeAndRun(supabase, {
     ...capabilities,
+    onAttempt:durable?attempt=>durable.report(attempt):undefined,
     systemPrompt: plannerSystemPrompt(),
     userPrompt: plannerUserPrompt(req),
     jsonMode: true,
@@ -156,7 +157,7 @@ export async function runAgentTurn(
     req=creationDefaults(req,[...new Set((data??[]).map(account=>String(account.platform)))].filter(platform=>['facebook','instagram','linkedin','x','telegram'].includes(platform)));
   }
   const direct=(directEditorialPlan(req.message,req.context) ?? directCreationPlan(req)) as PlannerOutput|null;
-  const planned = direct ?? (durable ? await durable.run('planner', () => planTurn(supabase, req)) : await planTurn(supabase, req));
+  const planned = direct ?? (durable ? await durable.run('planner', () => planTurn(supabase, req, durable)) : await planTurn(supabase, req));
 
   if (planned.clarifyingQuestion) {
     return {

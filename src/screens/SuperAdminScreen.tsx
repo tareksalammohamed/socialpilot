@@ -1,3 +1,4 @@
+import { PHASE_LABELS } from '../../supabase/functions/_shared/execution-metrics';
 import { useEffect, useState } from 'react';
 import {
   ChevronRight, Plus, RefreshCw, Trash2, CheckCircle2, XCircle,
@@ -363,6 +364,15 @@ export function SuperAdminScreen({ onBack }: { onBack: () => void }) {
           <ErrorBanner message={error} />
         </div>
       )}
+
+      {usage?.performance_unavailable && <p role="status" className="text-warning-300 text-xs mb-3">تعذر تحميل قياسات الأداء؛ بيانات الاستخدام متاحة.</p>}
+      {usage?.performance && <Card className="mb-4">
+        <p className="text-ink-100 text-sm font-medium">أداء طلبات الإنشاء المكتملة</p>
+        <p className="text-ink-400 text-xs mt-1">{usage.performance.measured_tasks} طلب بقياسات مراحل من آخر {usage.performance.sampled_completed} طلب مكتمل. القياس متاح للطلبات الجديدة.</p>
+        {usage.performance.total_p50_ms!==null && <p className="text-brand-300 text-xs mt-2">الزمن الكلي: نصف العينة خلال {Math.round(usage.performance.total_p50_ms/1000)} ثانية، و95٪ خلال {Math.round((usage.performance.total_p95_ms??0)/1000)} ثانية ({usage.performance.latency_samples} طلب).</p>}
+        {usage.performance.initial_queue_average_ms!==null && <p className="text-ink-400 text-xs mt-1">متوسط انتظار بدء التنفيذ: {Math.round(usage.performance.initial_queue_average_ms/1000)} ثانية. الزمن الكلي يشمل الانتظار بين خطوات الخلفية.</p>}
+        <div className="overflow-x-auto mt-3"><table className="w-full text-xs text-right"><thead className="text-ink-400"><tr><th className="py-2">المرحلة</th><th>متوسط زمن الخطوة</th><th>الخطوات المتعثرة</th><th>محاولات النماذج المسجّلة</th></tr></thead><tbody>{Object.entries(usage.performance.phases).map(([phase,m])=><tr key={phase} className="border-t border-ink-800 text-ink-200"><td className="py-2">{PHASE_LABELS[phase as keyof typeof PHASE_LABELS]}</td><td>{(m.duration_ms/Math.max(1,m.completed+m.failed)/1000).toFixed(1)} ثانية</td><td>{m.failed}</td><td>{m.reported_model_attempts}</td></tr>)}</tbody></table></div>
+      </Card>}
 
       {/* Usage summary */}
       {usage && (

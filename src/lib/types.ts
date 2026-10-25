@@ -483,6 +483,8 @@ export type SocialPlatformApp = {
 };
 
 export type AiUsageSummary = {
+  performance?: import('../../supabase/functions/_shared/execution-metrics').TaskPerformance | null;
+  performance_unavailable?: boolean;
   totals: { requests: number; tokens: number; cost: number; fallbacks: number; failures: number };
   recent: Array<{
     provider: string | null;
