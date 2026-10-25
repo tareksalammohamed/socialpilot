@@ -11,7 +11,7 @@ export function isEditorialFollowup(message: string): boolean {
   if (/(?:احذف|امسح|شيل)\s+(?:الطلب|الحملة|الحمله|البوست|المنشور|المحتوى)(?:\s|$)|\b(?:delete|remove)\s+(?:the\s+)?(?:post|campaign|request)\b/iu.test(text)) return false;
   if (/(?:اكتب|اعمل|انشئ|الف)\s*(?:لي\s*|ليا\s*)?(?:بوست|منشور|حملة|حمله|محتوى)|\b(?:write|create|draft)\s+(?:a\s+)?(?:post|campaign)\b/iu.test(text)) return false;
   if (/حملة جديدة|حمله جديده|بوست جديد|منشور جديد|new\s+(?:post|campaign)/iu.test(text)) return false;
-  if (/(?:^|\s)(?:عدل|غير|خلي|خلى|خليها|خليه|امسح|احذف|شيل|اعد صياغ[ةه]?|صياغ[ةه]|راجع|دقق|اختصر|اختصره|اختصرها|قصره|قصرها|طوله|طولها|بس[طّ]|بسطه|بسطها|rewrite|revise|remove|shorten|expand|simplify|only)(?:\s|$)/iu.test(text)) return true;
+  if (/(?:^|\s)(?:عدل|غير|خلي|خلى|خليها|خليه|امسح|احذف|شيل|اعد صياغ[ةه]?|صياغ[ةه]|راجع|دقق|اختصر|اختصره|اختصرها|قصره|قصرها|طوله|طولها|بسط|بسطه|بسطها|rewrite|revise|remove|shorten|expand|simplify|only)(?:\s|$)/iu.test(text)) return true;
   // A terse correction still has an unambiguous existing-content meaning.
   return /^(?:بالمصري|بالعامية|بالعاميه|بالفصحى|بالانجليزي|بالانجليزية|بالانجليزيه)(?:\s|$)/u.test(text)
     || revisionPlatforms(message).included.length > 0 || revisionPlatforms(message).excluded.length > 0;
